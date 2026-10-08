@@ -15,7 +15,8 @@
     "electron:dev": "electron .",
     "electron:test": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --publish never",
-    "publish:desktop": "npm run build && electron-builder --win --publish always"
+    "publish:desktop": "npm run build && electron-builder --win --publish always",
+    "test": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.1",
@@ -32,5 +33,6 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "type": "module"
 }
