@@ -60,6 +60,10 @@ export function validatePatient(v) {
   if (!v.given_names || v.given_names.trim().length < 1) return 'Given name(s) required.'
   if (!normalizePhone(v.phone)) return 'Enter a valid Nigerian phone number (e.g. 0803 123 4567).'
   if (v.dob && !/^\d{4}-\d{2}-\d{2}$/.test(v.dob)) return 'Date of birth must be a real date.'
+  if (!v.next_of_kin_first_name || v.next_of_kin_first_name.trim().length < 1) return 'Next of kin first name is required.'
+  if (!v.next_of_kin_last_name || v.next_of_kin_last_name.trim().length < 1) return 'Next of kin last name is required.'
+  if (!normalizePhone(v.next_of_kin_phone)) return 'Enter a valid Nigerian phone number for next of kin (e.g. 0803 123 4567).'
+  if (!v.next_of_kin_address || v.next_of_kin_address.trim().length < 5) return 'Next of kin address is required.'
   return null
 }
 
@@ -79,6 +83,18 @@ function fullName(r) {
   return [r.given_names, r.surname].filter(Boolean).join(' ').trim()
 }
 
+function nextOfKinName(r) {
+  return [r.next_of_kin_first_name, r.next_of_kin_last_name].filter(Boolean).join(' ').trim()
+}
+
+function allergyArrayToString(arr) {
+  if (!arr) return 'None known'
+  if (Array.isArray(arr)) {
+    return arr.length > 0 ? arr.join(', ') : 'None known'
+  }
+  return String(arr || '').trim() || 'None known'
+}
+
 export function toPatientRow(r) {
   return {
     pid: r.patient_id,
@@ -95,7 +111,16 @@ export function toPatientRow(r) {
     payer: r.payer || 'Self-pay',
     address: r.address || '',
     blood_group: r.blood_group || '',
-    allergy: r.allergy || '',
+    genotype: r.genotype || '',
+    allergy: Array.isArray(r.allergy) ? r.allergy : (r.allergy || []),
+    allergy_display: allergyArrayToString(r.allergy),
+    occupation: r.occupation || '',
+    next_of_kin_first_name: r.next_of_kin_first_name || '',
+    next_of_kin_last_name: r.next_of_kin_last_name || '',
+    next_of_kin_name: nextOfKinName(r),
+    next_of_kin_phone: r.next_of_kin_phone || '',
+    next_of_kin_phone_key: r.next_of_kin_phone_key || '',
+    next_of_kin_address: r.next_of_kin_address || '',
     status: r.status === 'active' ? 'Active' : (r.status || 'Active'),
     registered: tsMillis(r.created_at),
     raw: r,
@@ -132,6 +157,48 @@ export async function listPatientEncounters(pid) {
   return rows
 }
 
+// ---- open-encounter duplicate check ---------------------------------------
+// Mirrors consultationService (kept local to avoid a circular import:
+// consultationService imports listOrgPatients/createPatientDoc from here).
+// Open = any status other than `closed` (case-insensitive), covering both
+// shapes in this collection (`arrived`… from Consultations, `Open` from
+// Patient 360).
+export function isEncounterOpenStatus(status) {
+  return String(status || '').trim().toLowerCase() !== 'closed'
+}
+
+export async function findOpenEncounterForPatient(pid, orgId = '') {
+  if (!pid) return null
+  let rows = []
+  try {
+    rows = await listPatientEncounters(pid)
+  } catch (e) {
+    console.warn('[patients] open-encounter check read failed:', e?.message)
+    return null
+  }
+  const open = rows.filter((r) => {
+    if (!isEncounterOpenStatus(r?.status)) return false
+    const rowOrg = r?.organization_id || ''
+    if (orgId && rowOrg && rowOrg !== orgId) return false
+    return true
+  })
+  return open.length ? open[0] : null
+}
+
+export function openEncounterExistsError(existing) {
+  let when = 'date unknown'
+  try {
+    const m = tsMillis(existing?.created_at)
+    if (m) when = new Date(m).toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' })
+  } catch { /* keep fallback */ }
+  const ref = existing?.id ? ' (' + String(existing.id).slice(0, 8) + '…' : ''
+  const status = existing?.status ? ', ' + existing.status : ''
+  return new Error(
+    'This patient already has an open encounter' + ref + status + ', opened ' + when +
+    '). Close it before opening a new one.'
+  )
+}
+
 // Generic child read: every clinical collection stores patient_id, so one
 // equality filter (no composite index needed) fetches a patient's rows.
 export async function listPatientDocs(coll, pid) {
@@ -152,6 +219,12 @@ export async function createPatientDoc(coll, pid, data, cap) {
   if (!activeOrg) throw new Error('No hospital selected.')
   if (cap && !can(myActiveMembership(), cap)) {
     throw new Error('Your role cannot do this (missing "' + cap + '" capability). Ask an administrator.')
+  }
+  // Duplicate guard: one open encounter per patient per hospital. Rejects the
+  // create so the caller must close the existing encounter first.
+  if (coll === 'encounters') {
+    const existing = await findOpenEncounterForPatient(pid, activeOrg)
+    if (existing) throw openEncounterExistsError(existing)
   }
   const ref = doc(collection(db, coll))
   await setDoc(ref, {
@@ -325,12 +398,16 @@ export async function registerPatient(input) {
   if (invalid) throw new Error(invalid)
 
   const key = phoneKey(input.phone)
-  const dupInfo = await findDuplicate(activeOrg, input.surname, input.given_names, key)
-  if (dupInfo) {
-    const warning = duplicateWarning(dupInfo)
-    // Return warning info so the UI can show it and let the user decide.
-    // The caller (UI) can choose to proceed or abort.
-    return { warning, existing: dupInfo.existing }
+  const kinKey = phoneKey(input.next_of_kin_phone)
+  const force = input.force === true
+  if (!force) {
+    const dupInfo = await findDuplicate(activeOrg, input.surname, input.given_names, key)
+    if (dupInfo) {
+      const warning = duplicateWarning(dupInfo)
+      // Return warning info so the UI can show it and let the user decide.
+      // The caller (UI) can choose to proceed or abort.
+      return { warning, existing: dupInfo.existing }
+    }
   }
 
   const pid = doc(collection(db, 'patients')).id
@@ -346,8 +423,15 @@ export async function registerPatient(input) {
     dob: input.dob || '',
     address: String(input.address || '').trim(),
     blood_group: input.blood_group || '',
+    genotype: input.genotype || '',
     payer: input.payer || 'Self-pay',
-    allergy: String(input.allergy || '').trim() || 'None known',
+    allergy: Array.isArray(input.allergy) ? input.allergy : (String(input.allergy || '').trim() || 'None known'),
+    occupation: String(input.occupation || '').trim(),
+    next_of_kin_first_name: String(input.next_of_kin_first_name || '').trim(),
+    next_of_kin_last_name: String(input.next_of_kin_last_name || '').trim(),
+    next_of_kin_phone: kinKey ? '+234' + kinKey : '',
+    next_of_kin_phone_key: kinKey,
+    next_of_kin_address: String(input.next_of_kin_address || '').trim(),
     status: 'active',
   }
   const batch = writeBatch(db)
@@ -390,6 +474,7 @@ export async function updatePatient(pid, input) {
   if (invalid) throw new Error(invalid)
 
   const key = phoneKey(input.phone)
+  const kinKey = phoneKey(input.next_of_kin_phone)
   const dupInfo = await findDuplicate(activeOrg, input.surname, input.given_names, key, pid)
   if (dupInfo) {
     const warning = duplicateWarning(dupInfo)
@@ -408,8 +493,15 @@ export async function updatePatient(pid, input) {
     dob: input.dob || '',
     address: String(input.address || '').trim(),
     blood_group: input.blood_group || '',
+    genotype: input.genotype || '',
     payer: input.payer || 'Self-pay',
-    allergy: String(input.allergy || '').trim() || 'None known',
+    allergy: Array.isArray(input.allergy) ? input.allergy : (String(input.allergy || '').trim() || 'None known'),
+    occupation: String(input.occupation || '').trim(),
+    next_of_kin_first_name: String(input.next_of_kin_first_name || '').trim(),
+    next_of_kin_last_name: String(input.next_of_kin_last_name || '').trim(),
+    next_of_kin_phone: kinKey ? '+234' + kinKey : '',
+    next_of_kin_phone_key: kinKey,
+    next_of_kin_address: String(input.next_of_kin_address || '').trim(),
     updated_at: serverTimestamp(),
   }
 
@@ -488,23 +580,18 @@ export async function searchPatientsGlobally(surname, given_names, phone) {
     return nameMatch && phoneMatch
   })
 
-  // --- Cloud matches (all other hospitals) ---
-  // Query the global patients collection, excluding the current hospital.
   const cloudMatches = []
   try {
     const patientsCol = collection(db, 'patients')
-    const q = query(
-      patientsCol,
-      where('organization_id', '!=', activeOrg),
-      where('status', '==', 'active')
-    )
+    const q = query(patientsCol, where('status', '==', 'active'))
     const snap = await getDocs(q)
-    const allOther = snap.docs.map((d) => {
-      const data = d.data() || {}
-      const pid = d.id
-      return toPatientRow({ ...data, patient_id: pid })
-    })
-    // Filter by name + phone similarity
+    const allOther = snap.docs
+      .map((d) => {
+        const data = d.data() || {}
+        const pid = d.id
+        return toPatientRow({ ...data, patient_id: pid })
+      })
+      .filter((r) => r.organization_id !== activeOrg)
     cloudMatches.push(
       ...allOther.filter((r) => {
         const nameMatch =
@@ -531,4 +618,33 @@ export async function searchPatientsGlobally(surname, given_names, phone) {
   cloudMatches.sort((a, b) => a.name.localeCompare(b.name))
 
   return { local: localMatches, cloud: cloudMatches }
+}
+
+export async function getAllAllergiesFromDB(orgId) {
+  try {
+    const rows = await listOrgPatients(orgId || authStore.getState().activeOrg)
+    const seen = new Set()
+    const results = []
+    for (const r of rows) {
+      let arr = []
+      if (Array.isArray(r.allergy)) arr = r.allergy
+      else if (r.allergy && typeof r.allergy === 'string') {
+        const s = r.allergy.trim()
+        if (!s || s.toLowerCase() === 'none known') arr = []
+        else arr = s.split(/[,;]/).map(s => s.trim()).filter(Boolean)
+      }
+      for (const a of arr) {
+        const key = a.toLowerCase()
+        if (key && !seen.has(key)) {
+          seen.add(key)
+          results.push(a)
+        }
+      }
+    }
+    results.sort((a, b) => a.localeCompare(b))
+    return results
+  } catch (e) {
+    console.warn('[patients] getAllAllergiesFromDB failed:', e?.message)
+    return []
+  }
 }

@@ -3,32 +3,25 @@ import { shell, formModal, toast, closeModal, wireToast } from '../components/sh
 import { authStore } from '../store/authStore.js'
 import {
   listOrgEncounters, createEncounter, updateEncounterStatus, addDiagnosis, addPrescription, addLabOrder, myEncounterCaps,
+  findOpenEncounterForPatient, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_TYPES, ENCOUNTER_STATUS_FLOW_META,
 } from '../services/consultationService.js'
 import { listOrgPatients, formatPhone } from '../services/patientService.js'
 import { createLabOrder as createLabOrderDoc, myLabCaps } from '../services/laboratoryService.js'
 import { myBillingCaps } from '../services/billingService.js'
-import { myActiveMembership } from '../services/authService.js'
+import { myActiveMembership, getClinicalStaff } from '../services/authService.js'
 import { can } from '../features/admin/roles.js'
 import { navigate } from '../router.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 
-const ENCOUNTER_TYPES = ['GOPD review', 'Antenatal', 'Emergency', 'Follow-up']
-const CLINICIANS = ['Dr. A. Balogun', 'Dr. N. Eze', 'Dr. K. Adamu']
 const MEDS = ['Amlodipine 5mg', 'Lisinopril 10mg', 'Artemether/Lumefantrine', 'Amoxicillin 500mg', 'Metformin 500mg']
 const LAB_PANELS = ['FBC + ESR', 'Malaria RDT + Widal', 'Urinalysis + Culture', 'Lipid profile + HbA1c']
 
 // Encounter statuses are stored lowercase, so the shared statusBadge() (whose
-// keys are capitalised) rendered them as bare uncoloured pills. Map them once,
-// here, to a readable label + tone.
-const STATUS_FLOW = [
-  { key: 'arrived', label: 'Arrived', step: 'Arrival', tone: 'warn' },
-  { key: 'vitals-taken', label: 'Vitals taken', step: 'Vitals', tone: 'info' },
-  { key: 'in-consultation', label: 'In consultation', step: 'Consultation', tone: 'info' },
-  { key: 'diagnosed', label: 'Diagnosed', step: 'Diagnosis', tone: 'info' },
-  { key: 'planned', label: 'Plan set', step: 'Plan', tone: 'ok' },
-  { key: 'closed', label: 'Closed', step: 'Close', tone: 'ok' },
-]
+// keys are capitalised) rendered them as bare uncoloured pills. The label +
+// tone mapping comes from features/encounters/domain.js, so this view can
+// never drift out of sync with the workflow the service actually walks.
+const STATUS_FLOW = ENCOUNTER_STATUS_FLOW_META
 
 function encLabel(status) {
   const m = STATUS_FLOW.find((s) => s.key === status)
@@ -41,14 +34,18 @@ function encBadge(status) {
   return '<span class="pill ' + m.tone + '">' + esc(m.label) + '</span>'
 }
 
-function waitedFor(ts) {
+function waitedFor(ts, endTs) {
   if (!ts) return '—'
-  const mins = Math.max(0, Math.floor((Date.now() - ts) / 60000))
-  if (mins < 1) return 'just now'
-  if (mins < 60) return mins + 'm'
-  const h = Math.floor(mins / 60)
-  if (h < 24) return h + 'h ' + (mins % 60) + 'm'
-  return Math.floor(h / 24) + 'd'
+  const end = endTs || Date.now()
+  const secs = Math.max(0, Math.floor((end - ts) / 1000))
+  const d = Math.floor(secs / 86400)
+  const h = Math.floor((secs % 86400) / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  const s = secs % 60
+  if (d) return d + 'd:' + h + 'h:' + m + 'm:' + s + 's'
+  if (h) return h + 'h:' + m + 'm:' + s + 's'
+  if (m) return m + 'm:' + s + 's'
+  return s + 's'
 }
 
 export async function ConsultationsView(app, params = {}) {
@@ -81,7 +78,10 @@ export async function ConsultationsView(app, params = {}) {
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>' +
       (caps.canCreate ? '<button class="btn" id="startBtn">+ Start encounter</button>' : ''),
     body:
-      '<div class="grid2x"><div class="card"><div class="card-head"><h3>Today\'s queue</h3><span class="pill info" id="enc-count">0 waiting</span></div>' +
+      '<div class="grid2x"><div class="card"><div class="card-head"><h3>Encounter queue</h3><span class="pill info" id="enc-count">0 open</span></div>' +
+      '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="qSearch" placeholder="Search patient or MRN…" style="max-width:220px">' +
+      '<select class="input" id="qStatus" style="max-width:170px"><option value="open" selected>Open encounters</option><option value="closed">Closed</option><option value="all">All</option>' +
+      STATUS_FLOW.map((s) => '<option value="' + s.key + '">' + esc(s.label) + '</option>').join('') + '</select></div>' +
       '<div class="tblwrap"><table class="tbl" id="enc-tbl"><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr>' +
       '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
       '</table></div></div>' +
@@ -90,9 +90,10 @@ export async function ConsultationsView(app, params = {}) {
       '<div class="flow" id="enc-flow">' + STATUS_FLOW.map((s) => '<span class="fstep">' + esc(s.step) + '</span><span class="farrow">→</span>').join('').replace(/<span class="farrow">→<\/span>$/, '') + '</div>' +
       '<div id="encWho"></div>' +
       '<div class="kv"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div></div><br/>' +
-      '<label class="fld full"><span>Clinical note (SOAP)</span><textarea class="input" id="enc-note" rows="4" placeholder="S: … O: … A: … P: …"></textarea></label><br/>' +
-      '<div class="toolbar"><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
-      (caps.canEdit ? '<button class="btn sm" id="closeEncB">Close encounter →</button>' : '') + '</div></div></div>',
+      '<label class="fld full"><span>Clinical note (SOAP)</span><textarea class="input" id="enc-note" rows="4" placeholder="S: … O: … A: … P: …"></textarea></label><div class="toolbar" style="margin-top:6px"><button class="btn sm" id="saveNoteB">Save note</button><span class="mut" id="noteState"></span></div><br/>' +
+      '<div id="planBox" hidden><div class="fld full"><span>Treatment plan</span><div class="input" id="planView" style="white-space:pre-wrap"></div></div></div>' +
+      '<div class="toolbar"><button class="btn ghost sm" id="vitalsB">+ Vitals</button><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="planB">+ Plan</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
+      (caps.canEdit ? '<button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm" id="closeEncB">Close encounter →</button>' : '') + '</div></div></div>',
   })
 
   // The queue only stores patient_name, so the readable identity (MRN, age,
@@ -126,7 +127,7 @@ export async function ConsultationsView(app, params = {}) {
       patients = pats
       pIndex = new Map(patients.map((p) => [p.pid, p]))
       if (!selectedEncounter && encounters.length) {
-        selectedEncounter = (wantEnc && encounters.find((e) => e.id === wantEnc)) || encounters[0]
+        selectedEncounter = (wantEnc && encounters.find((e) => e.id === wantEnc)) || encounters.find((e) => e.status !== 'closed') || encounters[0]
       }
       if (selectedEncounter) {
         const fresh = encounters.find((e) => e.id === selectedEncounter.id)
@@ -140,25 +141,46 @@ export async function ConsultationsView(app, params = {}) {
     }
   }
 
+  let noteDirty = false
+  function visibleEncounters() {
+    const q = String(document.getElementById('qSearch')?.value || '').trim().toLowerCase()
+    const mode = document.getElementById('qStatus')?.value || 'open'
+    return encounters.filter((e) => {
+      if (mode === 'open' && e.status === 'closed') return false
+      if (mode === 'closed' && e.status !== 'closed') return false
+      if (mode !== 'all' && mode !== 'open' && mode !== 'closed' && e.status !== mode) return false
+      if (q) {
+        const m = patientMeta(e)
+        const hay = (m.name + ' ' + m.mrn + ' ' + m.pid).toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      return true
+    })
+  }
+
   function renderQueue() {
     const tbl = document.getElementById('enc-tbl')
     const cnt = document.getElementById('enc-count')
-    if (cnt) cnt.textContent = encounters.length + ' waiting'
+    const openN = encounters.filter((e) => e.status !== 'closed').length
+    if (cnt) cnt.textContent = openN + ' open · ' + encounters.length + ' total'
     if (!tbl) return
     const head = '<tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr>'
-    const rows = encounters.map((e) => {
+    const shown = visibleEncounters()
+    const rows = shown.map((e) => {
       const m = patientMeta(e)
       const who = [m.age !== '' && m.age != null ? m.age + 'y' : '', m.sex].filter(Boolean).join(' · ')
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '">' +
         '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
         '<td><div>' + esc(m.mrn) + '</div><div class="mut">' + esc(who || 'No demographics on file') + '</div>' +
         (m.phone ? '<div class="mut">' + esc(m.phone) + '</div>' : '') + '</td>' +
-        '<td class="mut">' + esc(waitedFor(e.createdAt)) + '</td>' +
+        '<td class="mut">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
         '<td>' + encBadge(e.status) + '</td></tr>'
     }).join('')
-    tbl.innerHTML = head + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters yet</td></tr>')
+    tbl.innerHTML = head + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter</td></tr>')
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
       r.onclick = () => {
+        if (noteDirty && !window.confirm('You have an unsaved note. Switch encounters anyway?')) return
+        noteDirty = false
         selectedEncounter = encounters.find((e) => e.id === r.getAttribute('data-id')) || null
         renderQueue()
         renderWorkspace()
@@ -196,14 +218,35 @@ export async function ConsultationsView(app, params = {}) {
           : '') +
         '<div class="toolbar" style="margin:10px 0 12px">' +
         (m.pid ? '<a class="btn ghost sm" href="#/patients/' + encodeURIComponent(m.pid) + '">Open patient record →</a>' : '') +
-        '<span class="mut">Encounter ' + esc(e.id.slice(0, 8)) + ' · ' + esc(encLabel(e.status)) + '</span>' +
+        '<span class="mut">Encounter ' + esc(e.id.slice(0, 8)) + ' · ' + esc(encLabel(e.status)) + (e.type ? ' · ' + esc(e.type) : '') + (e.clinician ? ' · ' + esc(e.clinician) : '') + '</span>' +
         '</div>'
     }
     paintFlow(STATUS_FLOW.findIndex((s) => s.key === e.status))
+    // Label Advance with where it actually goes, so the fallback is never a
+    // blind step into an unknown stage.
+    const advBtn = document.getElementById('advB')
+    if (advBtn) {
+      const ni = STATUS_FLOW.findIndex((s) => s.key === e.status) + 1
+      const nextStep = STATUS_FLOW[ni]
+      advBtn.textContent = nextStep && e.status !== 'closed' ? 'Advance → ' + nextStep.label : 'Advance →'
+    }
     const vitals = e.vitals || {}
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || '—' }
     set('v-bp', vitals.BP); set('v-pulse', vitals.Pulse); set('v-temp', vitals.Temp); set('v-spo2', vitals.SpO2)
     if (noteEl && document.activeElement !== noteEl) noteEl.value = e.chiefComplaint || e.diagnosis || ''
+    // The saved plan is data, not an editor — show it read-only when present so
+    // "Plan set" is backed by something the prescriber can actually read back.
+    const planBox = document.getElementById('planBox')
+    const planView = document.getElementById('planView')
+    if (planBox && planView) {
+      if (e.treatmentPlan) {
+        planView.textContent = e.treatmentPlan
+        planBox.hidden = false
+      } else {
+        planView.textContent = ''
+        planBox.hidden = true
+      }
+    }
   }
 
   // Highlight the workflow step the encounter has actually reached.
@@ -217,31 +260,65 @@ export async function ConsultationsView(app, params = {}) {
   function openStartForm() {
     if (!patients.length) { toast('No patients registered yet — register a patient first.'); return }
     const patientOpts = patients.map((p) => ({ value: p.pid, label: p.name + ' · ' + (p.mrn || p.pid) }))
-    formModal({
-      title: 'Start encounter',
-      submitLabel: 'Open encounter →',
-      fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true },
-        { name: 'type', label: 'Type', type: 'select', options: ENCOUNTER_TYPES },
-        { name: 'clinician', label: 'Clinician', type: 'select', options: CLINICIANS },
-      ],
-      onSubmit: async (v) => {
-        try {
-          const sel = patients.find((p) => p.pid === v.patient_id)
-          const created = await createEncounter({
-            patient_id: v.patient_id,
-            patient_name: sel ? sel.name : v.patient_id,
-            status: 'arrived',
-            chief_complaint: '',
-          })
-          closeModal()
-          toast('Encounter started')
-          selectedEncounter = { id: created.id, patientId: v.patient_id, patientName: sel ? sel.name : v.patient_id, status: 'arrived', vitals: {}, chiefComplaint: '', createdAt: Date.now() }
-          await load()
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
+    // Fetch clinical staff for dropdown
+    getClinicalStaff(activeOrg).then((staff) => {
+      const clinicianOptions = staff.length > 0 ? staff : [{ value: '', label: 'No clinical staff found — add staff in Administration' }]
+      formModal({
+        title: 'Start encounter',
+        submitLabel: 'Open encounter →',
+        fields: [
+          { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true },
+          { name: 'type', label: 'Type', type: 'select', options: ENCOUNTER_TYPES },
+          { name: 'clinician', label: 'Clinician', type: 'select', options: clinicianOptions, required: true },
+        ],
+        onSubmit: async (v) => {
+          try {
+            const sel = patients.find((p) => p.pid === v.patient_id)
+            const created = await createEncounter({
+              patient_id: v.patient_id,
+              patient_name: sel ? sel.name : v.patient_id,
+              status: 'arrived',
+              type: v.type || '',
+              clinician: v.clinician || '',
+              chief_complaint: '',
+            })
+            closeModal()
+            toast('Encounter started')
+            selectedEncounter = { id: created.id, patientId: v.patient_id, patientName: sel ? sel.name : v.patient_id, status: 'arrived', vitals: {}, chiefComplaint: '', createdAt: Date.now() }
+            await load()
+          } catch (e) {
+            throw new Error(friendlyWriteError(e))
+          }
+        },
+      })
+      // Live duplicate hint: as soon as a patient with an open encounter is
+      // picked, warn inline so the user knows to close it first instead of
+      // filling the rest of the form and hitting the service rejection.
+      const pidSel = document.querySelector('#fmFields [name="patient_id"]')
+      const errLine = () => document.getElementById('fmError')
+      if (pidSel) {
+        const checkPid = async () => {
+          const el = errLine()
+          const pid = String(pidSel.value || '')
+          if (!pid) { if (el && el.dataset.dup === '1') { el.textContent = ''; delete el.dataset.dup } return }
+          try {
+            const existing = await findOpenEncounterForPatient(pid, activeOrg)
+            if (existing && errLine()) {
+              errLine().textContent =
+                'This patient already has an open encounter (' + String(existing.id).slice(0, 8) + '… · ' + (existing.status || 'open') +
+                '). Close it before opening a new one.'
+              errLine().dataset.dup = '1'
+            } else if (el && el.dataset.dup === '1') {
+              el.textContent = ''
+              delete el.dataset.dup
+            }
+          } catch { /* read failed (offline) — leave the service guard to decide */ }
         }
-      },
+        pidSel.addEventListener('change', checkPid)
+        checkPid()
+      }
+    }).catch((e) => {
+      toast('Failed to load clinical staff: ' + friendlyWriteError(e))
     })
   }
 
@@ -260,6 +337,9 @@ export async function ConsultationsView(app, params = {}) {
   hideIfNoCap('dxB', canDx)
   hideIfNoCap('rxB', canRx)
   hideIfNoCap('labB', canLab)
+  // The plan has no dedicated capability; it is part of the encounter, so it
+  // is gated on `encounter.edit` like the note and status updates.
+  hideIfNoCap('planB', caps.canEdit)
   // Billing lives in its own module behind the `billing.invoice` capability, so
   // a doctor without it must not be offered a dead button.
   hideIfNoCap('billB', billingCaps.canInvoice)
@@ -304,18 +384,47 @@ export async function ConsultationsView(app, params = {}) {
     })
   }
 
-  function openPrescriptionForm() {
+  function openVitalsForm() {
+    if (!selectedEncounter) { toast('Select an encounter first'); return }
+    formModal({
+      title: 'Record vitals',
+      submitLabel: 'Save vitals',
+      fields: [
+        { name: 'bp_systolic', label: 'BP systolic', type: 'number', placeholder: '120' },
+        { name: 'bp_diastolic', label: 'BP diastolic', type: 'number', placeholder: '80' },
+        { name: 'pulse', label: 'Pulse (bpm)', type: 'number', placeholder: '78' },
+        { name: 'temp_c', label: 'Temp °C', type: 'number', placeholder: '36.8' },
+        { name: 'spo2', label: 'SpO₂ %', type: 'number', placeholder: '98' },
+        { name: 'note', label: 'Note', full: true, placeholder: 'Optional' },
+      ],
+      onSubmit: async (v) => {
+        const num = (x) => { const n = parseFloat(x); return Number.isFinite(n) ? n : null }
+        try {
+          await recordEncounterVitals(selectedEncounter.id, {
+            bp_systolic: num(v.bp_systolic), bp_diastolic: num(v.bp_diastolic),
+            pulse: num(v.pulse), temp_c: num(v.temp_c), spo2: num(v.spo2), note: v.note || '',
+          })
+        } catch (e) { throw new Error(friendlyWriteError(e)) }
+        closeModal()
+        toast('Vitals saved')
+        await load()
+      },
+    })
+  }
+
+  function openMedicineForm() {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
     if (!canRx) { toast(friendlyWriteError({ code: 'permission-denied' })); return }
     formModal({
       title: 'New prescription',
       submitLabel: 'Prescribe',
       fields: [
-        { name: 'medicine', label: 'Medicine', type: 'select', options: MEDS, full: true },
+        { name: 'medicine', label: 'Medicine', required: true, full: true, list: 'medList', listOptions: MEDS, placeholder: 'Search or type a medicine' },
         { name: 'dosage', label: 'Dosage', placeholder: 'e.g. 1 tab daily' },
         { name: 'qty', label: 'Qty', placeholder: '30' },
       ],
       onSubmit: async (v) => {
+        if (!v.medicine) throw new Error('Medicine is required.')
         try {
           await addPrescription(selectedEncounter.id, v)
         } catch (e) {
@@ -328,6 +437,34 @@ export async function ConsultationsView(app, params = {}) {
     })
   }
 
+  function openPlanForm() {
+    if (!selectedEncounter) { toast('Select an encounter first'); return }
+    if (!caps.canEdit) { toast(friendlyWriteError({ code: 'permission-denied' })); return }
+    // The plan has no capability of its own — it is part of the encounter, so
+    // it shares `encounter.edit`. Pre-fill with the saved plan so this is an
+    // edit rather than a blind overwrite.
+    formModal({
+      title: 'Treatment plan',
+      submitLabel: 'Save plan',
+      fields: [
+        {
+          name: 'plan', label: 'Plan', type: 'textarea', full: true, required: true,
+          value: selectedEncounter.treatmentPlan || '',
+          placeholder: 'Investigations, treatment, follow-up, referrals…',
+        },
+      ],
+      onSubmit: async (v) => {
+        if (!v.plan) throw new Error('Plan cannot be empty.')
+        try {
+          await addTreatmentPlan(selectedEncounter.id, v.plan)
+        } catch (e) { throw new Error(friendlyWriteError(e)) }
+        closeModal()
+        toast('Plan saved')
+        await load()
+      },
+    })
+  }
+
   function openLabOrderForm() {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
     if (!canLab) { toast(friendlyWriteError({ code: 'permission-denied' })); return }
@@ -335,10 +472,11 @@ export async function ConsultationsView(app, params = {}) {
       title: 'New lab order',
       submitLabel: 'Place order →',
       fields: [
-        { name: 'panel', label: 'Test panel', type: 'select', options: LAB_PANELS, full: true },
+        { name: 'panel', label: 'Test panel', required: true, full: true, list: 'labList', listOptions: LAB_PANELS, placeholder: 'Search or type a panel' },
         { name: 'priority', label: 'Priority', type: 'select', options: ['Routine', 'Urgent', 'STAT'] },
       ],
       onSubmit: async (v) => {
+        if (!v.panel) throw new Error('Test panel is required.')
         // Canonical lab_orders doc (appears in Laboratory queue + patient Labs
         // tab) plus an embedded reference on the encounter. The lab doc is
         // primary; if it fails, nothing is written to the encounter either.
@@ -364,10 +502,49 @@ export async function ConsultationsView(app, params = {}) {
   document.getElementById('refreshBtn').onclick = load
   const startBtn = document.getElementById('startBtn')
   if (startBtn) startBtn.onclick = openStartForm
+  document.getElementById('vitalsB').onclick = openVitalsForm
   document.getElementById('dxB').onclick = openDiagnosisForm
-  document.getElementById('rxB').onclick = openPrescriptionForm
+  document.getElementById('rxB').onclick = openMedicineForm
   document.getElementById('labB').onclick = openLabOrderForm
+  document.getElementById('planB').onclick = openPlanForm
   document.getElementById('billB').onclick = openBilling
+  const advB = document.getElementById('advB')
+  if (advB) advB.onclick = async () => {
+    if (!selectedEncounter) { toast('Select an encounter first'); return }
+    const idx = STATUS_FLOW.findIndex((s) => s.key === selectedEncounter.status)
+    const nextIdx = idx < 0 ? 0 : idx + 1
+    // `closed` is terminal; an unknown status (legacy `Open`) is advanced into
+    // the flow at its first step rather than dead-ending.
+    if (!STATUS_FLOW[nextIdx] || selectedEncounter.status === 'closed') { toast('Encounter is already at the final step'); return }
+    const next = STATUS_FLOW[nextIdx].key
+    try {
+      await updateEncounterStatus(selectedEncounter.id, next)
+      toast('Status → ' + STATUS_FLOW[nextIdx].label)
+      await load()
+    } catch (e) { toast(friendlyWriteError(e, 'Status update failed')) }
+  }
+  document.getElementById('saveNoteB').onclick = async () => {
+    if (!selectedEncounter) { toast('Select an encounter first'); return }
+    const noteEl = document.getElementById('enc-note')
+    try {
+      await updateEncounterNote(selectedEncounter.id, noteEl ? noteEl.value : '')
+      noteDirty = false
+      const st = document.getElementById('noteState')
+      if (st) st.textContent = 'Saved'
+      toast('Note saved')
+      await load()
+    } catch (e) { toast(friendlyWriteError(e, 'Save failed')) }
+  }
+  const noteEl0 = document.getElementById('enc-note')
+  if (noteEl0) noteEl0.addEventListener('input', () => {
+    noteDirty = true
+    const st = document.getElementById('noteState')
+    if (st) st.textContent = 'Unsaved changes'
+  })
+  const qSearch = document.getElementById('qSearch')
+  if (qSearch) qSearch.addEventListener('input', renderQueue)
+  const qStatus = document.getElementById('qStatus')
+  if (qStatus) qStatus.addEventListener('change', renderQueue)
   const closeB = document.getElementById('closeEncB')
   if (closeB) closeB.onclick = async () => {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
@@ -380,4 +557,19 @@ export async function ConsultationsView(app, params = {}) {
   wireToast(app)
 
   await load()
+
+  // Live "Waited" clock: refresh only the Waited cells every second so the
+  // countdown advances without a manual refresh. Self-cleans when navigation
+  // replaces the queue table.
+  const tick = setInterval(() => {
+    const tbl = document.getElementById('enc-tbl')
+    if (!tbl) { clearInterval(tick); return }
+    const shown = visibleEncounters()
+    tbl.querySelectorAll('tr.clickable').forEach((r, i) => {
+      const e = shown[i]
+      if (!e) return
+      const td = r.cells[2]
+      if (td) td.textContent = waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)
+    })
+  }, 1000)
 }

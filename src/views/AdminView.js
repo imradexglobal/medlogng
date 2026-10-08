@@ -112,6 +112,12 @@ export async function AdminView(app) {
     return caps.length + ' caps'
   }
 
+  function roleTooltip(role) {
+    const caps = ROLE_CAPS[role] || []
+    if (caps.includes('*')) return 'All capabilities (*)'
+    return caps.join('\n')
+  }
+
   function statusPill(s) {
     const cls = s === 'active' ? 'ok' : s === 'pending' ? 'warn' : s === 'suspended' ? 'bad' : s === 'rejected' ? 'bad' : s === 'revoked' ? 'bad' : ''
     return '<span class="pill ' + cls + '">' + esc(s) + '</span>'
@@ -119,11 +125,12 @@ export async function AdminView(app) {
 
   function memberRow(m) {
     const self = m.user_id === auth.currentUser?.uid
+    const tooltip = roleTooltip(m.role || '')
     const roleSel = !canManageRoles
-      ? '<strong>' + esc(m.role || '—') + '</strong>'
+      ? '<strong title="' + esc(tooltip) + '">' + esc(m.role || '—') + '</strong>'
       : self
-        ? '<strong>' + esc(m.role || '—') + '</strong><div class="mut">your role — only the other admin can change it</div>'
-        : '<select class="input" data-role-for="' + esc(m.id) + '" style="max-width:190px">' +
+        ? '<strong title="' + esc(tooltip) + '">' + esc(m.role || '—') + '</strong><div class="mut">your role — only the other admin can change it</div>'
+        : '<select class="input" data-role-for="' + esc(m.id) + '" style="max-width:190px" title="' + esc(tooltip) + '">' +
           ROLE_OPTIONS.map((r) => '<option value="' + r + '"' + (m.role === r ? ' selected' : '') + '>' + r + '</option>').join('') + '</select>'
     const flags =
       (m.must_change_password ? ' <span class="pill warn">must change pw</span>' : '') +

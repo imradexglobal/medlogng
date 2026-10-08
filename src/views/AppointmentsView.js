@@ -8,7 +8,7 @@ import { listOrgPatients } from '../services/patientService.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 
-const CLINICS = ['GOPD', 'Antenatal', 'Cardiology', 'Endocrine', 'Pediatrics', 'Surgery', 'Eye', 'ENT']
+const CLINICS = ['General Outpatient Department (GOPD)', 'Antenatal', 'Cardiology', 'Endocrine', 'Pediatrics', 'Surgery', 'Eye', 'ENT']
 const APPOINTMENT_TYPES = ['Review', 'Follow-up', 'Initial consultation', 'Emergency', 'Referral']
 const DOCTORS = ['Dr. A. Balogun', 'Dr. N. Eze', 'Dr. K. Adamu', 'Dr. O. Adeyemo']
 

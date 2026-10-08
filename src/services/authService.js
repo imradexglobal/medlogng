@@ -308,6 +308,8 @@ export async function confirmEmailVerified() {
   if (!u) throw new Error('Sign in first')
   await u.reload()
   if (!u.emailVerified) return 'pending'
+  // Force ID token refresh so request.auth.token.email_verified is true in rules.
+  try { await u.getIdToken(true) } catch {}
   const { memberships } = authStore.getState()
   for (const m of memberships.filter((x) => x.email_verification_required)) {
     try {
@@ -345,4 +347,24 @@ export async function changeOwnPassword(newPw) {
   }
   await logAudit({ action: 'password.changed', organizationId: memberships[0]?.organization_id || 'none' })
   await refreshSession()
+}
+
+// Get active clinical staff for the current organization (doctors, nurses, admins)
+export async function getClinicalStaff(orgId) {
+  const snap = await getDocs(
+    query(
+      collection(db, 'organization_memberships'),
+      where('organization_id', '==', orgId),
+      where('status', '==', 'active')
+    )
+  )
+  const clinicalRoles = ['hospital_admin', 'doctor', 'nurse']
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter((m) => clinicalRoles.includes(m.role))
+    .map((m) => ({
+      value: m.staff_name || m.user_id,
+      label: m.staff_name + (m.role ? ' (' + m.role + ')' : ''),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label))
 }

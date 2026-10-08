@@ -168,7 +168,13 @@ service cloud.firestore {
     match /encounters/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'encounter.create');
-      allow update: if hasCap(resource.data.organization_id, 'encounter.edit');
+      // `encounter.edit` may change anything. `encounter.status.advance` (nurse
+      // triage) may move the workflow forward ONLY — `status` and its
+      // bookkeeping timestamp, nothing else, so a nurse cannot rewrite vitals,
+      // notes, diagnosis or plan data on the encounter.
+      allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
+        || (hasCap(resource.data.organization_id, 'encounter.status.advance')
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at']));
       allow delete: if false;
     }
     match /vitals/{id} {

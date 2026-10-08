@@ -92,7 +92,7 @@ export async function createInvoice(input) {
   // Calculate total using the existing business logic
   // The price catalogue uses fixed prices; we calculate based on item + qty
   const catalogue = [
-    ['GOPD consultation', 'Consult', 5000],   // 5000 kobo = ₦50.00
+    ['General Outpatient Department (GOPD) consultation', 'Consult', 5000],   // 5000 kobo = ₦50.00
     ['Antenatal visit', 'Consult', 8000],    // 8000 kobo = ₦80.00
     ['FBC + ESR', 'Lab', 6500],             // 6500 kobo = ₦65.00
     ['Malaria RDT', 'Lab', 2500],           // 2500 kobo = ₦25.00

@@ -1,5 +1,6 @@
 import './styles.css'
 import './app.css'
+import { auth } from './firebase.js'
 import { authStore } from './store/authStore.js'
 import { initAuthListener } from './services/authService.js'
 import { primePayers } from './services/payerService.js'
@@ -10,6 +11,8 @@ import { RegisterView } from './views/RegisterView.js'
 import { DashboardView } from './views/DashboardView.js'
 import { PatientsView } from './views/PatientsView.js'
 import { PatientDetailView } from './views/PatientDetailView.js'
+import { RegisterPatientView } from './views/RegisterPatientView.js'
+import { EditPatientView } from './views/EditPatientView.js'
 import { AppointmentsView } from './views/AppointmentsView.js'
 import { ConsultationsView } from './views/ConsultationsView.js'
 import { AdmissionsView } from './views/AdmissionsView.js'
@@ -28,7 +31,9 @@ registerRoute('/register', RegisterView, { guest: true })
 registerRoute('/', DashboardView, { auth: true })
 registerRoute('/welcome', DashboardView, { auth: true })
 registerRoute('/patients', PatientsView, { auth: true })
+registerRoute('/patients/new', RegisterPatientView, { auth: true })
 registerRoute('/patients/:id', PatientDetailView, { auth: true })
+registerRoute('/patients/:id/edit', EditPatientView, { auth: true })
 registerRoute('/appointments', AppointmentsView, { auth: true })
 registerRoute('/consultations', ConsultationsView, { auth: true })
 registerRoute('/admissions', AdmissionsView, { auth: true })
@@ -48,12 +53,20 @@ let booted = false
 authStore.subscribe((s) => {
   if (!s.ready || booted) return
   booted = true
-  // Pull the global payer list once per session so every payer dropdown reads
-  // the local copy instead of querying Firestore each time it opens.
-  primePayers()
+  // Wait for auth token to be fully ready (ID token refreshed) before
+  // priming payers — avoids "Missing or insufficient permissions" on the
+  // first read when the token hasn't propagated yet.
+  auth.currentUser?.getIdToken().then(() => {
+    primePayers()
+  }).catch(() => {
+    primePayers()
+  })
   const hash = (window.location.hash || '').replace(/^#/, '')
   if (!hash || hash === '/' || hash === '/welcome') {
     navigate(s.user ? '/' : '/login')
+    // If hash didn't change (e.g. already at #/), handleRoute won't fire
+    // via hashchange — call it directly.
+    handleRoute()
   } else {
     handleRoute()
   }

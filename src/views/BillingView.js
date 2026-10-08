@@ -11,7 +11,7 @@ import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 
 const CATALOGUE = [
-  ['GOPD consultation', 'Consult', 5000],
+  ['General Outpatient Department (GOPD) consultation', 'Consult', 5000],
   ['Antenatal visit', 'Consult', 8000],
   ['FBC + ESR', 'Lab', 6500],
   ['Malaria RDT', 'Lab', 2500],

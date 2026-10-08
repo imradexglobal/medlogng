@@ -147,15 +147,41 @@ export async function LoginView(app, params = {}) {
     if (b) b.onclick = () => setMode('login')
   }
 
+  function renderPasswordField(inputId, labelText, autocomplete, placeholder, type = 'password', extraHtml = '') {
+    const toggleId = inputId + 'Toggle'
+    return '<div class="fn-pw-wrap">' +
+      '<div class="fn-label-row"><label class="fn-label" for="' + inputId + '">' + labelText + '</label>' + extraHtml + '</div>' +
+      '<div class="fn-pw-input-wrap">' +
+        '<input id="' + inputId + '" class="input fn-input" type="' + type + '" autocomplete="' + autocomplete + '" placeholder="' + placeholder + '" />' +
+        '<button id="' + toggleId + '" class="fn-pw-toggle" type="button" tabindex="-1" aria-label="Show password" aria-pressed="false">' +
+          '<svg class="fn-eye-open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>' +
+          '<svg class="fn-eye-closed" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" hidden><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>' +
+        '</button>' +
+      '</div>' +
+    '</div>'
+  }
+
+  function setupPasswordToggle(inputId) {
+    const input = document.getElementById(inputId)
+    const toggle = document.getElementById(inputId + 'Toggle')
+    if (!input || !toggle) return
+    toggle.onclick = () => {
+      const isPassword = input.type === 'password'
+      input.type = isPassword ? 'text' : 'password'
+      toggle.setAttribute('aria-pressed', isPassword)
+      toggle.querySelector('.fn-eye-open').hidden = isPassword
+      toggle.querySelector('.fn-eye-closed').hidden = !isPassword
+      toggle.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password')
+    }
+  }
+
   // ---------- LOGIN ----------
   function renderLogin() {
     pane.innerHTML =
       subline('Welcome Back', createOrJoinLinks) +
       '<label class="fn-label" for="em">Email</label>' +
       '<input id="em" class="input fn-input" type="email" autocomplete="username" placeholder="you@hospital.ng" />' +
-      '<div class="fn-label-row"><label class="fn-label" for="pw">Password</label>' +
-      '<button id="forgotLink" class="fn-linkbtn fn-forgot">Forgot password?</button></div>' +
-      '<input id="pw" class="input fn-input" type="password" autocomplete="current-password" placeholder="Enter your password" />' +
+      renderPasswordField('pw', 'Password', 'current-password', 'Enter your password', 'password', '<button id="forgotLink" class="fn-linkbtn fn-forgot">Forgot password?</button>') +
       '<p id="forgotNote" class="fn-note" hidden>Password reset is coming soon — please contact your hospital admin.</p>' +
       '<button id="b1" class="fn-primary">Log in</button>' +
       '<div class="fn-or"><span></span><em>Or</em><span></span></div>' +
@@ -163,6 +189,7 @@ export async function LoginView(app, params = {}) {
         '<svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.3 6.1 29.4 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.6-.4-3.9z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.3 6.1 29.4 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C41 35.4 44 30.2 44 24c0-1.3-.1-2.6-.4-3.9z"/></svg>' +
         ' Continue with Google</button>'
     wireSubLinks()
+    setupPasswordToggle('pw')
     document.getElementById('forgotLink').onclick = () => {
       document.getElementById('forgotNote').hidden = false
     }
@@ -219,10 +246,8 @@ export async function LoginView(app, params = {}) {
       '<input id="nm" class="input fn-input" autocomplete="name" placeholder="Your full name" /></div>' +
       '<div><label class="fn-label" for="em2">Email</label>' +
       '<input id="em2" class="input fn-input" type="email" autocomplete="username" placeholder="you@hospital.ng" /></div></div>' +
-      '<div class="grid2"><div><label class="fn-label" for="pw2">Password (min 8)</label>' +
-      '<input id="pw2" class="input fn-input" type="password" autocomplete="new-password" placeholder="••••••••" /></div>' +
-      '<div><label class="fn-label" for="pc">Confirm password</label>' +
-      '<input id="pc" class="input fn-input" type="password" autocomplete="new-password" placeholder="••••••••" /></div></div>'
+      '<div class="grid2"><div>' + renderPasswordField('pw2', 'Password (min 8)', 'new-password', '••••••••') + '</div>' +
+      '<div>' + renderPasswordField('pc', 'Confirm password', 'new-password', '••••••••') + '</div></div>'
   }
   function setBusy(on, btnId, idleText, busyText) {
     const btn = document.getElementById(btnId)
@@ -244,6 +269,8 @@ export async function LoginView(app, params = {}) {
       '<button id="go" class="fn-primary">Create hospital →</button>' +
       '<div id="msg"></div>'
     wireSubLinks()
+    setupPasswordToggle('pw2')
+    setupPasswordToggle('pc')
     document.getElementById('go').onclick = async () => {
       const msg = document.getElementById('msg')
       const v = {
@@ -299,6 +326,8 @@ export async function LoginView(app, params = {}) {
     if (c) c.onclick = () => setMode('create')
     const b = document.getElementById('linkBackLogin')
     if (b) b.onclick = () => setMode('login')
+    setupPasswordToggle('pw2')
+    setupPasswordToggle('pc')
     document.getElementById('go').onclick = async () => {
       const msg = document.getElementById('msg')
       const v = {

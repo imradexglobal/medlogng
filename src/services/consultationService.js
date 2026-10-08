@@ -2,24 +2,36 @@
 // Every encounter is linked to a patient and optionally to an appointment.
 // Workflow: Arrival → Vitals → Consultation → Diagnosis → Plan → Close
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, limit,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
-import { listOrgPatients, createPatientDoc } from './patientService.js'
+import { getPatient, createPatientDoc } from './patientService.js'
 import { can } from '../features/admin/roles.js'
+import { ENCOUNTER_STATUS_FLOW, furtherStatus, stageForTrigger, ENCOUNTER_STATUS_FLOW_META } from '../features/encounters/domain.js'
 import { logAudit } from './adminService.js'
 
 const ENCOUNTERS = 'encounters'
 
+export const ENCOUNTER_TYPES = ['General Outpatient Department (GOPD) review', 'Antenatal', 'Emergency', 'Follow-up']
+
+// The workflow order and the status clamp live in features/encounters/domain.js
+// (pure, no Firebase) so the smoke test can exercise the real thing. Re-exported
+// here because this module is what the views import.
+export { ENCOUNTER_STATUS_FLOW, furtherStatus, ENCOUNTER_STATUS_FLOW_META }
+
 // ---- capability check --------------------------------------------------------
 export function myEncounterCaps() {
   const me = myActiveMembership()
+  const canEdit = can(me, 'encounter.edit')
   return {
     membership: me,
     canCreate: can(me, 'encounter.create'),
-    canEdit: can(me, 'encounter.edit'),
-    canClose: can(me, 'encounter.close'),
+    canEdit,
+    // Narrow bump of `status` alone (nurse triage) — held by doctors too,
+    // since they hold `encounter.edit`.
+    canBumpStatus: canEdit || can(me, 'encounter.status.advance'),
+    canClose: canEdit || can(me, 'encounter.close'),
   }
 }
 
@@ -32,12 +44,15 @@ function toEncounterRow(r) {
     appointmentId: r.appointment_id || '',
     status: r.status || 'arrived',
     chiefComplaint: r.chief_complaint || '',
+    type: r.type || '',
+    clinician: r.clinician || '',
     vitals: r.vitals || {},
     diagnosis: r.diagnosis || '',
     treatmentPlan: r.treatment_plan || '',
     prescription: r.prescription || {},
     labOrders: r.lab_orders || [],
     createdAt: r.created_at ? (typeof r.created_at.toMillis === 'function' ? r.created_at.toMillis() : r.created_at) : 0,
+    updatedAt: r.updated_at ? (typeof r.updated_at.toMillis === 'function' ? r.updated_at.toMillis() : r.updated_at) : 0,
     raw: r,
   }
 }
@@ -50,9 +65,59 @@ export async function listPatientEncounters(pid) {
   return rows
 }
 
+// ---- open-encounter duplicate check ---------------------------------------
+// An encounter is "open" when its status is anything other than `closed`
+// (case-insensitive, so both `closed` and `Closed` count as closed; every
+// other status — `arrived`, `in-consultation`, `Open`, … — counts as open).
+export function isEncounterOpenStatus(status) {
+  return String(status || '').trim().toLowerCase() !== 'closed'
+}
+
+export function isOpenEncounter(row) {
+  if (!row) return false
+  const status = row.status ?? row.raw?.status
+  return isEncounterOpenStatus(status)
+}
+
+// Returns the patient's open encounter in this hospital (most recent first),
+// or null when the patient has no open encounter. Scoped to `orgId` when the
+// doc carries `organization_id` so legacy rows without one still match.
+export async function findOpenEncounterForPatient(pid, orgId = '') {
+  if (!pid) return null
+  const rows = await listPatientEncounters(pid)
+  const open = rows.filter((r) => {
+    if (!isOpenEncounter(r)) return false
+    const rowOrg = r.raw?.organization_id || ''
+    if (orgId && rowOrg && rowOrg !== orgId) return false
+    return true
+  })
+  return open.length ? open[0] : null
+}
+
+function formatEncounterWhen(row) {
+  const ts = row?.createdAt || 0
+  if (!ts) return 'date unknown'
+  try {
+    return new Date(ts).toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' })
+  } catch {
+    return 'date unknown'
+  }
+}
+
+// Friendly rejection used by every "start encounter" entry point.
+export function openEncounterExistsError(existing) {
+  const ref = existing?.id ? ' (' + String(existing.id).slice(0, 8) + '…' : ''
+  const status = existing?.status ? ', ' + existing.status : ''
+  const when = existing ? ', opened ' + formatEncounterWhen(existing) : ''
+  return new Error(
+    'This patient already has an open encounter' + ref + status + when +
+    '). Close it before opening a new one.'
+  )
+}
+
 // List all encounters for the active organization
 export async function listOrgEncounters(orgId) {
-  const snap = await getDocs(query(collection(db, ENCOUNTERS), where('organization_id', '==', orgId)))
+  const snap = await getDocs(query(collection(db, ENCOUNTERS), where('organization_id', '==', orgId), limit(200)))
   const rows = snap.docs.map((d) => toEncounterRow({ ...d.data(), id: d.id }))
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
@@ -77,24 +142,32 @@ export async function createEncounter(input) {
   const pid = input.patient_id
   if (!pid) throw new Error('Patient is required.')
 
-  // Verify patient exists in this organization
+  // Verify patient exists globally (patients are not org-owned)
+  const patient = await getPatient(pid)
+  if (!patient) throw new Error('Patient not found.')
+
+  // Duplicate guard: one open encounter per patient per hospital. The caller
+  // must close the existing encounter before a new one can be opened.
+  // (Client-side only — rules stay authoritative; a race between two devices
+  // can still create two rows, which the queue surfaces for manual close.)
   try {
-    const patients = await listOrgPatients(activeOrg)
-    if (!patients.some((p) => p.pid === pid)) {
-      throw new Error('Selected patient is not registered at this hospital.')
-    }
+    const existing = await findOpenEncounterForPatient(pid, activeOrg)
+    if (existing) throw openEncounterExistsError(existing)
   } catch (e) {
-    throw new Error('Could not verify patient: ' + e.message)
+    if (/already has an open encounter/i.test(e?.message || '')) throw e
+    console.warn('[encounters] open-encounter check skipped:', e?.message)
   }
 
   const encounterId = doc(collection(db, ENCOUNTERS)).id
   const now = serverTimestamp()
   const encounter = {
     patient_id: pid,
-    patient_name: input.patient_name || '',
+    patient_name: input.patient_name || patient.name || '',
     organization_id: activeOrg,
     appointment_id: input.appointment_id || '',
     status: input.status || 'arrived',
+    type: input.type || '',
+    clinician: input.clinician || '',
     chief_complaint: input.chief_complaint || '',
     vitals: input.vitals || {},
     diagnosis: input.diagnosis || '',
@@ -128,8 +201,7 @@ function requireEncounterEdit() {
 
 // ---- status update --------------------------------------------------------
 export async function updateEncounterStatus(id, status) {
-  const validStatuses = ['arrived', 'vitals-taken', 'in-consultation', 'diagnosed', 'planned', 'closed']
-  if (!validStatuses.includes(status)) throw new Error('Invalid encounter status: ' + status)
+  if (!ENCOUNTER_STATUS_FLOW.includes(status)) throw new Error('Invalid encounter status: ' + status)
   requireEncounterEdit()
 
   await updateDoc(doc(db, ENCOUNTERS, id), {
@@ -138,11 +210,35 @@ export async function updateEncounterStatus(id, status) {
   })
 
   try {
-    await logAudit({ action: 'encounter.' + status, organizationId: id, patientId: id, details: 'Encounter ' + id + ' status updated to ' + status })
+    const enc = await getEncounter(id)
+    await logAudit({
+      action: 'encounter.' + status,
+      organizationId: enc?.raw?.organization_id || '',
+      patientId: enc?.patientId || '',
+      details: 'Encounter ' + id + ' status updated to ' + status,
+    })
   } catch (e) {
     console.warn('[encounters] audit append failed:', e?.message)
   }
   return true
+}
+
+// Moves the encounter to whatever stage `trigger` proves, unless it is already
+// at or past it. Writes only on a real move, so no redundant doc write and no
+// duplicate audit row. Best-effort: a failed status bump must not undo the
+// clinical action the caller just saved, so callers wrap this in try/catch.
+async function advanceTo(id, current, trigger) {
+  const target = stageForTrigger(trigger)
+  if (!target) return false
+  const next = furtherStatus(current, target)
+  if (next === current) return false
+  try {
+    await updateEncounterStatus(id, next)
+    return true
+  } catch (e) {
+    console.warn('[encounters] auto-advance to ' + next + ' skipped:', e?.message)
+    return false
+  }
 }
 
 // ---- add diagnosis --------------------------------------------------------
@@ -153,10 +249,17 @@ export async function updateEncounterStatus(id, status) {
 // is logged instead of failing the whole action.
 export async function addDiagnosis(encounterId, diagnosis) {
   requireEncounterEdit()
-  await updateDoc(doc(db, ENCOUNTERS, encounterId), {
+  const encRef = doc(db, ENCOUNTERS, encounterId)
+  const encSnap = await getDoc(encRef)
+  const existingList = encSnap.exists() ? (encSnap.data().diagnoses || []) : []
+  const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
+  await updateDoc(encRef, {
     diagnosis: diagnosis,
+    diagnoses: [...existingList, { condition: diagnosis, added_at: Date.now() }],
     updated_at: serverTimestamp(),
   })
+  // A recorded diagnosis means the assessment is done — move the workflow on.
+  await advanceTo(encounterId, currentStatus, 'diagnosis')
   try {
     const enc = await getEncounter(encounterId)
     if (enc && enc.patientId) {
@@ -170,13 +273,80 @@ export async function addDiagnosis(encounterId, diagnosis) {
   return true
 }
 
+// ---- update note -----------------------------------------------------------
+export async function updateEncounterNote(encounterId, note) {
+  requireEncounterEdit()
+  // The current status is needed to know whether the note actually moves the
+  // encounter into consultation.
+  const encSnap = await getDoc(doc(db, ENCOUNTERS, encounterId))
+  const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
+  await updateDoc(doc(db, ENCOUNTERS, encounterId), {
+    chief_complaint: note || '',
+    updated_at: serverTimestamp(),
+  })
+  await advanceTo(encounterId, currentStatus, 'note')
+  return true
+}
+
+// ---- record vitals ---------------------------------------------------------
+// Always mirrors to the patient's `vitals` collection (the PatientDetail + unified
+// timeline source) using `vitals.create`, so nurses can record vitals even though
+// they cannot edit the encounter. The mirror is the nurse's source of truth; the
+// encounter doc itself is touched only as far as the caller is allowed:
+//   - `encounter.edit` (doctor/admin)       → write vitals block AND advance the
+//     workflow (`arrived` → `vitals-taken`), so the queue reflects the triage.
+//   - `encounter.status.advance` (nurse)     → advance `status` only. This is the
+//     one narrow write a nurse may make on the encounter; it is matched by a
+//     field-restricted rule in firestore.rules, so no other field can change.
+// A nurse without either capability leaves the encounter untouched.
+export async function recordEncounterVitals(encounterId, v) {
+  const enc = await getEncounter(encounterId)
+  if (!enc) throw new Error('Encounter not found.')
+
+  if (enc.patientId) {
+    try {
+      await createPatientDoc('vitals', enc.patientId, {
+        bp_systolic: v.bp_systolic ?? null, bp_diastolic: v.bp_diastolic ?? null,
+        pulse: v.pulse ?? null, temp_c: v.temp_c ?? null, spo2: v.spo2 ?? null,
+        note: v.note || '', encounter_id: encounterId,
+      }, 'vitals.create')
+    } catch (e) {
+      console.warn('[encounters] vitals mirror skipped:', e?.message)
+    }
+  }
+
+  const me = myActiveMembership()
+  const canEditEncounter = can(me, 'encounter.edit')
+  const canAdvanceStatus = canEditEncounter || can(me, 'encounter.status.advance')
+  if (canAdvanceStatus && furtherStatus(enc.status, 'vitals-taken') !== enc.status) {
+    // Write the vitals block only for those who may edit the encounter as a
+    // whole; a status-advancer must not rewrite vitals on someone else's behalf.
+    await updateDoc(doc(db, ENCOUNTERS, encounterId), {
+      ...(canEditEncounter
+        ? {
+          vitals: {
+            BP: (v.bp_systolic != null && v.bp_diastolic != null) ? v.bp_systolic + '/' + v.bp_diastolic : '',
+            Pulse: v.pulse ?? '', Temp: v.temp_c ?? '', SpO2: v.spo2 ?? '',
+          },
+        }
+        : {}),
+      status: furtherStatus(enc.status, 'vitals-taken'),
+      updated_at: serverTimestamp(),
+    })
+  }
+  return true
+}
+
 // ---- add treatment plan ---------------------------------------------------
 export async function addTreatmentPlan(encounterId, plan) {
   requireEncounterEdit()
+  const encSnap = await getDoc(doc(db, ENCOUNTERS, encounterId))
+  const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
   await updateDoc(doc(db, ENCOUNTERS, encounterId), {
     treatment_plan: plan,
     updated_at: serverTimestamp(),
   })
+  await advanceTo(encounterId, currentStatus, 'plan')
   return true
 }
 
@@ -187,10 +357,14 @@ export async function addTreatmentPlan(encounterId, plan) {
 // prescriber does not hold — the pharmacist dispenses from the request.
 export async function addPrescription(encounterId, prescription) {
   requireEncounterEdit()
+  const encSnap = await getDoc(doc(db, ENCOUNTERS, encounterId))
+  const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
   await updateDoc(doc(db, ENCOUNTERS, encounterId), {
     prescription: prescription,
     updated_at: serverTimestamp(),
   })
+  // Treatment prescribed means the plan is being set.
+  await advanceTo(encounterId, currentStatus, 'prescription')
   try {
     const enc = await getEncounter(encounterId)
     if (enc && enc.patientId) {
@@ -215,10 +389,13 @@ export async function addLabOrder(encounterId, labOrder) {
   const encounterRef = doc(db, ENCOUNTERS, encounterId)
   const encSnap = await getDoc(encounterRef)
   const existing = encSnap.exists() ? (encSnap.data().lab_orders || []) : []
-  const newLabOrder = { ...labOrder, id: 'lab_' + Date.now().toString(36), ordered_at: Date.now() }
+  const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
+  const newLabOrder = { ...labOrder, id: labOrder.lab_order_id || ('lab_' + Date.now().toString(36)), ordered_at: Date.now() }
   await updateDoc(encounterRef, {
     lab_orders: [...existing, newLabOrder],
     updated_at: serverTimestamp(),
   })
+  // Investigations ordered are part of the Plan (the P of SOAP).
+  await advanceTo(encounterId, currentStatus, 'lab_order')
   return true
 }

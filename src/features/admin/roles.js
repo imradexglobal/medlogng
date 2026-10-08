@@ -20,6 +20,11 @@ export const ROLE_CAPS = {
   nurse: [
     'patient.create',
     'vitals.create',
+    // Triage duty: recording vitals moves the queue forward from
+    // `arrived` to `vitals-taken`. Deliberately narrow — it may only
+    // write `status`/`updated_at` on the encounter (see firestore.rules),
+    // never vitals, notes, diagnosis or plan.
+    'encounter.status.advance',
     'appointment.create',
     'beds.manage',
     'documents.upload',

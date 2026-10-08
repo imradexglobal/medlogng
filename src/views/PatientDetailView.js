@@ -1,16 +1,17 @@
 // Patient 360 profile — real Firestore reads/writes (offline-first, cached).
-import { shell, setPage, skeletonCard, statusBadge, formModal, toast, closeModal, wireToast } from '../components/shell.js'
+import { authStore } from '../store/authStore.js'
+import { shell, setPage, skeletonCard, statusBadge, formModal, toast, closeModal, openModal, wireToast } from '../components/shell.js'
 import { esc } from '../utils/sanitize.js'
 import { emptyRow } from '../data/mockData.js'
 import { can } from '../features/admin/roles.js'
-import { myActiveMembership } from '../services/authService.js'
+import { myActiveMembership, getClinicalStaff } from '../services/authService.js'
 import { payerOptions } from '../services/payerService.js'
 import {
-  getPatient, updatePatient, listPatientDocs, createPatientDoc,
+  getPatient, updatePatient, listPatientDocs, createPatientDoc, findOpenEncounterForPatient,
   myPatientCaps, friendlyPatientError, formatPhone,
 } from '../services/patientService.js'
 
-const TABS = ['Overview', 'Timeline', 'Encounters', 'Vitals', 'Diagnoses', 'Medications', 'Labs', 'Admissions', 'Documents']
+const TABS = ['Dashboard', 'Personal Data', 'Blood & Allergies', 'Next of Kin', 'Timeline', 'Encounters', 'Vitals', 'Diagnoses', 'Medications', 'Labs', 'Admissions', 'Documents']
 const SEXES = [{ value: '', label: 'Not set' }, 'Female', 'Male']
 const BLOOD_GROUPS = [{ value: '', label: 'Not set' }, 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 
@@ -91,7 +92,7 @@ export async function PatientDetailView(app, params = {}) {
     '<div style="flex:1;min-width:220px"><h2>' + esc(p.name) + ' ' + statusBadge(p.status) + '</h2>' +
     '<div class="meta">DOB ' + esc(p.dob || 'not recorded') + ' · ' + esc(formatPhone(p.phone, p.phone_key)) +
     ' · Registered ' + (p.registered ? new Date(p.registered).toLocaleDateString('en-NG') : '—') + '</div>' +
-    '<div class="allergy">⚠ Allergy: <strong>' + esc(p.allergy || 'None known') + '</strong> — always confirm before prescribing</div></div>' +
+    '<div class="allergy">⚠ Allergy: <strong>' + esc(p.allergy_display || 'None known') + '</strong> — always confirm before prescribing</div></div>' +
     '<div><div class="kv" style="grid-template-columns:1fr 1fr">' +
     '<div><em>Payer</em><strong>' + esc(p.payer) + '</strong></div>' +
     '<div><em>Sync</em><strong style="font-size:.85rem">● ' + (navigator.onLine !== false ? 'Firestore' : 'Local cache') + '</strong></div>' +
@@ -109,6 +110,14 @@ export async function PatientDetailView(app, params = {}) {
     body,
   })
 
+  // Navigate to modern edit page
+  const editBtn = document.getElementById('editBtn')
+  if (editBtn) editBtn.onclick = () => { window.location.hash = '#/patients/' + pid + '/edit' }
+
+  function openEdit() {
+    window.location.hash = '#/patients/' + pid + '/edit'
+  }
+
   const pane = document.getElementById('ppane')
   let renderSeq = 0
 
@@ -123,6 +132,7 @@ export async function PatientDetailView(app, params = {}) {
 
   function tabCollection(name) {
     return ({
+      Dashboard: null,
       Timeline: 'encounters',
       Encounters: 'encounters',
       Vitals: 'vitals',
@@ -134,25 +144,427 @@ export async function PatientDetailView(app, params = {}) {
     })[name]
   }
 
-  function paneHtml(t) {
-    if (t === 'Overview') {
+  // ---- Dashboard data loading & rendering -------------------------------------
+  let dashboardFilter = 'vitals'
+
+  async function loadDashboardData() {
+    try {
+      const [vitalsRes, encountersRes, diagnosesRes, medsRes, labsRes, admissionsRes, docsRes] = await Promise.all([
+        listPatientDocs('vitals', pid),
+        listPatientDocs('encounters', pid),
+        listPatientDocs('diagnoses', pid),
+        listPatientDocs('medication_requests', pid),
+        listPatientDocs('lab_orders', pid),
+        listPatientDocs('admissions', pid),
+        listPatientDocs('documents', pid),
+      ])
+
+      const allVitals = vitalsRes.rows || []
+      const latestVitals = allVitals[0] || null
+
+      // Build unified timeline
+      const timeline = buildUnifiedTimeline(
+        encountersRes.rows || [],
+        allVitals,
+        diagnosesRes.rows || [],
+        medsRes.rows || [],
+        labsRes.rows || [],
+        admissionsRes.rows || [],
+        docsRes.rows || []
+      )
+
+      // Active diagnoses (status === 'Active')
+      const activeDiagnoses = (diagnosesRes.rows || []).filter(d => (d.status || 'Active') === 'Active')
+
+      // Active medications (status === 'Active' or 'Dispensed')
+      const activeMeds = (medsRes.rows || []).filter(m => {
+        const status = (m.status || 'Requested')
+        return status === 'Active' || status === 'Dispensed'
+      })
+
+      // Allergies from patient record
+      const allergies = Array.isArray(p.allergy) ? p.allergy : (p.allergy ? String(p.allergy).split(/[,;]/).map(s => s.trim()).filter(Boolean) : [])
+
+      return {
+        latestVitals,
+        allVitals,
+        timeline,
+        activeDiagnoses,
+        activeMeds,
+        allergies,
+      }
+    } catch (e) {
+      console.error('[dashboard] load failed:', e)
+      toast('Could not load dashboard: ' + friendlyPatientError(e))
+      return { latestVitals: null, allVitals: [], timeline: [], activeDiagnoses: [], activeMeds: [], allergies: [] }
+    }
+  }
+
+  function buildUnifiedTimeline(encounters, vitals, diagnoses, meds, labs, admissions, docs) {
+    const entries = []
+
+    // Encounters
+    for (const e of encounters) {
+      entries.push({
+        type: 'encounter',
+        timestamp: e.created_at,
+        icon: '🏥',
+        primary: s(e.encounter_type || e.type || e.reason || 'Encounter'),
+        secondary: s(e.reason || e.chief_complaint || 'No reason recorded') + ' · ' + encLabel(e.status),
+        status: e.status,
+        clinician: s(e.clinician_name || e.clinician || e.created_by_name),
+        raw: e,
+      })
+    }
+
+    // Vitals
+    for (const v of vitals) {
+      const bp = (v.bp_systolic || '—') + '/' + (v.bp_diastolic || '—')
+      const parts = ['BP ' + bp]
+      if (v.pulse) parts.push('P ' + v.pulse)
+      if (v.temp_c) parts.push('T ' + v.temp_c + '°C')
+      if (v.spo2) parts.push('SpO₂ ' + v.spo2 + '%')
+      if (v.rr) parts.push('RR ' + v.rr)
+      if (v.weight_kg) parts.push(v.weight_kg + ' kg')
+      entries.push({
+        type: 'vitals',
+        timestamp: v.created_at,
+        icon: '📍',
+        primary: parts.join('  •  '),
+        secondary: s(v.created_by_name || v.created_by),
+        clinician: s(v.created_by_name || v.created_by),
+        raw: v,
+      })
+    }
+
+    // Diagnoses
+    for (const d of diagnoses) {
+      entries.push({
+        type: 'diagnosis',
+        timestamp: d.created_at,
+        icon: '🩺',
+        primary: s(d.condition || d.name || d.icd_code || 'Diagnosis'),
+        secondary: (d.icd_code ? '[' + d.icd_code + '] ' : '') + s(d.status, 'Active') + ' · ' + s(d.created_by_name || d.created_by),
+        status: d.status,
+        clinician: s(d.created_by_name || d.created_by),
+        raw: d,
+      })
+    }
+
+    // Medications
+    for (const m of meds) {
+      entries.push({
+        type: 'medication',
+        timestamp: m.created_at,
+        icon: '💊',
+        primary: s(m.medicine || m.name) + ' ' + s(m.dosage) + (m.quantity ? ' ×' + m.quantity : ''),
+        secondary: s(m.status, 'Requested') + ' · ' + s(m.created_by_name || m.created_by),
+        status: m.status,
+        clinician: s(m.created_by_name || m.created_by),
+        raw: m,
+      })
+    }
+
+    // Labs
+    for (const l of labs) {
+      entries.push({
+        type: 'lab',
+        timestamp: l.created_at,
+        icon: '🧪',
+        primary: s(l.test || l.test_panel || l.panel || 'Lab order'),
+        secondary: s(l.stage || l.status, 'Ordered') + (l.priority ? ' · ' + l.priority : '') + ' · ' + s(l.created_by_name || l.created_by),
+        status: l.stage || l.status,
+        clinician: s(l.created_by_name || l.created_by),
+        raw: l,
+      })
+    }
+
+    // Admissions
+    for (const a of admissions) {
+      entries.push({
+        type: 'admission',
+        timestamp: a.created_at,
+        icon: '🛏️',
+        primary: s(a.ward || a.ward_name) + ' · ' + s(a.bed || a.bed_label),
+        secondary: s(a.doctor || a.admitting_doctor) + ' · ' + s(a.status, 'Admitted'),
+        status: a.status,
+        clinician: s(a.doctor || a.admitting_doctor),
+        raw: a,
+      })
+    }
+
+    // Documents
+    for (const d of docs) {
+      entries.push({
+        type: 'document',
+        timestamp: d.created_at,
+        icon: '📄',
+        primary: s(d.name || d.filename || d.title || 'Document'),
+        secondary: s(d.type || d.kind) + ' · ' + s(d.created_by_name || d.created_by),
+        clinician: s(d.created_by_name || d.created_by),
+        raw: d,
+      })
+    }
+
+    // Sort by timestamp descending
+    entries.sort((a, b) => ms(b.timestamp) - ms(a.timestamp))
+    return entries
+  }
+
+  function encLabel(status) {
+    const map = {
+      arrived: 'Arrived',
+      'vitals-taken': 'Vitals Taken',
+      'in-consultation': 'In Consultation',
+      diagnosed: 'Diagnosed',
+      planned: 'Plan Set',
+      closed: 'Closed',
+      open: 'Open',
+      active: 'Active',
+      admitted: 'Admitted',
+      discharged: 'Discharged',
+    }
+    return map[status?.toLowerCase?.()] || s(status, '—')
+  }
+
+  // Tone-matched pill per encounter status. The shared statusBadge() (shell.js)
+  // keys off capitalised display labels and knows none of these, so it used to
+  // print encounter statuses as bare uncoloured pills showing the raw key.
+  function encBadge(status) {
+    const tones = {
+      arrived: 'warn', 'vitals-taken': 'info', 'in-consultation': 'info',
+      diagnosed: 'info', planned: 'ok', closed: 'ok',
+    }
+    return '<span class="pill ' + (tones[status?.toLowerCase?.()] || '') + '">' + esc(encLabel(status)) + '</span>'
+  }
+
+  function vitalTrend(current, previous) {
+    if (current == null || previous == null) return { text: '', class: '' }
+    const diff = Number(current) - Number(previous)
+    if (diff > 0) return { text: '↑' + diff, class: 'up' }
+    if (diff < 0) return { text: '↓' + Math.abs(diff), class: 'down' }
+    return { text: '→', class: 'stable' }
+  }
+
+  function buildDashboardPane() {
+    const d = loadCache.Dashboard || { latestVitals: null, allVitals: [], timeline: [], activeDiagnoses: [], activeMeds: [], allergies: [] }
+    const v = d.latestVitals
+    const prevVitals = d.allVitals[1] || null
+
+    // Vital cards data
+    const vitalCards = []
+    if (v) {
+      vitalCards.push({ label: 'BP', value: (v.bp_systolic || '—') + '/' + (v.bp_diastolic || '—'), primary: true, trend: vitalTrend(v.bp_systolic, prevVitals?.bp_systolic) })
+      vitalCards.push({ label: 'Pulse', value: s(v.pulse) + ' bpm', trend: vitalTrend(v.pulse, prevVitals?.pulse) })
+      vitalCards.push({ label: 'Temp', value: s(v.temp_c) + ' °C', trend: vitalTrend(v.temp_c, prevVitals?.temp_c) })
+      vitalCards.push({ label: 'SpO₂', value: s(v.spo2) + '%', trend: vitalTrend(v.spo2, prevVitals?.spo2) })
+      if (v.weight_kg) vitalCards.push({ label: 'Weight', value: s(v.weight_kg) + ' kg', trend: vitalTrend(v.weight_kg, prevVitals?.weight_kg) })
+      if (v.bmi || (v.weight_kg && v.height_cm)) {
+        const bmi = v.bmi || (v.weight_kg && v.height_cm ? (v.weight_kg / Math.pow(v.height_cm / 100, 2)).toFixed(1) : '—')
+        vitalCards.push({ label: 'BMI', value: s(bmi), trend: vitalTrend(bmi, prevVitals?.bmi) })
+      }
+    } else {
+      vitalCards.push({ label: 'BP', value: '—', primary: true })
+      vitalCards.push({ label: 'Pulse', value: '—' })
+      vitalCards.push({ label: 'Temp', value: '—' })
+      vitalCards.push({ label: 'SpO₂', value: '—' })
+    }
+
+    // Filter options
+    const filterOptions = [
+      { value: 'vitals', label: 'Vitals/BP' },
+      { value: 'all', label: 'All Clinical Events' },
+      { value: 'encounters', label: 'Encounters Only' },
+      { value: 'diagnoses', label: 'Diagnoses' },
+      { value: 'medications', label: 'Medications' },
+      { value: 'labs', label: 'Lab Orders/Results' },
+      { value: 'admissions', label: 'Admissions' },
+      { value: 'documents', label: 'Documents' },
+    ]
+
+    // Filter timeline based on selected filter
+    let filteredTimeline = d.timeline
+    if (dashboardFilter === 'vitals') {
+      filteredTimeline = d.timeline.filter(e => e.type === 'vitals')
+    } else if (dashboardFilter !== 'all') {
+      filteredTimeline = d.timeline.filter(e => e.type === dashboardFilter)
+    }
+
+    // Render vital cards
+    const vitalCardsHtml = vitalCards.map(c => `
+      <div class="vital-card${c.primary ? ' primary' : ''}">
+        <div class="vital-label">${esc(c.label)}</div>
+        <div class="vital-value">${esc(c.value)}</div>
+        ${c.trend ? '<div class="vital-trend ' + c.trend.class + '">' + esc(c.trend.text) + '</div>' : ''}
+      </div>
+    `).join('')
+
+    // Render timeline feed
+    const timelineHtml = filteredTimeline.length
+      ? filteredTimeline.slice(0, 30).map(e => `
+        <div class="feed-item" data-type="${esc(e.type)}">
+          <div class="feed-icon">${e.icon}</div>
+          <div class="feed-content">
+            <div class="feed-primary">${esc(e.primary)}</div>
+            <div class="feed-secondary">${esc(e.secondary)}</div>
+          </div>
+          <div class="feed-meta">
+            <span>${esc(when(e.timestamp))}</span>
+            ${e.clinician ? '<span>' + esc(e.clinician) + '</span>' : ''}
+            ${e.status ? '<span class="pill">' + esc(encLabel(e.status)) + '</span>' : ''}
+          </div>
+        </div>
+      `).join('')
+      : '<div class="feed-empty"><p class="sub" style="text-align:center;padding:24px">No ' + (dashboardFilter === 'vitals' ? 'vitals' : dashboardFilter) + ' recorded yet.</p></div>'
+
+    // Clinical summary sections
+    const diagnosesHtml = d.activeDiagnoses.length
+      ? d.activeDiagnoses.map(dx => `
+        <div class="summary-item">
+          <div class="summary-item-main">
+            <span class="summary-item-label">${esc(dx.condition || dx.name || dx.icd_code || 'Diagnosis')}</span>
+            <span class="summary-item-detail">${dx.icd_code ? '[' + esc(dx.icd_code) + ']' : ''} ${esc(dx.status || 'Active')} · ${esc(s(dx.created_by_name || dx.created_by))} · ${esc(when(dx.created_at))}</span>
+          </div>
+          <span class="pill ok">${esc(dx.status || 'Active')}</span>
+        </div>
+      `).join('')
+      : '<p class="sub">No active diagnoses.</p>'
+
+    const medsHtml = d.activeMeds.length
+      ? d.activeMeds.map(m => `
+        <div class="summary-item">
+          <div class="summary-item-main">
+            <span class="summary-item-label">${esc(m.medicine || m.name)}</span>
+            <span class="summary-item-detail">${esc(m.dosage)} ${m.quantity ? '×' + m.quantity : ''} · ${esc(m.status || 'Active')} · ${esc(s(m.created_by_name || m.created_by))}</span>
+          </div>
+          <span class="pill ${m.status === 'Dispensed' ? 'ok' : 'info'}">${esc(m.status || 'Active')}</span>
+        </div>
+      `).join('')
+      : '<p class="sub">No current medications.</p>'
+
+    const allergiesHtml = d.allergies.length
+      ? d.allergies.map(a => '<span class="allergy-tag-display">' + esc(a) + '</span>').join(' ')
+      : '<span class="mut">None known</span>'
+
+    // Quick actions (capability-gated)
+    const quickActions = []
+    if (canEncounter) quickActions.push('<button class="btn" id="dashEncBtn">Start Encounter</button>')
+    if (canVitals) quickActions.push('<button class="btn" id="dashVitalsBtn">Record Vitals</button>')
+    if (canDx) quickActions.push('<button class="btn ghost" id="dashDxBtn">+ Diagnosis</button>')
+    if (canRx) quickActions.push('<button class="btn ghost" id="dashRxBtn">+ Prescription</button>')
+    if (canAdmit) quickActions.push('<button class="btn ghost" id="dashAdmBtn">+ Admission</button>')
+
+    return `
+      <div class="dashboard-pane">
+        <!-- Vitals Snapshot -->
+        <div class="vitals-snapshot" role="region" aria-label="Latest vitals">
+          ${vitalCardsHtml}
+        </div>
+
+        <div class="dashboard-grid">
+          <!-- Left: Clinical Summary -->
+          <div class="clinical-summary">
+            <div class="summary-card">
+              <div class="summary-header">
+                <div class="summary-title">🩺 Active Diagnoses <span class="summary-count">${d.activeDiagnoses.length}</span></div>
+              </div>
+              <div class="summary-list">${diagnosesHtml}</div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-header">
+                <div class="summary-title">💊 Current Medications <span class="summary-count">${d.activeMeds.length}</span></div>
+              </div>
+              <div class="summary-list">${medsHtml}</div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-header">
+                <div class="summary-title">⚠ Allergies <span class="summary-count">${d.allergies.length}</span></div>
+              </div>
+              <div class="summary-list" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${allergiesHtml}</div>
+            </div>
+          </div>
+
+          <!-- Right: Progress Feed (Chat-style) -->
+          <div class="progress-feed" role="region" aria-label="Clinical progress feed">
+            <div class="feed-filter">
+              <label class="fld" style="margin:0;display:flex;align-items:center;gap:8px">
+                <span style="font-size:.75rem;color:var(--emr-muted);font-weight:600">Filter:</span>
+                <select id="feedFilter" class="input" style="width:auto;min-width:200px;padding:6px 10px;font-size:.8rem">
+                  ${filterOptions.map(opt => '<option value="' + opt.value + '"' + (dashboardFilter === opt.value ? ' selected' : '') + '>' + esc(opt.label) + '</option>').join('')}
+                </select>
+              </label>
+            </div>
+            <div class="feed-list" id="feedList">
+              ${timelineHtml}
+            </div>
+            ${filteredTimeline.length > 30 ? '<div class="feed-load-more" style="text-align:center;padding:12px"><button class="btn ghost sm" id="feedLoadMore">Load More</button></div>' : ''}
+          </div>
+        </div>
+
+        <!-- Quick Actions Bar -->
+        ${quickActions.length ? '<div class="dashboard-actions" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--emr-line);display:flex;gap:8px;flex-wrap:wrap">' + quickActions.join('') + '</div>' : ''}
+      </div>
+    `
+  }
+
+function paneHtml(t) {
+    if (t === 'Dashboard') {
+      return buildDashboardPane()
+    }
+    if (t === 'Personal Data') {
       return '<div class="grid2x">' +
-        '<div class="card"><h3>Clinical summary</h3>' +
+        '<div class="card"><h3>Personal details</h3>' +
         '<p class="sub">Source: this hospital\'s record.</p>' +
         '<div class="kv">' +
-        '<div><em>Blood group</em><strong>' + esc(s(p.blood_group, 'Not recorded')) + '</strong></div>' +
+        '<div><em>Surname</em><strong>' + esc(s(p.surname, 'Not recorded')) + '</strong></div>' +
+        '<div><em>Given name(s)</em><strong>' + esc(s(p.given_names, 'Not recorded')) + '</strong></div>' +
         '<div><em>Sex</em><strong>' + esc(s(p.sex, 'Not recorded')) + '</strong></div>' +
         '<div><em>Date of birth</em><strong>' + esc(s(p.dob, 'Not recorded')) + '</strong></div>' +
+        '<div><em>Age</em><strong>' + esc(p.age !== '' ? p.age + ' years' : 'Not recorded') + '</strong></div>' +
+        '<div><em>Phone</em><strong>' + esc(formatPhone(p.phone, p.phone_key)) + '</strong></div>' +
+        '<div><em>Occupation</em><strong>' + esc(s(p.occupation, 'Not recorded')) + '</strong></div>' +
         '<div><em>Address</em><strong>' + esc(s(p.address, 'Not recorded')) + '</strong></div>' +
+        '<div><em>Payer</em><strong>' + esc(s(p.payer, 'Not recorded')) + '</strong></div>' +
         '</div>' +
         (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit demographics</button>' : '') +
         '</div>' +
         '<div>' +
         '<div class="card"><h3>Billing</h3><p class="sub">Outstanding balance: no invoices linked to this patient yet.</p>' +
         '<a class="btn ghost sm" href="#/billing?patient=' + encodeURIComponent(pid) + '&new=1">Open billing for ' + esc(p.name) + ' →</a></div>' +
-        '<div class="card"><h3>Consent &amp; access</h3><p class="sub">Recorded consents appear here. Cross-hospital access always requires reason + audit.</p>' +
+        '<div class="card"><h3>Consent & access</h3><p class="sub">Recorded consents appear here. Cross-hospital access always requires reason + audit.</p>' +
         '<button class="btn ghost sm" id="consentBtn">Record consent</button></div>' +
         '</div></div>'
+    }
+    if (t === 'Blood & Allergies') {
+      return '<div class="grid2x">' +
+        '<div class="card"><h3>Blood group</h3>' +
+        '<div class="kv">' +
+        '<div><em>Blood group (ABO/Rh)</em><strong>' + esc(s(p.blood_group, 'Not recorded')) + '</strong></div>' +
+        '<div><em>Genotype</em><strong>' + esc(s(p.genotype, 'Not recorded')) + '</strong></div>' +
+        '</div>' +
+        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit blood group</button>' : '') +
+        '</div>' +
+        '<div class="card"><h3>Allergies</h3>' +
+        '<p class="sub">Always confirm before prescribing.</p>' +
+        '<div class="allergy-tags-display">' +
+        (Array.isArray(p.allergy) && p.allergy.length > 0
+          ? p.allergy.map(a => '<span class="allergy-tag-display">' + esc(a) + '</span>').join('')
+          : '<span class="mut">None known</span>') +
+        '</div>' +
+        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit allergies</button>' : '') +
+        '</div>' +
+        '</div>'
+    }
+    if (t === 'Next of Kin') {
+      return '<div class="card"><h3>Next of kin details</h3>' +
+        '<p class="sub">Emergency contact information.</p>' +
+        '<div class="kv">' +
+        '<div><em>Full name</em><strong>' + esc(s(p.next_of_kin_name, 'Not recorded')) + '</strong></div>' +
+        '<div><em>Phone</em><strong>' + esc(formatPhone(p.next_of_kin_phone, p.next_of_kin_phone_key)) + '</strong></div>' +
+        '<div><em>Address</em><strong>' + esc(s(p.next_of_kin_address, 'Not recorded')) + '</strong></div>' +
+        '</div>' +
+        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit next of kin</button>' : '') +
+        '</div>'
     }
     if (t === 'Timeline') {
       const res = loadCache.Timeline
@@ -174,7 +586,7 @@ export async function PatientDetailView(app, params = {}) {
       case 'Encounters':
         return table(['When', 'Type', 'Clinician', 'Status'], rows, (e) =>
           '<tr><td>' + esc(when(e.created_at)) + '</td><td><strong>' + esc(s(e.encounter_type || e.type || e.reason)) + '</strong></td>' +
-          '<td>' + esc(s(e.clinician_name || e.clinician || e.created_by)) + '</td><td>' + statusBadge(s(e.status, 'Open')) + '</td></tr>')
+          '<td>' + esc(s(e.clinician_name || e.clinician || e.created_by)) + '</td><td>' + encBadge(e.status) + '</td></tr>')
       case 'Vitals':
         return table(['When', 'BP', 'Pulse', 'Temp', 'SpO₂', 'By'], rows, (v) =>
           '<tr><td>' + esc(when(v.created_at)) + '</td>' +
@@ -218,49 +630,15 @@ export async function PatientDetailView(app, params = {}) {
   async function render(t) {
     const seq = ++renderSeq
     pane.innerHTML = skeletonCard(4)
-    if (t !== 'Overview') {
+    if (t === 'Dashboard') {
+      loadCache.Dashboard = await loadDashboardData()
+    } else if (t !== 'Overview') {
       const coll = tabCollection(t)
       if (coll) loadCache[t] = await loadTab(t)
     }
     if (seq !== renderSeq) return
     pane.innerHTML = paneHtml(t)
     wirePane()
-  }
-
-  // Payer options come from the `payers` collection via the offline cache, so
-  // this modal is never blocked on a network read. If the patient's stored
-  // payer is no longer active it is appended as "(inactive)" — without that a
-  // plain save would silently overwrite it with whatever is listed first.
-  async function openEdit() {
-    let payerOpts = []
-    try {
-      payerOpts = await payerOptions(p.payer)
-    } catch (e) {
-      console.warn('[patients] payer options unavailable:', e?.message)
-      payerOpts = p.payer ? [p.payer] : []
-    }
-    if (!payerOpts.length) payerOpts = ['Self-pay']
-    formModal({
-      title: 'Edit demographics',
-      submitLabel: 'Save changes',
-      fields: [
-        { name: 'surname', label: 'Surname', required: true, value: p.surname },
-        { name: 'given_names', label: 'Given name(s)', required: true, value: p.given_names },
-        { name: 'phone', label: 'Phone (+234)', required: true, type: 'tel', value: p.phone },
-        { name: 'sex', label: 'Sex', type: 'select', options: SEXES, value: p.sex },
-        { name: 'dob', label: 'Date of birth', type: 'date', value: p.dob },
-        { name: 'payer', label: 'Payer', type: 'select', options: payerOpts, value: p.payer },
-        { name: 'blood_group', label: 'Blood group', type: 'select', options: BLOOD_GROUPS, value: p.blood_group },
-        { name: 'allergy', label: 'Allergies', value: p.allergy },
-        { name: 'address', label: 'Home address (LGA, State)', full: true, value: p.address },
-      ],
-      onSubmit: async (v) => {
-        await updatePatient(pid, v)
-        closeModal()
-        toast('Saved ' + v.given_names + ' ' + v.surname + ' to Firestore')
-        await PatientDetailView(app, params)
-      },
-    })
   }
 
   function openVitals() {
@@ -357,26 +735,71 @@ export async function PatientDetailView(app, params = {}) {
     })
   }
 
-  function openEncounter() {
-    formModal({
-      title: 'Start encounter',
-      submitLabel: 'Open encounter',
-      fields: [
-        { name: 'encounter_type', label: 'Type', type: 'select', options: ['GOPD review', 'Follow-up', 'Antenatal', 'Emergency', 'Consultation'] },
-        { name: 'clinician', label: 'Clinician', placeholder: 'e.g. Dr. A. Balogun' },
-        { name: 'reason', label: 'Reason', full: true, required: true, placeholder: 'e.g. Hypertension review' },
-      ],
-      onSubmit: async (v) => {
-        await createPatientDoc('encounters', pid, {
-          encounter_type: v.encounter_type, clinician_name: v.clinician || '',
-          reason: v.reason, status: 'Open',
-        }, 'encounter.create')
+  function openEncounterBlockedModal(existing) {
+    const ref = existing?.id ? String(existing.id).slice(0, 8) + '…' : ''
+    const status = s(existing?.status || 'Open')
+    const type = s(existing?.encounter_type || existing?.type || existing?.reason || 'Encounter')
+    openModal('Open encounter already exists',
+      '<p class="sub"><strong>' + esc(p.name || 'This patient') + '</strong> already has an open encounter' +
+      (ref ? ' (' + esc(ref) : '') + (status ? ' · ' + esc(status) : '') + (ref ? ')' : '') +
+      (type ? ' — ' + esc(type) : '') + '. Close it before opening a new one.</p>' +
+      '<div class="mrow"><button class="btn ghost" data-close>Cancel</button>' +
+      '<button class="btn ghost" id="goEncTab">View encounters</button>' +
+      '<a class="btn" href="#/consultations' + (existing?.id ? '?enc=' + encodeURIComponent(existing.id) : '') + '" data-close>Go to Consultations →</a></div>')
+    document.querySelectorAll('#modalBody [data-close]').forEach((b) => { b.onclick = closeModal })
+    const goTab = document.getElementById('goEncTab')
+    if (goTab) {
+      goTab.onclick = async () => {
         closeModal()
-        toast('Encounter opened and saved to Firestore')
-        loadCache.Encounters = null
-        loadCache.Timeline = null
+        document.querySelectorAll('#ptabs button').forEach((x) => x.classList.toggle('on', x.getAttribute('data-t') === 'Encounters'))
         await render('Encounters')
-      },
+      }
+    }
+  }
+
+  async function openEncounter() {
+    // Duplicate guard (UX): the service also rejects, but checking first
+    // spares the user filling the form only to be told to close the old one.
+    const { activeOrg } = authStore.getState()
+    if (!activeOrg) { toast('No hospital selected'); return }
+    try {
+      const existing = await findOpenEncounterForPatient(pid, activeOrg)
+      if (existing) {
+        openEncounterBlockedModal(existing)
+        return
+      }
+    } catch (e) {
+      console.warn('[patient] open-encounter pre-check failed:', e?.message)
+    }
+    // Fetch clinical staff for dropdown
+    getClinicalStaff(activeOrg).then((staff) => {
+      const clinicianOptions = staff.length > 0 ? staff : [{ value: '', label: 'No clinical staff found — add staff in Administration' }]
+      formModal({
+        title: 'Start encounter',
+        submitLabel: 'Open encounter',
+        fields: [
+          { name: 'encounter_type', label: 'Type', type: 'select', options: ['General Outpatient Department (GOPD) review', 'Follow-up', 'Antenatal', 'Emergency', 'Consultation'] },
+          { name: 'clinician', label: 'Clinician', type: 'select', options: clinicianOptions, required: true },
+          { name: 'reason', label: 'Reason', full: true, required: true, placeholder: 'e.g. Hypertension review' },
+        ],
+        onSubmit: async (v) => {
+          await createPatientDoc('encounters', pid, {
+            encounter_type: v.encounter_type, clinician_name: v.clinician || '',
+            reason: v.reason,
+            // Canonical status, matching what the Consultations queue walks.
+            // `Open` was rejected by updateEncounterStatus's whitelist, so an
+            // encounter opened here could never be advanced or closed.
+            status: 'arrived',
+          }, 'encounter.create')
+          closeModal()
+          toast('Encounter opened and saved to Firestore')
+          loadCache.Encounters = null
+          loadCache.Timeline = null
+          await render('Encounters')
+        },
+      })
+    }).catch((e) => {
+      toast('Failed to load clinical staff: ' + friendlyPatientError(e))
     })
   }
 
@@ -406,6 +829,74 @@ export async function PatientDetailView(app, params = {}) {
     const d = document.getElementById('dxBtn'); if (d) d.onclick = openDiagnosis
     const r = document.getElementById('rxBtn'); if (r) r.onclick = openPrescription
     const a = document.getElementById('admBtn'); if (a) a.onclick = openAdmission
+
+    // Dashboard-specific handlers
+    const feedFilter = document.getElementById('feedFilter')
+    if (feedFilter) {
+      feedFilter.onchange = () => {
+        dashboardFilter = feedFilter.value
+        // Re-render just the feed list
+        const d = loadCache.Dashboard || { timeline: [] }
+        let filtered = d.timeline
+        if (dashboardFilter === 'vitals') filtered = d.timeline.filter(e => e.type === 'vitals')
+        else if (dashboardFilter !== 'all') filtered = d.timeline.filter(e => e.type === dashboardFilter)
+        const listEl = document.getElementById('feedList')
+        if (listEl) {
+          listEl.innerHTML = filtered.length
+            ? filtered.slice(0, 30).map(e => `
+              <div class="feed-item" data-type="${esc(e.type)}">
+                <div class="feed-icon">${e.icon}</div>
+                <div class="feed-content">
+                  <div class="feed-primary">${esc(e.primary)}</div>
+                  <div class="feed-secondary">${esc(e.secondary)}</div>
+                </div>
+                <div class="feed-meta">
+                  <span>${esc(when(e.timestamp))}</span>
+                  ${e.clinician ? '<span>' + esc(e.clinician) + '</span>' : ''}
+                  ${e.status ? '<span class="pill">' + esc(encLabel(e.status)) + '</span>' : ''}
+                </div>
+              </div>
+            `).join('')
+            : '<div class="feed-empty"><p class="sub" style="text-align:center;padding:24px">No ' + (dashboardFilter === 'vitals' ? 'vitals' : dashboardFilter) + ' recorded yet.</p></div>'
+        }
+      }
+    }
+
+    const loadMore = document.getElementById('feedLoadMore')
+    if (loadMore) {
+      loadMore.onclick = () => {
+        const d = loadCache.Dashboard || { timeline: [] }
+        let filtered = d.timeline
+        if (dashboardFilter === 'vitals') filtered = d.timeline.filter(e => e.type === 'vitals')
+        else if (dashboardFilter !== 'all') filtered = d.timeline.filter(e => e.type === dashboardFilter)
+        const listEl = document.getElementById('feedList')
+        if (listEl) {
+          listEl.innerHTML = filtered.slice(0, filtered.length).map(e => `
+            <div class="feed-item" data-type="${esc(e.type)}">
+              <div class="feed-icon">${e.icon}</div>
+              <div class="feed-content">
+                <div class="feed-primary">${esc(e.primary)}</div>
+                <div class="feed-secondary">${esc(e.secondary)}</div>
+              </div>
+              <div class="feed-meta">
+                <span>${esc(when(e.timestamp))}</span>
+                ${e.clinician ? '<span>' + esc(e.clinician) + '</span>' : ''}
+                ${e.status ? '<span class="pill">' + esc(encLabel(e.status)) + '</span>' : ''}
+              </div>
+            </div>
+          `).join('')
+          loadMore.style.display = 'none'
+        }
+      }
+    }
+
+    // Dashboard quick actions
+    const dashEnc = document.getElementById('dashEncBtn'); if (dashEnc) dashEnc.onclick = openEncounter
+    const dashVitals = document.getElementById('dashVitalsBtn'); if (dashVitals) dashVitals.onclick = openVitals
+    const dashDx = document.getElementById('dashDxBtn'); if (dashDx) dashDx.onclick = openDiagnosis
+    const dashRx = document.getElementById('dashRxBtn'); if (dashRx) dashRx.onclick = openPrescription
+    const dashAdm = document.getElementById('dashAdmBtn'); if (dashAdm) dashAdm.onclick = openAdmission
+
     wireToast(pane)
   }
 
@@ -417,12 +908,10 @@ export async function PatientDetailView(app, params = {}) {
     }
   })
 
-  const editBtn = document.getElementById('editBtn')
-  if (editBtn) editBtn.onclick = () => { openEdit() }
   const encBtn = document.getElementById('encBtn')
   if (encBtn) encBtn.onclick = openEncounter
 
-  await render('Overview')
+  await render('Dashboard')
 }
 
 function num(v) {

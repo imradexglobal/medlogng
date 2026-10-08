@@ -183,7 +183,8 @@ export function formModal({ title, fields = [], submitLabel = 'Save', onSubmit }
     } else {
       inner = '<input class="input" type="' + esc(f.type || 'text') + '" name="' + esc(f.name) + '"' +
         (f.list ? ' list="' + esc(f.list) + '"' : '') +
-        ' placeholder="' + esc(f.placeholder || '') + '" value="' + esc(f.value ?? '') + '" />'
+        ' placeholder="' + esc(f.placeholder || '') + '" value="' + esc(f.value ?? '') + '" />' +
+        (f.list && f.listOptions ? '<datalist id="' + esc(f.list) + '">' + f.listOptions.map((o) => '<option value="' + esc(typeof o === 'string' ? o : o.value) + '">').join('') + '</datalist>' : '')
     }
     return '<label class="fld' + (f.full ? ' full' : '') + '"><span>' + esc(f.label) + (f.required ? ' *' : '') + '</span>' + inner + '</label>'
   }).join('')
