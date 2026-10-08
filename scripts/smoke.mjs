@@ -171,4 +171,190 @@ assert.equal(stageForTrigger('vitals'), null, 'vitals is triage, handled directl
 assert.equal(stageForTrigger('billing'), null, 'billing is not part of the clinical workflow')
 assert.equal(stageForTrigger(''), null, 'empty trigger is a no-op')
 
+// ---- admission / bed rules (real module) ---------------------------------------
+// Normalisation, occupancy and the admission validators live in
+// src/features/admissions/domain.js, which is deliberately free of Firebase
+// imports so this test exercises the real implementation rather than a copy.
+import {
+  ADMISSION_ACTIVE, ADMISSION_DISCHARGED, ADMISSION_TYPES,
+  tsMillis, admissionStatus, isAdmissionActive, normalizeAdmission,
+  occupancySummary, wardOccupancy, occupiedInWard,
+  activeAdmissionForPatient, indexAdmissionsByEncounter, activeAdmissionForEncounter,
+  validateAdmissionInput, validateDischargeInput, validateWardCapacity,
+} from '../src/features/admissions/domain.js'
+
+assert.deepEqual(ADMISSION_TYPES, ['Emergency', 'Elective', 'Transfer', 'Observation'], 'admission types')
+assert.equal(ADMISSION_ACTIVE, 'active')
+assert.equal(ADMISSION_DISCHARGED, 'discharged')
+
+// Firestore Timestamps, { seconds } and epoch millis all have to survive.
+assert.equal(tsMillis({ toMillis: () => 1700000000000 }), 1700000000000, 'Timestamp')
+assert.equal(tsMillis({ seconds: 1700000000 }), 1700000000000, 'Firestore seconds shape')
+assert.equal(tsMillis(1700000000000), 1700000000000, 'epoch millis')
+assert.equal(tsMillis(null), 0, 'missing timestamp is 0')
+assert.equal(tsMillis('nope'), 0, 'unparseable timestamp is 0')
+
+// Status vocabulary. An admission only stops holding a bed when explicitly
+// discharged — a missing or unknown status must fail towards "still in".
+assert.equal(admissionStatus('active'), ADMISSION_ACTIVE)
+assert.equal(admissionStatus('Admitted'), ADMISSION_ACTIVE, 'legacy chart status')
+assert.equal(admissionStatus('  IN_CONSULTATION '), ADMISSION_ACTIVE, 'unknown status holds the bed')
+assert.equal(admissionStatus(undefined), ADMISSION_ACTIVE, 'missing status holds the bed')
+assert.equal(admissionStatus('discharged'), ADMISSION_DISCHARGED)
+assert.equal(admissionStatus('Deceased'), ADMISSION_DISCHARGED)
+assert.equal(isAdmissionActive('closed'), false, 'closed is discharged')
+assert.equal(isAdmissionActive(''), true, 'empty is active')
+
+// Both writers are understood: the service schema (ward_name/bed_number/
+// attending_provider/active) and the legacy patient-chart schema
+// (ward/bed/doctor/'Admitted') that used to make a bed invisible to the board.
+const legacy = normalizeAdmission({
+  id: 'a1', patient_id: 'p1', patient_name: 'Legacy Patient',
+  ward: 'Ward B', bed: 'Bed 4', doctor: 'Dr. N. Eze', reason: 'Observation', status: 'Admitted',
+  created_at: 1700000000000,
+})
+assert.equal(legacy.wardName, 'Ward B', 'legacy ward maps to wardName')
+assert.equal(legacy.bedNumber, 'Bed 4', 'legacy bed maps to bedNumber')
+assert.equal(legacy.attendingProvider, 'Dr. N. Eze', 'legacy doctor maps to attendingProvider')
+assert.equal(legacy.admissionReason, 'Observation', 'legacy reason maps to admissionReason')
+assert.equal(legacy.status, ADMISSION_ACTIVE, "legacy 'Admitted' is an active bed")
+
+const canonical = normalizeAdmission({
+  id: 'a2', patient_id: 'p1', patient_name: 'Canonical Patient', organization_id: 'org1',
+  encounter_id: 'enc_7', ward_name: 'Ward A', bed_number: 'Bed 2',
+  attending_provider: 'Dr. A. Balogun', admission_type: 'Emergency', status: 'active',
+  created_at: 1700000000000,
+})
+assert.equal(canonical.encounterId, 'enc_7', 'one-way link to the triggering encounter')
+assert.equal(canonical.admissionDate, 1700000000000, 'admission date falls back to created_at')
+assert.equal(canonical.organizationId, 'org1')
+
+// ---- occupancy --------------------------------------------------------------
+const wards = [
+  { name: 'Ward A', totalBeds: 2 },
+  { name: 'Ward B', totalBeds: 1 },
+  { name: 'Ward C', totalBeds: 0 },
+]
+const admRows = [legacy, canonical] // both active: Ward B x1, Ward A x1
+const occ = wardOccupancy(admRows, wards)
+const wardA = occ.find((w) => w.name === 'Ward A')
+const wardC = occ.find((w) => w.name === 'Ward C')
+assert.equal(wardA.occupied, 1)
+assert.equal(wardA.free, 1)
+assert.equal(wardA.pct, 50)
+assert.equal(wardC.unconfigured, true, 'ward with no bed count is flagged, not 0% full')
+assert.equal(occupiedInWard(admRows, 'Ward A'), 1)
+assert.equal(occupiedInWard(admRows, 'Ward Z'), 0, 'unknown ward is 0, not a crash')
+
+const sum = occupancySummary(admRows, wards)
+assert.equal(sum.active, 2)
+assert.equal(sum.discharged, 0)
+assert.equal(sum.totalBeds, 3)
+assert.equal(sum.free, 1)
+assert.equal(sum.occupancyPct, 67)
+
+// A discharged admission frees its bed again.
+const afterDischarge = occupancySummary([legacy, { ...canonical, status: 'discharged' }], wards)
+assert.equal(afterDischarge.active, 1, 'discharging frees the bed')
+assert.equal(afterDischarge.discharged, 1)
+assert.equal(afterDischarge.free, 2)
+
+// Over-capacity is reported rather than hidden behind a negative free count.
+const stuffed = occupancySummary([...admRows, { ...canonical, id: 'a3', wardName: 'Ward B' }], wards)
+const stuffedB = stuffed.wards.find((w) => w.name === 'Ward B')
+assert.equal(stuffedB.overCapacity, true, 'over-capacity ward is flagged')
+assert.equal(stuffedB.free, 0, 'free beds never go negative')
+
+// Raw (un-normalized) rows are accepted too, so callers cannot get it wrong.
+assert.equal(occupancySummary([{ ward_name: 'Ward A', status: 'active' }], wards).active, 1, 'raw rows normalised')
+
+// ---- one bed per patient ----------------------------------------------------
+assert.equal(activeAdmissionForPatient(admRows, 'p1').id, 'a1', 'first active bed wins')
+assert.equal(activeAdmissionForPatient(admRows, 'p2'), null, 'unknown patient holds nothing')
+assert.equal(activeAdmissionForPatient(admRows, ''), null, 'no patient id, no match')
+
+// ---- encounter linkage ------------------------------------------------------
+const index = indexAdmissionsByEncounter([canonical, legacy, { ...canonical, id: 'a4', status: 'discharged' }])
+assert.equal(index.get('enc_7').length, 2, 'both linked admissions indexed')
+assert.equal(index.has(''), false, 'unlinked admissions are not indexed')
+assert.equal(activeAdmissionForEncounter(index, 'enc_7').id, 'a2', 'active beat is preferred')
+assert.equal(activeAdmissionForEncounter(index, 'enc_9'), null, 'unlinked encounter holds no bed')
+assert.equal(activeAdmissionForEncounter(index, ''), null, 'blank encounter id is safe')
+assert.equal(activeAdmissionForEncounter(new Map(), 'enc_7'), null, 'empty index is safe')
+
+// ---- admission validation ---------------------------------------------------
+const ok = { patient_id: 'p9', ward_name: 'Ward A', bed_number: 'Bed 3' }
+assert.equal(validateAdmissionInput(ok, { wards, admissions: admRows }), null, 'free bed in a configured ward passes')
+
+assert.match(
+  validateAdmissionInput({ ...ok, ward_name: 'Ward B' }, { wards, admissions: admRows }),
+  /is full \(1 \/ 1\)/,
+  'a full ward is refused'
+)
+assert.match(
+  validateAdmissionInput({ ...ok, ward_name: 'Ward A', bed_number: 'Bed 2' }, { wards, admissions: admRows }),
+  /already occupied by Canonical Patient/,
+  'a double-booked bed is refused even when the ward has capacity'
+)
+assert.match(
+  validateAdmissionInput({ patient_id: 'p1', ward_name: 'Ward A', bed_number: 'Bed 9' }, { wards, admissions: admRows }),
+  /already holds a bed/,
+  'one bed per patient'
+)
+// A discharged admission no longer blocks the patient. Both of p1's beds must be
+// discharged — one active bed is enough to refuse.
+assert.equal(
+  validateAdmissionInput({ patient_id: 'p1', ward_name: 'Ward A', bed_number: 'Bed 9' },
+    { wards, admissions: [legacy, { ...canonical, status: 'discharged' }] }),
+  'This patient already holds a bed — Ward B · Bed 4. Discharge or transfer them first.',
+  'the remaining active bed still blocks'
+)
+assert.equal(
+  validateAdmissionInput({ patient_id: 'p1', ward_name: 'Ward A', bed_number: 'Bed 9' },
+    { wards, admissions: [{ ...legacy, status: 'discharged' }, { ...canonical, status: 'discharged' }] }),
+  null,
+  'a discharged patient can be re-admitted'
+)
+// No ward master yet: nothing to check against, so it is allowed through.
+assert.equal(
+  validateAdmissionInput({ patient_id: 'p9', ward_name: 'Brand New Ward', bed_number: 'Bed 1' }, { wards, admissions: admRows }),
+  null,
+  'unknown ward is allowed when there is no ward master'
+)
+
+assert.equal(validateAdmissionInput({ ward_name: 'Ward A', bed_number: 'Bed 1' }, { wards, admissions: admRows }), 'Patient is required.')
+assert.equal(validateAdmissionInput({ patient_id: 'p9', bed_number: 'Bed 1' }, { wards, admissions: admRows }), 'Ward is required.')
+assert.equal(validateAdmissionInput({ patient_id: 'p9', ward_name: 'Ward A' }, { wards, admissions: admRows }), 'Bed is required.')
+assert.equal(
+  validateAdmissionInput({ ...ok, patient_id: 'p1', bed_number: 'Bed 3' }, { wards, admissions: [] }),
+  null,
+  'p1 holds nothing when the ward has no admissions yet'
+)
+
+// Linking an encounter to a different patient must be refused, or the bed would
+// be filed under someone else's clinical story.
+assert.equal(
+  validateAdmissionInput({ ...ok, encounter_id: 'enc_7' }, { wards, admissions: admRows, encounter: { patientId: 'p1' } }),
+  'That encounter belongs to a different patient.',
+)
+assert.equal(
+  validateAdmissionInput({ ...ok, encounter_id: 'enc_7' }, { wards, admissions: admRows, encounter: { patientId: 'p9' } }),
+  null,
+  'same patient links cleanly'
+)
+
+assert.equal(validateDischargeInput({ reason: 'Recovered' }), null)
+assert.equal(validateDischargeInput({ reason: '  ' }), 'Discharge reason is required.')
+assert.equal(validateDischargeInput({}), 'Discharge reason is required.')
+
+// Capacity equal to the current occupancy is fine; only *below* it is refused.
+assert.equal(validateWardCapacity(1, admRows, 'Ward A'), null, 'capacity may equal occupancy')
+assert.equal(validateWardCapacity(3, admRows, 'Ward A'), null, 'capacity may rise')
+assert.equal(validateWardCapacity(0, admRows, 'Ward A'), 'Total beds must be at least 1.')
+assert.equal(validateWardCapacity('abc', admRows, 'Ward A'), 'Total beds must be at least 1.')
+// Two patients in Ward A, so a one-bed capacity would strand someone.
+const twoInA = [...admRows, { ...canonical, id: 'a5', bedNumber: 'Bed 8' }]
+assert.equal(occupiedInWard(twoInA, 'Ward A'), 2, 'Ward A holds two')
+assert.equal(validateWardCapacity(1, twoInA, 'Ward A'), 'Cannot set below current occupancy (2).')
+
 console.log('smoke: all assertions passed')

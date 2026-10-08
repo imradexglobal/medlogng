@@ -10,6 +10,10 @@ import {
   getPatient, updatePatient, listPatientDocs, createPatientDoc, findOpenEncounterForPatient,
   myPatientCaps, friendlyPatientError, formatPhone,
 } from '../services/patientService.js'
+import {
+  createAdmission, dischargeAdmission, listOrgWards, validateAdmissionInput, normalizeAdmission,
+  ADMISSION_TYPES,
+} from '../services/admissionService.js'
 
 const TABS = ['Dashboard', 'Personal Data', 'Blood & Allergies', 'Next of Kin', 'Timeline', 'Encounters', 'Vitals', 'Diagnoses', 'Medications', 'Labs', 'Admissions', 'Documents']
 const SEXES = [{ value: '', label: 'Not set' }, 'Female', 'Male']
@@ -279,16 +283,19 @@ export async function PatientDetailView(app, params = {}) {
       })
     }
 
-    // Admissions
-    for (const a of admissions) {
+    // Admissions. Normalized so the timeline shows the same ward/bed/status the
+    // bed board shows, and records the encounter that triggered the admission.
+    for (const raw of admissions) {
+      const a = normalizeAdmission(raw)
       entries.push({
         type: 'admission',
-        timestamp: a.created_at,
+        timestamp: a.admissionDate || a.createdAt,
         icon: '🛏️',
-        primary: s(a.ward || a.ward_name) + ' · ' + s(a.bed || a.bed_label),
-        secondary: s(a.doctor || a.admitting_doctor) + ' · ' + s(a.status, 'Admitted'),
+        primary: s(a.wardName) + ' · ' + s(a.bedNumber),
+        secondary: s(a.attendingProvider) + ' · ' + s(a.status === 'discharged' ? 'Discharged' : 'Admitted') +
+          (a.encounterId ? ' · from encounter ' + a.encounterId.slice(0, 8) + '…' : ''),
         status: a.status,
-        clinician: s(a.doctor || a.admitting_doctor),
+        clinician: s(a.attendingProvider),
         raw: a,
       })
     }
@@ -611,10 +618,18 @@ function paneHtml(t) {
           '<tr><td><strong>' + esc(s(l.id)) + '</strong></td><td>' + esc(s(l.test || l.test_panel || l.panel)) + '</td>' +
           '<td>' + statusBadge(s(l.stage || l.status, 'Ordered')) + '</td><td class="mut">' + esc(when(l.created_at)) + '</td></tr>')
       case 'Admissions':
-        return table(['Ward · Bed', 'Since', 'Doctor', 'Status'], rows, (a) =>
-          '<tr><td><strong>' + esc(s(a.ward || a.ward_name) + ' · ' + s(a.bed || a.bed_label)) + '</strong></td>' +
-          '<td>' + esc(when(a.created_at)) + '</td><td>' + esc(s(a.doctor || a.admitting_doctor)) + '</td>' +
-          '<td>' + statusBadge(s(a.status, 'Admitted')) + '</td></tr>') +
+        return table(['Ward · Bed', 'Since', 'Doctor', 'From encounter', 'Status'], rows, (raw) => {
+          const a = normalizeAdmission(raw)
+          return '<tr><td><strong>' + esc(s(a.wardName) + ' · ' + s(a.bedNumber)) + '</strong></td>' +
+            '<td>' + esc(when(a.admissionDate || a.createdAt)) + '</td>' +
+            '<td>' + esc(s(a.attendingProvider)) + '</td>' +
+            '<td>' + (a.encounterId
+              ? '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(a.encounterId) + '">View</a>'
+              : '<span class="mut">—</span>') + '</td>' +
+            '<td>' + statusBadge(a.status === 'discharged' ? 'Discharged' : 'Admitted') +
+            (a.status === 'active' && canAdmit ? ' <button class="btn ghost sm" data-discharge-adm="' + esc(a.id) + '">Discharge</button>' : '') +
+            '</td></tr>'
+        }) +
           (canAdmit ? '<br/><button class="btn" id="admBtn">+ Admit patient</button>' : '')
       case 'Documents':
         return table(['File', 'Type', 'Added'], rows, (d) =>
@@ -711,25 +726,91 @@ function paneHtml(t) {
     })
   }
 
-  function openAdmission() {
+  // Admitting from the patient chart used to write straight into the
+  // `admissions` collection with its own vocabulary (ward/bed/doctor, status
+  // 'Admitted'). That made the bed invisible to the Admissions page — it matched
+  // neither 'active' nor 'discharged', so it held no bed on the board and could
+  // be double-booked. It now goes through the canonical service, which writes
+  // the ward_name/bed_number/attending_provider schema every reader expects and
+  // enforces the bed-capacity and one-bed-per-patient checks.
+  async function openAdmission() {
+    const [wards, openEnc, staff] = await Promise.all([
+      listOrgWards(authStore.getState().activeOrg).catch(() => []),
+      findOpenEncounterForPatient(pid, authStore.getState().activeOrg).catch(() => null),
+      getClinicalStaff(authStore.getState().activeOrg).catch(() => []),
+    ])
+    // The open encounter is what usually prompted the admission, so link it by
+    // default (one-way, per FHIR `Encounter.partOf`).
+    const linkedId = openEnc ? openEnc.id : ''
+    // Same doctor source as the Admissions page: the org's active memberships,
+    // with a free-text fallback so incomplete staff records cannot block a bed.
+    const providerField = staff.length
+      ? { name: 'attending_provider', label: 'Admitting doctor', type: 'select', options: staff }
+      : { name: 'attending_provider', label: 'Admitting doctor', placeholder: 'e.g. Dr. N. Eze' }
     formModal({
       title: 'Admit patient',
       submitLabel: 'Confirm admission',
       fields: [
-        { name: 'ward', label: 'Ward', required: true, placeholder: 'e.g. Ward A' },
-        { name: 'bed', label: 'Bed', placeholder: 'e.g. Bed 4' },
-        { name: 'doctor', label: 'Admitting doctor', placeholder: 'e.g. Dr. N. Eze' },
-        { name: 'reason', label: 'Reason', full: true, placeholder: 'e.g. Observation' },
-        { name: 'status', label: 'Status', type: 'select', options: ['Admitted'] },
+        wards.length
+          ? { name: 'ward_name', label: 'Ward', type: 'select', options: wards.map((w) => w.name), required: true }
+          : { name: 'ward_name', label: 'Ward', required: true, placeholder: 'e.g. Ward A' },
+        { name: 'bed_number', label: 'Bed', required: true, placeholder: 'e.g. Bed 4' },
+        { name: 'admission_type', label: 'Admission type', type: 'select', options: ADMISSION_TYPES },
+        providerField,
+        { name: 'admission_reason', label: 'Reason', full: true, placeholder: 'e.g. Observation' },
       ],
       onSubmit: async (v) => {
-        await createPatientDoc('admissions', pid, {
-          ward: v.ward, bed: v.bed || '', doctor: v.doctor || '', reason: v.reason || '',
-          status: v.status || 'Admitted',
-        }, 'beds.manage')
+        const { activeOrg } = authStore.getState()
+        const existing = await listPatientDocs('admissions', pid)
+        const invalid = validateAdmissionInput(
+          { ...v, encounter_id: linkedId },
+          { wards, admissions: existing.rows.map(normalizeAdmission), encounter: openEnc },
+        )
+        if (invalid) throw new Error(invalid)
+        await createAdmission({
+          patient_id: pid,
+          patient_name: p.name || '',
+          ward_name: v.ward_name,
+          bed_number: v.bed_number,
+          admission_type: v.admission_type,
+          admission_reason: v.admission_reason,
+          attending_provider: v.attending_provider,
+          encounter_id: linkedId,
+        })
         closeModal()
-        toast('Admission saved to Firestore')
+        toast('Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
+        // Both caches are dropped: the Admissions tab shows the new bed and the
+        // Dashboard timeline picks it up on the next visit.
         loadCache.Admissions = null
+        loadCache.Dashboard = null
+        await render('Admissions')
+      },
+    })
+    // Tell the user the bed will be linked to their open encounter.
+    const body = document.getElementById('modalBody')
+    if (body && openEnc) {
+      const note = document.createElement('p')
+      note.className = 'sub'
+      note.style.margin = '0 0 10px'
+      note.textContent = 'Linked to open encounter ' + String(openEnc.id).slice(0, 8) + '… (' + (openEnc.status || 'open') + '). The encounter stays open for documentation.'
+      body.prepend(note)
+    }
+  }
+
+  function openDischarge(admissionId) {
+    formModal({
+      title: 'Discharge patient',
+      submitLabel: 'Discharge',
+      fields: [
+        { name: 'reason', label: 'Discharge reason', required: true, full: true, placeholder: 'e.g. Recovered' },
+        { name: 'notes', label: 'Discharge notes', full: true, placeholder: 'Follow-up instructions…' },
+      ],
+      onSubmit: async (v) => {
+        await dischargeAdmission(admissionId, v)
+        closeModal()
+        toast('Patient discharged')
+        loadCache.Admissions = null
+        loadCache.Dashboard = null
         await render('Admissions')
       },
     })
@@ -829,6 +910,10 @@ function paneHtml(t) {
     const d = document.getElementById('dxBtn'); if (d) d.onclick = openDiagnosis
     const r = document.getElementById('rxBtn'); if (r) r.onclick = openPrescription
     const a = document.getElementById('admBtn'); if (a) a.onclick = openAdmission
+    // Discharge buttons rendered inside the Admissions tab rows.
+    pane.querySelectorAll('[data-discharge-adm]').forEach((b) => {
+      b.onclick = () => openDischarge(b.getAttribute('data-discharge-adm'))
+    })
 
     // Dashboard-specific handlers
     const feedFilter = document.getElementById('feedFilter')

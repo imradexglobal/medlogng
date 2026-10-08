@@ -239,22 +239,41 @@ service cloud.firestore {
       allow delete: if false;
     }
     match /admissions/{id} {
+      // READ MODEL: signedIn(), like every other clinical collection (see header).
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      allow update: if hasCap(resource.data.organization_id, 'beds.manage');
+      // organization_id is PINNED on update. Authorizing on
+      // request.resource.data.organization_id would let anyone holding
+      // beds.manage somewhere rewrite an admission owned by a DIFFERENT
+      // hospital and re-file it into their own org, because the rule would be
+      // checking the capability against the org the caller just moved it to.
+      // Check resource.data (the doc as it exists) and forbid the change.
+      allow update: if resource.data.organization_id == request.resource.data.organization_id
+        && hasCap(resource.data.organization_id, 'beds.manage');
+      // An admission is never deleted — discharge is the only way out, so the
+      // bed history stays auditable.
       allow delete: if false;
     }
     match /beds/{id} {
       allow read: if signedIn();
-      allow write: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow update: if resource.data.organization_id == request.resource.data.organization_id
+        && hasCap(resource.data.organization_id, 'beds.manage');
+      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
     }
     match /wards/{id} {
       allow read: if signedIn();
-      allow write: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow update: if resource.data.organization_id == request.resource.data.organization_id
+        && hasCap(resource.data.organization_id, 'beds.manage');
+      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
     }
     match /rooms/{id} {
       allow read: if signedIn();
-      allow write: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow update: if resource.data.organization_id == request.resource.data.organization_id
+        && hasCap(resource.data.organization_id, 'beds.manage');
+      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
     }
     match /bed_allocations/{id} {
       allow read: if signedIn();

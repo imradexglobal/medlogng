@@ -291,20 +291,6 @@
       ]
     },
     {
-      "collectionGroup": "lab_results",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "organization_id",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "lab_order_id",
-          "order": "ASCENDING"
-        }
-      ]
-    },
-    {
       "collectionGroup": "admissions",
       "queryScope": "COLLECTION",
       "fields": [
@@ -313,12 +299,8 @@
           "order": "ASCENDING"
         },
         {
-          "fieldPath": "status",
+          "fieldPath": "encounter_id",
           "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "admitDateTime",
-          "order": "DESCENDING"
         }
       ]
     },

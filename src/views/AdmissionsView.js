@@ -1,22 +1,34 @@
 // Admissions + bed management with Firestore persistence (offline-first, cached).
 // Ward master (`wards` collection) drives bed totals; occupancy derives from
 // active admissions per ward. No historical admission is ever deleted.
-import { shell, statusBadge, formModal, toast, closeModal, wireToast } from '../components/shell.js'
+//
+// Admissions link back to the encounter that triggered them (`encounter_id`,
+// one-way, per HL7 FHIR `Encounter.partOf`), so a patient admitted after the
+// encounter is created still shows the clinical thread that led to the bed.
+// Admitting does NOT close the encounter — the clinician keeps documenting.
+import { shell, formModal, toast, closeModal, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
   listOrgAdmissions, createAdmission, dischargeAdmission, myAdmissionCaps,
+  listOrgWards, createWard, updateWardBeds, ADMISSION_TYPES,
+  occupancySummary, validateAdmissionInput, validateWardCapacity,
 } from '../services/admissionService.js'
-import { listOrgWards, createWard, updateWardBeds } from '../services/wardService.js'
+import { getEncounter } from '../services/consultationService.js'
+import { getClinicalStaff } from '../services/authService.js'
 import { listOrgPatients } from '../services/patientService.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 
-const ADMISSION_TYPES = ['Emergency', 'Elective', 'Transfer', 'Observation']
-const PROVIDERS = ['Dr. A. Balogun', 'Dr. N. Eze', 'Dr. K. Adamu', 'Dr. O. Adeyemo']
+// Admission types come from the domain module so this form cannot drift from
+// the list the service and tests agree on.
 
-export async function AdmissionsView(app) {
+export async function AdmissionsView(app, params = {}) {
   const { activeOrg } = authStore.getState()
   const caps = myAdmissionCaps()
+
+  // Deep link from the encounter workspace: #/admissions?enc=<id>&new=1
+  const linkedEncounterId = String(params.enc || '')
+  const autoOpen = String(params.new || '') === '1'
 
   if (!activeOrg) {
     shell(app, {
@@ -31,6 +43,8 @@ export async function AdmissionsView(app) {
   let admissions = []
   let patients = []
   let wards = []
+  let clinicalStaff = []
+  let linkedEncounter = null
 
   shell(app, {
     active: '/admissions',
@@ -40,29 +54,43 @@ export async function AdmissionsView(app) {
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>' +
       (caps.canAdmit ? '<button class="btn ghost" id="wardsBtn">Manage wards</button><button class="btn" id="admitBtn">+ Admit patient</button>' : ''),
     body:
+      '<div id="adm-context"></div>' +
       '<div class="grid4"><div class="stat"><em>Occupied</em><strong id="adm-occupied">0</strong><span id="adm-occ-sub">active admissions</span></div>' +
       '<div class="stat"><em>Available</em><strong id="adm-available">0</strong><span>free beds</span></div>' +
       '<div class="stat"><em>Total beds</em><strong id="adm-total-beds">0</strong><span>ward master</span></div>' +
       '<div class="stat"><em>Discharged</em><strong id="adm-discharged">0</strong><span>audited history kept</span></div></div>' +
       '<div class="card"><div class="card-head"><h3>Wards</h3><span class="pill" id="adm-ward-count">0 wards</span></div>' +
       '<div class="wardgrid" id="adm-wards"><p class="sub">Loading…</p></div></div>' +
-      '<div class="card"><div class="card-head"><h3>Current admissions</h3></div>' +
-      '<div class="tblwrap"><table class="tbl" id="adm-tbl"><tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th></th></tr>' +
-      '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
+      '<div class="card"><div class="card-head"><h3 id="adm-tbl-title">Current admissions</h3></div>' +
+      '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="admSearch" placeholder="Search patient, ward, bed or doctor…" style="max-width:240px">' +
+      '<select class="input" id="admStatus" style="max-width:170px"><option value="active" selected>Active</option><option value="discharged">Discharged</option><option value="all">All admissions</option></select></div>' +
+      '<div class="tblwrap"><table class="tbl" id="adm-tbl"><tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th>From encounter</th><th></th></tr>' +
+      '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
       '</table></div></div>',
   })
 
   async function load() {
     try {
-      const [adm, pats, w] = await Promise.all([
+      const [adm, pats, w, staff] = await Promise.all([
         listOrgAdmissions(activeOrg),
         listOrgPatients(activeOrg).catch(() => []),
         listOrgWards(activeOrg).catch(() => []),
+        // Attending doctors come from the org's own active memberships, so a
+        // discharged or renamed clinician cannot linger in a hard-coded list.
+        getClinicalStaff(activeOrg).catch(() => []),
       ])
       admissions = adm
       patients = pats
       wards = w
+      clinicalStaff = staff
+      // Resolve the deep-linked encounter so the admit form can pre-fill the
+      // patient and lock the clinical link. A missing encounter is not fatal —
+      // the page still works, it just cannot pre-fill.
+      if (linkedEncounterId && !linkedEncounter) {
+        linkedEncounter = await getEncounter(linkedEncounterId).catch(() => null)
+      }
       render()
+      if (autoOpen) openAdmitForm()
     } catch (e) {
       console.error('[admissions] list failed:', e)
       toast('Could not load admissions: ' + friendlyWriteError(e))
@@ -73,43 +101,96 @@ export async function AdmissionsView(app) {
     return admissions.filter((a) => a.status === 'active' && a.wardName === wardName).length
   }
 
+  // Rows the table shows, after the search box and the active/discharged filter.
+  function visibleAdmissions() {
+    const q = String(document.getElementById('admSearch')?.value || '').trim().toLowerCase()
+    const mode = document.getElementById('admStatus')?.value || 'active'
+    return admissions.filter((a) => {
+      if (mode === 'active' && a.status !== 'active') return false
+      if (mode === 'discharged' && a.status !== 'discharged') return false
+      if (q) {
+        const hay = [a.patientName, a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
+          .join(' ').toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      return true
+    })
+  }
+
   function render() {
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v) }
-    const active = admissions.filter((a) => a.status === 'active')
-    const totalBeds = wards.reduce((s, w) => s + (w.totalBeds || 0), 0)
-    set('adm-occupied', active.length)
-    set('adm-total-beds', totalBeds)
-    set('adm-available', wards.length ? Math.max(0, totalBeds - active.length) : '—')
-    set('adm-discharged', admissions.filter((a) => a.status === 'discharged').length)
+    const sum = occupancySummary(admissions, wards)
+    set('adm-occupied', sum.active)
+    set('adm-total-beds', sum.totalBeds)
+    set('adm-available', sum.hasCapacity ? sum.free : '—')
+    set('adm-discharged', sum.discharged)
     const occSub = document.getElementById('adm-occ-sub')
-    if (occSub) occSub.textContent = totalBeds ? Math.round((active.length / totalBeds) * 100) + '% occupancy' : 'active admissions'
+    if (occSub) occSub.textContent = sum.hasCapacity ? sum.occupancyPct + '% occupancy' : 'no ward master yet'
     set('adm-ward-count', wards.length + (wards.length === 1 ? ' ward' : ' wards'))
+
+    // Banner explaining where this page was opened from, so the link between the
+    // encounter and the bed is explicit rather than implied.
+    const ctx = document.getElementById('adm-context')
+    if (ctx) {
+      if (linkedEncounter && linkedEncounter.patientName) {
+        ctx.innerHTML = '<div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Admitting from encounter</h3>' +
+          '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(linkedEncounter.id) + '">Back to encounter →</a></div>' +
+          '<p class="sub"><strong>' + esc(linkedEncounter.patientName) + '</strong> · encounter ' +
+          esc(String(linkedEncounter.id).slice(0, 8)) + '… · ' + esc(linkedEncounter.status || 'open') +
+          '. The new admission is linked to this encounter; the encounter stays open for documentation.</p></div>'
+      } else if (linkedEncounterId) {
+        ctx.innerHTML = '<div class="card" style="margin-bottom:14px"><p class="sub">Linked encounter ' +
+          esc(linkedEncounterId.slice(0, 8)) + '… could not be loaded — the admission will be recorded without a clinical link.</p></div>'
+      } else {
+        ctx.innerHTML = ''
+      }
+    }
 
     const wg = document.getElementById('adm-wards')
     if (wg) {
-      wg.innerHTML = wards.length
-        ? wards.map((w) => {
-          const occ = occupiedIn(w.name)
-          const free = Math.max(0, (w.totalBeds || 0) - occ)
-          const pct = w.totalBeds ? Math.round((occ / w.totalBeds) * 100) : 0
+      wg.innerHTML = sum.wards.length
+        ? sum.wards.map((w) => {
+          const tone = w.overCapacity ? 'bad' : (w.pct > 80 ? 'warn' : 'info')
+          const detail = w.unconfigured
+            ? 'no bed count configured'
+            : w.free + ' free · ' + w.pct + '% occupied'
           return '<div class="ward"><div class="card-head"><h4>' + esc(w.name) + '</h4>' +
-            '<span class="pill ' + (pct > 80 ? 'warn' : 'info') + '">' + occ + ' / ' + w.totalBeds + '</span></div>' +
-            '<p class="sub">' + free + ' free · ' + pct + '% occupied</p></div>'
+            '<span class="pill ' + tone + '">' + w.occupied + ' / ' + (w.totalBeds || '?') + '</span></div>' +
+            '<p class="sub">' + esc(detail) + '</p></div>'
         }).join('')
         : '<p class="sub">No wards configured yet.' + (caps.canAdmit ? ' Use “Manage wards” to add your wards and bed counts.' : ' Ask an administrator to configure wards.') + '</p>'
     }
 
     const tbl = document.getElementById('adm-tbl')
-    if (tbl) {
-      const head = '<tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th></th></tr>'
-      const rows = active.map((a) =>
-        '<tr><td><strong>' + esc(a.patientName) + '</strong></td>' +
+    const titleEl = document.getElementById('adm-tbl-title')
+    const rows = visibleAdmissions().map((a) => {
+      const when = a.admissionDate || a.createdAt
+      const patientCell = a.patientId
+        ? '<a href="#/patients/' + encodeURIComponent(a.patientId) + '"><strong>' + esc(a.patientName) + '</strong></a>'
+        : '<strong>' + esc(a.patientName || 'Unknown patient') + '</strong>'
+      const encCell = a.encounterId
+        ? '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(a.encounterId) + '">View encounter</a>'
+        : '<span class="mut">—</span>'
+      const action = a.status === 'active'
+        ? (caps.canDischarge ? '<button class="btn ghost sm" data-discharge="' + esc(a.id) + '">Discharge</button>' : '<span class="mut">—</span>')
+        : '<span class="mut">Discharged</span>'
+      return '<tr>' +
+        '<td>' + patientCell + '</td>' +
         '<td>' + esc(a.wardName) + ' · ' + esc(a.bedNumber) + '</td>' +
-        '<td>' + (a.createdAt ? new Date(a.createdAt).toLocaleDateString('en-NG') : '—') + '</td>' +
+        '<td>' + (when ? new Date(when).toLocaleDateString('en-NG') : '—') +
+          (a.status === 'discharged' && a.dischargeDate
+            ? '<div class="mut">out ' + new Date(a.dischargeDate).toLocaleDateString('en-NG') + '</div>' : '') + '</td>' +
         '<td>' + esc(a.attendingProvider || '—') + '</td>' +
-        '<td>' + (caps.canDischarge ? '<button class="btn ghost sm" data-discharge="' + esc(a.id) + '">Discharge</button>' : '<span class="mut">—</span>') + '</td></tr>'
-      ).join('')
-      tbl.innerHTML = head + (rows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No active admissions</td></tr>')
+        '<td>' + encCell + '</td>' +
+        '<td>' + action + '</td></tr>'
+    }).join('')
+    if (titleEl) {
+      const mode = document.getElementById('admStatus')?.value || 'active'
+      titleEl.textContent = mode === 'discharged' ? 'Discharge history' : (mode === 'all' ? 'All admissions' : 'Current admissions')
+    }
+    if (tbl) {
+      tbl.innerHTML = '<tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th>From encounter</th><th></th></tr>' +
+        (rows || '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No admissions match this filter</td></tr>')
       tbl.querySelectorAll('[data-discharge]').forEach((b) => {
         b.onclick = () => openDischargeForm(b.getAttribute('data-discharge'))
       })
@@ -118,41 +199,52 @@ export async function AdmissionsView(app) {
 
   function openAdmitForm() {
     if (!patients.length) { toast('No patients registered yet — register a patient first.'); return }
-    const patientOpts = patients.map((p) => ({ value: p.pid, label: p.name + ' · ' + (p.mrn || p.pid) }))
+    const enc = linkedEncounter
+    // When arriving from an encounter the patient is fixed: the bed must belong
+    // to the patient in that encounter, not to whoever is picked in a dropdown.
+    const fixedPatient = enc && enc.patientId
+      ? patients.find((p) => p.pid === enc.patientId) || { pid: enc.patientId, name: enc.patientName || enc.patientId }
+      : null
+    const patientOpts = fixedPatient
+      ? [{ value: fixedPatient.pid, label: (fixedPatient.name || fixedPatient.pid) + ' · ' + (fixedPatient.mrn || fixedPatient.pid) }]
+      : patients.map((p) => ({ value: p.pid, label: p.name + ' · ' + (p.mrn || p.pid) }))
     const wardField = wards.length
       ? { name: 'ward_name', label: 'Ward', type: 'select', options: wards.map((w) => w.name), required: true }
       : { name: 'ward_name', label: 'Ward (no ward master yet — type a name)', required: true, placeholder: 'e.g. Ward A' }
+    // With staff on file the doctor is a pick from the org's active memberships;
+    // with none, it stays a free-text field so an admission is never blocked by
+    // incomplete staff records.
+    const providerField = clinicalStaff.length
+      ? { name: 'attending_provider', label: 'Attending doctor', type: 'select', options: clinicalStaff }
+      : { name: 'attending_provider', label: 'Attending doctor (no staff on file — type a name)', placeholder: 'e.g. Dr. N. Eze' }
     formModal({
-      title: 'Admit patient',
+      title: enc ? 'Admit patient (from encounter)' : 'Admit patient',
       submitLabel: 'Confirm admission',
       fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true },
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, value: fixedPatient ? fixedPatient.pid : '' },
         wardField,
         { name: 'bed_number', label: 'Bed', required: true, placeholder: 'e.g. Bed 1' },
         { name: 'admission_type', label: 'Admission type', type: 'select', options: ADMISSION_TYPES },
-        { name: 'attending_provider', label: 'Attending doctor', type: 'select', options: PROVIDERS },
+        providerField,
         { name: 'admission_reason', label: 'Reason', full: true, placeholder: 'e.g. Observation' },
       ],
       onSubmit: async (v) => {
-        try {
-          const occupied = occupiedIn(v.ward_name)
-          const ward = wards.find((w) => w.name === v.ward_name)
-          if (ward && occupied >= ward.totalBeds) {
-            throw new Error(v.ward_name + ' is full (' + occupied + ' / ' + ward.totalBeds + '). Transfer or discharge first.')
-          }
-          const sel = patients.find((p) => p.pid === v.patient_id)
-          await createAdmission({
-            patient_id: v.patient_id,
-            patient_name: sel ? sel.name : v.patient_id,
-            ward_name: v.ward_name,
-            bed_number: v.bed_number,
-            admission_type: v.admission_type,
-            admission_reason: v.admission_reason,
-            attending_provider: v.attending_provider,
-          })
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
-        }
+        // Same validator the service runs, applied first so the user sees the
+        // reason inline without a round trip.
+        const invalid = validateAdmissionInput(v, { wards, admissions, encounter: enc })
+        if (invalid) throw new Error(invalid)
+        const sel = patients.find((p) => p.pid === v.patient_id)
+        await createAdmission({
+          patient_id: v.patient_id,
+          patient_name: (sel && sel.name) || (fixedPatient && fixedPatient.name) || v.patient_id,
+          ward_name: v.ward_name,
+          bed_number: v.bed_number,
+          admission_type: v.admission_type,
+          admission_reason: v.admission_reason,
+          attending_provider: v.attending_provider,
+          // One-way link back to the encounter that triggered this admission.
+          encounter_id: enc ? enc.id : '',
+        })
         closeModal()
         toast('Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
         await load()
@@ -164,7 +256,7 @@ export async function AdmissionsView(app) {
     const adm = admissions.find((a) => a.id === id)
     if (!adm) return
     formModal({
-      title: 'Discharge — ' + adm.patientName,
+      title: 'Discharge — ' + (adm.patientName || 'patient'),
       submitLabel: 'Discharge',
       fields: [
         { name: 'reason', label: 'Discharge reason', required: true, full: true, placeholder: 'e.g. Recovered' },
@@ -189,11 +281,11 @@ export async function AdmissionsView(app) {
       submitLabel: '+ Add ward',
       fields: [
         { name: 'name', label: 'New ward name', full: true, placeholder: 'e.g. Ward A' },
-        { name: 'total_beds', label: 'Total beds', placeholder: 'e.g. 20' },
+        { name: 'total_beds', label: 'Total beds', type: 'number', placeholder: 'e.g. 20' },
       ],
       onSubmit: async (v) => {
         try {
-          if (!v.name) throw new Error('Enter a ward name to add it, with total beds.')
+          if (!String(v.name || '').trim()) throw new Error('Enter a ward name to add it, with total beds.')
           await createWard({ name: v.name, total_beds: v.total_beds })
         } catch (e) {
           throw new Error(friendlyWriteError(e))
@@ -207,43 +299,51 @@ export async function AdmissionsView(app) {
     // #modalBody synchronously, so this runs after the form exists).
     const body = document.getElementById('modalBody')
     if (body) {
-      const div = document.createElement('div')
       const rows = wards.map((w) =>
         '<tr><td><strong>' + esc(w.name) + '</strong></td><td>' + occupiedIn(w.name) + ' occupied</td>' +
         '<td>' + w.totalBeds + ' beds</td>' +
         '<td><button class="btn ghost sm" data-edit-ward="' + esc(w.id) + '">Edit beds</button></td></tr>'
       ).join('')
+      const div = document.createElement('div')
       div.innerHTML =
         '<div class="tblwrap"><table class="tbl"><tr><th>Ward</th><th>Occupancy</th><th>Capacity</th><th></th></tr>' +
         (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:12px 8px">No wards yet — add your first ward below</td></tr>') +
         '</table></div><br/>'
       body.prepend(div)
+      // Delegation is assigned with `onclick` (not addEventListener) so re-opening
+      // this modal REPLACES the handler. A document-level listener would
+      // accumulate one closure per visit to this page, firing openEditWardBeds
+      // once per past render — and each stale copy would carry an old ward list.
+      body.onclick = (e) => {
+        const t = e.target && e.target.closest ? e.target.closest('[data-edit-ward]') : null
+        if (t) openEditWardBeds(t.getAttribute('data-edit-ward'))
+      }
     }
   }
 
   function openEditWardBeds(wardId) {
     const w = wards.find((x) => x.id === wardId)
     if (!w) return
+    const occ = occupiedIn(w.name)
     formModal({
       title: 'Edit beds — ' + w.name,
       submitLabel: 'Save',
       fields: [
-        { name: 'total_beds', label: 'Total beds', required: true, placeholder: String(w.totalBeds) },
+        { name: 'total_beds', label: 'Total beds', type: 'number', required: true, value: String(w.totalBeds) },
       ],
       onSubmit: async (v) => {
-        try {
-          const n = Number(v.total_beds)
-          const occ = occupiedIn(w.name)
-          if (n < occ) throw new Error('Cannot set below current occupancy (' + occ + ').')
-          await updateWardBeds(wardId, n)
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
-        }
+        const invalid = validateWardCapacity(v.total_beds, admissions, w.name)
+        if (invalid) throw new Error(invalid)
+        await updateWardBeds(wardId, Number(v.total_beds))
         closeModal()
         toast('Ward updated')
         await load()
       },
     })
+    const err = document.getElementById('fmError')
+    if (err && occ) {
+      err.textContent = occ + ' bed' + (occ === 1 ? '' : 's') + ' currently occupied — capacity cannot go below that.'
+    }
   }
 
   document.getElementById('refreshBtn').onclick = load
@@ -251,11 +351,10 @@ export async function AdmissionsView(app) {
   if (admitBtn) admitBtn.onclick = openAdmitForm
   const wardsBtn = document.getElementById('wardsBtn')
   if (wardsBtn) wardsBtn.onclick = openWardsManager
-  // Row-level ward edit buttons live inside the manager modal; delegate globally.
-  document.addEventListener('click', (e) => {
-    const t = e.target && e.target.closest ? e.target.closest('[data-edit-ward]') : null
-    if (t) openEditWardBeds(t.getAttribute('data-edit-ward'))
-  })
+  const admSearch = document.getElementById('admSearch')
+  if (admSearch) admSearch.addEventListener('input', render)
+  const admStatus = document.getElementById('admStatus')
+  if (admStatus) admStatus.addEventListener('change', render)
   wireToast(app)
 
   await load()

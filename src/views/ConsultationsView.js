@@ -6,6 +6,9 @@ import {
   findOpenEncounterForPatient, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_TYPES, ENCOUNTER_STATUS_FLOW_META,
 } from '../services/consultationService.js'
 import { listOrgPatients, formatPhone } from '../services/patientService.js'
+import {
+  listOrgAdmissions, myAdmissionCaps, indexAdmissionsByEncounter, activeAdmissionForEncounter,
+} from '../services/admissionService.js'
 import { createLabOrder as createLabOrderDoc, myLabCaps } from '../services/laboratoryService.js'
 import { myBillingCaps } from '../services/billingService.js'
 import { myActiveMembership, getClinicalStaff } from '../services/authService.js'
@@ -69,6 +72,11 @@ export async function ConsultationsView(app, params = {}) {
   let patients = []
   let pIndex = new Map()
   let selectedEncounter = null
+  // Admissions grouped by the encounter that triggered them. Fetched once per
+  // load so the queue can badge every admitted patient without one query a row.
+  let admissionsByEncounter = new Map()
+  let activeBedByPatient = new Map()
+  const bedCaps = myAdmissionCaps()
 
   shell(app, {
     active: '/consultations',
@@ -89,11 +97,13 @@ export async function ConsultationsView(app, params = {}) {
       '<p class="sub">Select a patient from the queue to open the encounter workspace.</p>' +
       '<div class="flow" id="enc-flow">' + STATUS_FLOW.map((s) => '<span class="fstep">' + esc(s.step) + '</span><span class="farrow">→</span>').join('').replace(/<span class="farrow">→<\/span>$/, '') + '</div>' +
       '<div id="encWho"></div>' +
+      '<div id="encAdm"></div>' +
       '<div class="kv"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div></div><br/>' +
       '<label class="fld full"><span>Clinical note (SOAP)</span><textarea class="input" id="enc-note" rows="4" placeholder="S: … O: … A: … P: …"></textarea></label><div class="toolbar" style="margin-top:6px"><button class="btn sm" id="saveNoteB">Save note</button><span class="mut" id="noteState"></span></div><br/>' +
       '<div id="planBox" hidden><div class="fld full"><span>Treatment plan</span><div class="input" id="planView" style="white-space:pre-wrap"></div></div></div>' +
       '<div class="toolbar"><button class="btn ghost sm" id="vitalsB">+ Vitals</button><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="planB">+ Plan</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
-      (caps.canEdit ? '<button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm" id="closeEncB">Close encounter →</button>' : '') + '</div></div></div>',
+      (caps.canEdit ? '<button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm" id="closeEncB">Close encounter →</button>' : '') +
+      (bedCaps.canAdmit ? '<button class="btn sm" id="admitFromEncB">Admit patient</button>' : '') + '</div></div></div>',
   })
 
   // The queue only stores patient_name, so the readable identity (MRN, age,
@@ -119,13 +129,21 @@ export async function ConsultationsView(app, params = {}) {
 
   async function load() {
     try {
-      const [encs, pats] = await Promise.all([
+      const [encs, pats, adms] = await Promise.all([
         listOrgEncounters(activeOrg),
         listOrgPatients(activeOrg).catch(() => []),
+        listOrgAdmissions(activeOrg).catch(() => []),
       ])
       encounters = encs
       patients = pats
       pIndex = new Map(patients.map((p) => [p.pid, p]))
+      admissionsByEncounter = indexAdmissionsByEncounter(adms)
+      activeBedByPatient = new Map()
+      for (const a of adms) {
+        if (a.status === 'active' && a.patientId && !activeBedByPatient.has(a.patientId)) {
+          activeBedByPatient.set(a.patientId, a)
+        }
+      }
       if (!selectedEncounter && encounters.length) {
         selectedEncounter = (wantEnc && encounters.find((e) => e.id === wantEnc)) || encounters.find((e) => e.status !== 'closed') || encounters[0]
       }
@@ -139,6 +157,19 @@ export async function ConsultationsView(app, params = {}) {
       console.error('[consultations] list failed:', e)
       toast('Could not load encounters: ' + friendlyWriteError(e))
     }
+  }
+
+  // The bed currently held by an admission linked to this encounter, if any.
+  function linkedBed(enc) {
+    return enc ? activeAdmissionForEncounter(admissionsByEncounter, enc.id) : null
+  }
+
+  // The patient's current bed from ANY admission, linked or not — a patient who
+  // was admitted from the ward desk still holds one bed, and offering a second
+  // admit would be a double-booking the service would (rightly) reject.
+  function patientBed(enc) {
+    if (!enc || !enc.patientId) return null
+    return activeBedByPatient.get(enc.patientId) || null
   }
 
   let noteDirty = false
@@ -169,12 +200,19 @@ export async function ConsultationsView(app, params = {}) {
     const rows = shown.map((e) => {
       const m = patientMeta(e)
       const who = [m.age !== '' && m.age != null ? m.age + 'y' : '', m.sex].filter(Boolean).join(' · ')
+      const b = patientBed(e)
+      // Bed badge lives inside the status cell so the table keeps its four
+      // columns — the "Waited" clock ticks r.cells[2].
+      const bedBadge = b
+        ? '<div style="margin-top:4px"><span class="pill ok" title="Admitted to ' + esc(b.wardName) + ' · ' + esc(b.bedNumber) + '">🛏 ' +
+          esc(String(b.wardName || '').slice(0, 14)) + ' · ' + esc(b.bedNumber) + '</span></div>'
+        : ''
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '">' +
         '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
         '<td><div>' + esc(m.mrn) + '</div><div class="mut">' + esc(who || 'No demographics on file') + '</div>' +
         (m.phone ? '<div class="mut">' + esc(m.phone) + '</div>' : '') + '</td>' +
         '<td class="mut">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
-        '<td>' + encBadge(e.status) + '</td></tr>'
+        '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
     }).join('')
     tbl.innerHTML = head + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter</td></tr>')
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
@@ -197,6 +235,10 @@ export async function ConsultationsView(app, params = {}) {
       if (titleEl) titleEl.textContent = 'No encounter selected'
       if (statusEl) statusEl.textContent = '—'
       if (whoEl) whoEl.innerHTML = ''
+      const admEl0 = document.getElementById('encAdm')
+      if (admEl0) admEl0.innerHTML = ''
+      const admitBtn0 = document.getElementById('admitFromEncB')
+      if (admitBtn0) admitBtn0.style.display = 'none'
       paintFlow(-1)
       return
     }
@@ -222,6 +264,34 @@ export async function ConsultationsView(app, params = {}) {
         '</div>'
     }
     paintFlow(STATUS_FLOW.findIndex((s) => s.key === e.status))
+
+    // ---- admission strip ----------------------------------------------------
+    // Per HL7 FHIR the admission is a stay hanging off this encounter, not a
+    // replacement for it: the clinician keeps documenting here, so nothing in
+    // this block closes or advances the encounter.
+    const admEl = document.getElementById('encAdm')
+    const admitBtn = document.getElementById('admitFromEncB')
+    const bed = linkedBed(e)
+    const anyBed = bed || patientBed(e)
+    if (admEl) {
+      if (anyBed) {
+        admEl.innerHTML =
+          '<div class="allergy" style="margin:0 0 12px;background:var(--emr-okbg);border-color:var(--emr-ok)">' +
+          '🛏 Inpatient · <strong>' + esc(anyBed.wardName || 'ward unknown') + ' · ' + esc(anyBed.bedNumber || 'bed unknown') + '</strong>' +
+          (bed ? ' — admitted from this encounter' : ' — admitted separately') +
+          (anyBed.attendingProvider ? ' · ' + esc(anyBed.attendingProvider) : '') +
+          ' <a class="btn ghost sm" href="#/admissions">Bed board →</a></div>'
+      } else {
+        admEl.innerHTML = bedCaps.canAdmit
+          ? '<p class="sub" style="margin:0 0 12px">Not admitted. Admitting from here links the bed to this encounter and leaves the encounter open for documentation.</p>'
+          : ''
+      }
+    }
+    if (admitBtn) {
+      const canAdmitThis = bedCaps.canAdmit && !anyBed && !!e.patientId
+      admitBtn.style.display = canAdmitThis ? '' : 'none'
+      admitBtn.title = anyBed ? 'This patient already holds a bed' : 'Admit to a ward bed, linked to this encounter'
+    }
     // Label Advance with where it actually goes, so the fallback is never a
     // blind step into an unknown stage.
     const advBtn = document.getElementById('advB')
@@ -508,6 +578,19 @@ export async function ConsultationsView(app, params = {}) {
   document.getElementById('labB').onclick = openLabOrderForm
   document.getElementById('planB').onclick = openPlanForm
   document.getElementById('billB').onclick = openBilling
+
+  // Admitting hands the patient AND this encounter to the Admissions page, which
+  // owns the single admit form. Deep-linking instead of duplicating the form
+  // here means the bed-full and double-admission checks cannot drift between two
+  // copies of the same UI.
+  const admitFromEncB = document.getElementById('admitFromEncB')
+  if (admitFromEncB) admitFromEncB.onclick = () => {
+    if (!selectedEncounter) { toast('Select an encounter first'); return }
+    if (!selectedEncounter.patientId) { toast('This encounter is not linked to a patient.'); return }
+    if (patientBed(selectedEncounter)) { toast('This patient already holds a bed — discharge them first.'); return }
+    const q = new URLSearchParams({ enc: selectedEncounter.id, new: '1' })
+    navigate('/admissions?' + q.toString())
+  }
   const advB = document.getElementById('advB')
   if (advB) advB.onclick = async () => {
     if (!selectedEncounter) { toast('Select an encounter first'); return }

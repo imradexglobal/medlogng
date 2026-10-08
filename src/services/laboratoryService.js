@@ -32,12 +32,17 @@ function toLabRow(r) {
     priority: r.priority || 'Routine',
     status: r.status || 'order',
     orderedBy: r.ordered_by || '',
+    orderedByName: r.ordered_by_name || '',
     orderedAt: r.ordered_at ? (typeof r.ordered_at.toMillis === 'function' ? r.ordered_at.toMillis() : r.ordered_at) : 0,
     result: r.result || null,
     verifiedBy: r.verified_by || '',
-    verifiedAt: r.verified_at || null,
-    collectedAt: r.collected_at || null,
-    processedAt: r.processed_at || null,
+    verifiedAt: r.verified_at ? (typeof r.verified_at.toMillis === 'function' ? r.verified_at.toMillis() : r.verified_at) : null,
+    acceptedAt: r.accepted_at ? (typeof r.accepted_at.toMillis === 'function' ? r.accepted_at.toMillis() : r.accepted_at) : null,
+    processingAt: r.processing_at ? (typeof r.processing_at.toMillis === 'function' ? r.processing_at.toMillis() : r.processing_at) : null,
+    completedAt: r.completed_at ? (typeof r.completed_at.toMillis === 'function' ? r.completed_at.toMillis() : r.completed_at) : null,
+    cancelledAt: r.cancelled_at ? (typeof r.cancelled_at.toMillis === 'function' ? r.cancelled_at.toMillis() : r.cancelled_at) : null,
+    collectedAt: r.collected_at ? (typeof r.collected_at.toMillis === 'function' ? r.collected_at.toMillis() : r.collected_at) : null,
+    processedAt: r.processed_at ? (typeof r.processed_at.toMillis === 'function' ? r.processed_at.toMillis() : r.processed_at) : null,
     raw: r,
   }
 }
@@ -112,24 +117,22 @@ function requireLabUpdate() {
 
 // ---- status update --------------------------------------------------------
 export async function updateLabStatus(labId, status) {
-  const validStatuses = ['order', 'accepted', 'specimen-collected', 'processing', 'completed', 'verified']
+  const validStatuses = ['order', 'accepted', 'specimen-collected', 'processing', 'completed', 'verified', 'cancelled']
   if (!validStatuses.includes(status)) throw new Error('Invalid lab status: ' + status)
   requireLabUpdate()
 
   const updateData = { status, updated_at: serverTimestamp() }
 
-  // Add collected_at when specimen is collected
-  if (status === 'specimen-collected') {
-    updateData.collected_at = serverTimestamp()
-  }
-  // Add processed_at when processing is complete
+  // Record the timestamp for each workflow transition.
+  if (status === 'accepted') updateData.accepted_at = serverTimestamp()
+  if (status === 'specimen-collected') updateData.collected_at = serverTimestamp()
+  if (status === 'processing') updateData.processing_at = serverTimestamp()
   if (status === 'completed') {
     updateData.processed_at = serverTimestamp()
+    updateData.completed_at = serverTimestamp()
   }
-  // Add verified_at when verified
-  if (status === 'verified') {
-    updateData.verified_at = serverTimestamp()
-  }
+  if (status === 'verified') updateData.verified_at = serverTimestamp()
+  if (status === 'cancelled') updateData.cancelled_at = serverTimestamp()
 
   await updateDoc(doc(db, LABS, labId), updateData)
 

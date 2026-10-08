@@ -1,5 +1,5 @@
 // Laboratory with Firestore persistence (offline-first, cached).
-import { shell, statusBadge, formModal, toast, closeModal, wireToast, openModal } from '../components/shell.js'
+import { shell, formModal, toast, closeModal, wireToast, openModal } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
   listOrgLabs, createLabOrder, updateLabStatus, addLabResult, addLabVerification, myLabCaps,
@@ -10,7 +10,7 @@ import { esc } from '../utils/sanitize.js'
 
 const TEST_PANELS = ['FBC + ESR', 'Malaria RDT + Widal', 'Urinalysis + Culture', 'Lipid profile + HbA1c']
 const PRIORITIES = ['Routine', 'Urgent', 'STAT']
-const STAGES = ['All', 'order', 'accepted', 'specimen-collected', 'processing', 'completed', 'verified']
+const STAGES = ['All', 'order', 'accepted', 'specimen-collected', 'processing', 'completed', 'verified', 'cancelled']
 const PAGE_SIZE = 20
 
 function priorityPill(p) {
@@ -18,9 +18,23 @@ function priorityPill(p) {
   return '<span class="pill ' + cls + '">' + esc(p) + '</span>'
 }
 
+function labStatusBadge(s) {
+  const map = {
+    order: ['Placed', 'warn'],
+    accepted: ['Accepted', 'info'],
+    'specimen-collected': ['Specimen collected', 'info'],
+    processing: ['Processing', 'info'],
+    completed: ['Completed', 'ok'],
+    verified: ['Verified', 'ok'],
+    cancelled: ['Cancelled', 'bad'],
+  }
+  const m = map[s] || [s, '']
+  return '<span class="pill ' + m[1] + '">' + esc(m[0]) + '</span>'
+}
+
 function fmtDate(ts) {
   if (!ts) return '—'
-  const d = typeof ts === 'number' ? new Date(ts) : new Date(ts)
+  const d = new Date(ts)
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' ' +
     d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
 }
@@ -125,7 +139,7 @@ export async function LaboratoryView(app) {
         '<td><strong>' + esc(l.id.slice(0, 8)) + '</strong><div class="mut">' + esc(l.encounterId || '') + '</div></td>' +
         '<td><a href="#/patients/' + esc(l.patientId) + '"><strong>' + esc(l.patientName) + '</strong></a></td>' +
         '<td>' + esc(l.testPanel) + '</td>' +
-        '<td>' + statusBadge(l.status) + '</td>' +
+        '<td>' + labStatusBadge(l.status) + '</td>' +
         '<td>' + priorityPill(l.priority) + '</td>' +
         '<td class="mut">' + fmtDate(l.orderedAt) + '</td>' +
         '<td>' + resultDisplay + '</td>' +
@@ -205,7 +219,7 @@ export async function LaboratoryView(app) {
     const l = labOrders.find((x) => x.id === id)
     if (!l) return
     const timeline = [
-      { label: 'Ordered', at: l.orderedAt, by: l.orderedBy },
+      { label: 'Ordered', at: l.orderedAt, by: l.orderedByName },
       { label: 'Accepted', at: l.acceptedAt, by: '' },
       { label: 'Specimen collected', at: l.collectedAt, by: '' },
       { label: 'Processing', at: l.processedAt, by: '' },
@@ -228,7 +242,7 @@ export async function LaboratoryView(app) {
       '<div><span class="mut">Patient</span><br><strong>' + esc(l.patientName) + '</strong></div>' +
       '<div><span class="mut">Test panel</span><br><strong>' + esc(l.testPanel) + '</strong></div>' +
       '<div><span class="mut">Priority</span><br>' + priorityPill(l.priority) + '</div>' +
-      '<div><span class="mut">Status</span><br>' + statusBadge(l.status) + '</div>' +
+      '<div><span class="mut">Status</span><br>' + labStatusBadge(l.status) + '</div>' +
       (l.encounterId ? '<div style="grid-column:1/-1"><span class="mut">Encounter</span><br><span class="mut">' + esc(l.encounterId) + '</span></div>' : '') +
       '</div>' +
       '<div style="margin-top:14px">' + (timelineHtml || '<p class="mut">No timeline entries yet</p>') + '</div>' +
@@ -260,7 +274,7 @@ export async function LaboratoryView(app) {
 
   function openOrderForm() {
     if (!patients.length) { toast('No patients registered yet — register a patient first.'); return }
-    const patientOpts = patients.map((p) => ({ value: p.id, label: p.name + ' · ' + (p.mrn || p.id) }))
+    const patientOpts = patients.map((p) => ({ value: p.pid, label: p.name + ' · ' + (p.mrn || p.pid) }))
     formModal({
       title: 'New lab order',
       submitLabel: 'Place order →',
@@ -272,7 +286,7 @@ export async function LaboratoryView(app) {
       ],
       onSubmit: async (v) => {
         try {
-          const sel = patients.find((p) => p.id === v.patient_id)
+          const sel = patients.find((p) => p.pid === v.patient_id)
           await createLabOrder({
             patient_id: v.patient_id,
             patient_name: sel ? sel.name : v.patient_id,
