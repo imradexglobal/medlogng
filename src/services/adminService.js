@@ -6,7 +6,8 @@ import {
   addDoc, updateDoc, orderBy, limit, startAfter, serverTimestamp,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
-import { ROLE_CAPS, can, isValidEmail, MAX_HOSPITAL_ADMINS } from '../features/admin/roles.js'
+import { ROLE_CAPS, can, isValidEmail, MAX_HOSPITAL_ADMINS, capsForRole, normalizeCaps } from '../features/admin/roles.js'
+import { runChunk } from './pagination.js'
 
 export function myMembership(orgId) {
   const { memberships } = authStore.getState()
@@ -53,9 +54,11 @@ export async function logAudit({ action, organizationId, patientId = null, detai
 }
 
 // ---- members --------------------------------------------------------------
-export async function listMembers(orgId) {
+// Bounded to 100 rows (staff lists are small; paginate if a hospital grows
+// past this — see listAudit for the cursor pattern).
+export async function listMembers(orgId, { limitN = 100 } = {}) {
   const snap = await getDocs(
-    query(collection(db, 'organization_memberships'), where('organization_id', '==', orgId)),
+    query(collection(db, 'organization_memberships'), where('organization_id', '==', orgId), limit(limitN)),
   )
   const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
   const rank = { pending: 0, suspended: 1, rejected: 2, active: 3 }
@@ -88,18 +91,20 @@ export async function ensureAdminSlot(orgId, targetMemberId, role) {
   }
 }
 
-export async function approveMember(m, role) {
-  const caps = ROLE_CAPS[role]
-  if (!caps) throw new Error('Unknown role: ' + role)
-  await ensureAdminSlot(m.organization_id, m.id, role)
+export async function approveMember(m, role, caps) {
+  const r = role || m.requested_role || m.role || 'receptionist'
+  if (!ROLE_CAPS[r]) throw new Error('Unknown role: ' + r)
+  const finalCaps = normalizeCaps(caps != null ? caps : capsForRole(r))
+  if (!finalCaps.length) throw new Error('Capabilities required')
+  await ensureAdminSlot(m.organization_id, m.id, r)
   await writeMember(m.id, {
     status: 'active',
-    role,
+    role: r,
     requested_role: m.requested_role || m.role || null,
-    capabilities: caps,
+    capabilities: finalCaps,
     approved_by: auth.currentUser?.uid || null,
     approved_at: serverTimestamp(),
-  }, { action: 'member.approved', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${role}` })
+  }, { action: 'member.approved', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${r} · caps=${finalCaps.length}` })
 }
 
 export async function rejectMember(m) {
@@ -113,20 +118,35 @@ export async function suspendMember(m) {
 }
 
 export async function reactivateMember(m) {
-  const caps = ROLE_CAPS[m.role] || []
+  // Reactivate with existing capabilities; if empty, fall back to role defaults
+  const caps = normalizeCaps((m.capabilities && m.capabilities.length) ? m.capabilities : capsForRole(m.role))
   await writeMember(m.id, { status: 'active', capabilities: caps },
     { action: 'member.reactivated', organizationId: m.organization_id, details: m.staff_name || m.user_id })
 }
 
 export async function updateMemberRole(m, role) {
-  const caps = ROLE_CAPS[role]
-  if (!caps) throw new Error('Unknown role: ' + role)
-  if (m.user_id === auth.currentUser?.uid && role !== m.role) {
+  const r = role
+  if (!ROLE_CAPS[r]) throw new Error('Unknown role: ' + r)
+  if (m.user_id === auth.currentUser?.uid && r !== m.role) {
     throw new Error('You cannot change your own role — ask the other admin.')
   }
-  await ensureAdminSlot(m.organization_id, m.id, role)
-  await writeMember(m.id, { role, capabilities: caps },
-    { action: 'member.role_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${role}` })
+  await ensureAdminSlot(m.organization_id, m.id, r)
+  // Role is a label now — capabilities are assigned per user and must survive
+  // a role change. Only seed defaults when the member has none yet.
+  const current = normalizeCaps(m.capabilities || [])
+  const finalCaps = current.length ? current : normalizeCaps(capsForRole(r))
+  await writeMember(m.id, { role: r, capabilities: finalCaps },
+    { action: 'member.role_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${r} · caps=${finalCaps.length}` })
+}
+
+export async function updateMemberCapabilities(m, caps) {
+  if (m.user_id === auth.currentUser?.uid) {
+    throw new Error('You cannot change your own capabilities — ask the other admin.')
+  }
+  const finalCaps = normalizeCaps(caps)
+  if (!finalCaps.length) throw new Error('Capabilities required')
+  await writeMember(m.id, { capabilities: finalCaps },
+    { action: 'member.capabilities_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} · caps=${finalCaps.length}` })
 }
 
 export async function requirePasswordReset(m, required = true) {
@@ -136,29 +156,35 @@ export async function requirePasswordReset(m, required = true) {
 
 // ---- staff invites (admin pre-approves email + role; staff sets own password) --
 export async function listInvites(orgId) {
+  // Pushed to the server (was client-side filter over the full invite list).
   const snap = await getDocs(
-    query(collection(db, 'staff_invites'), where('organization_id', '==', orgId)),
+    query(
+      collection(db, 'staff_invites'),
+      where('organization_id', '==', orgId),
+      where('status', '==', 'pending'),
+      limit(50),
+    ),
   )
-  return snap.docs
-    .map((d) => ({ id: d.id, ...d.data() }))
-    .filter((r) => r.status === 'pending')
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
 }
 
-export async function createInvite(orgId, email, role) {
+export async function createInvite(orgId, email, role, caps) {
   const clean = String(email || '').trim().toLowerCase()
   if (!isValidEmail(clean)) throw new Error('Enter a valid email address')
-  if (!ROLE_CAPS[role]) throw new Error('Select a role')
-  await ensureAdminSlot(orgId, '(new invite)', role)
+  if (role && !ROLE_CAPS[role]) throw new Error('Select a role')
+  await ensureAdminSlot(orgId, '(new invite)', role || 'receptionist')
+  const finalCaps = normalizeCaps(caps != null ? caps : capsForRole(role))
+  if (!finalCaps.length) throw new Error('Capabilities required')
   const ref = await addDoc(collection(db, 'staff_invites'), {
     organization_id: orgId,
     email: clean,
-    role,
-    capabilities: ROLE_CAPS[role],
+    role: role || 'receptionist',
+    capabilities: finalCaps,
     status: 'pending',
     created_by: auth.currentUser?.uid || null,
     created_at: serverTimestamp(),
   })
-  await logAudit({ action: 'invite.created', organizationId: orgId, details: `${clean} → ${role}` })
+  await logAudit({ action: 'invite.created', organizationId: orgId, details: `${clean} → ${role} · caps=${finalCaps.length}` })
   return ref.id
 }
 
@@ -236,9 +262,9 @@ export async function registerThisDevice(orgId) {
   return id
 }
 
-export async function listOrgDevices(orgId) {
+export async function listOrgDevices(orgId, { limitN = 50 } = {}) {
   const snap = await getDocs(
-    query(collection(db, 'devices'), where('organization_id', '==', orgId)),
+    query(collection(db, 'devices'), where('organization_id', '==', orgId), limit(limitN)),
   )
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
 }
@@ -252,39 +278,29 @@ export async function setDeviceStatus(dev, status) {
   })
 }
 
-// ---- audit listing (filter + paginate) --------------------------------------
+// ---- audit listing (filter + chunked walk) ---------------------------------
 export const AUDIT_PAGE = 25
 
-export async function listAudit(orgId, { action = '', cursorStack = [] } = {}) {
-  let q
-  if (action) {
-    q = query(
+export async function listAudit(orgId, { action = '', cursor = null } = {}) {
+  const base = action
+    ? query(
       collection(db, 'audit_events'),
       where('actor_organization_id', '==', orgId),
       where('action', '==', action),
       orderBy('occurredAt', 'desc'),
-      limit(AUDIT_PAGE),
     )
-  } else {
-    q = query(
+    : query(
       collection(db, 'audit_events'),
       where('actor_organization_id', '==', orgId),
       orderBy('occurredAt', 'desc'),
-      limit(AUDIT_PAGE),
     )
-  }
-  const cursor = cursorStack[cursorStack.length - 1]
-  if (cursor) q = query(q, startAfter(cursor))
   try {
-    const snap = await getDocs(q)
-    return {
-      rows: snap.docs.map((d) => ({ id: d.id, ...d.data() })),
-      lastDoc: snap.docs[snap.docs.length - 1] || null,
-      hasMore: snap.docs.length === AUDIT_PAGE,
-    }
+    const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize: AUDIT_PAGE, cursor })
+    return { rows: docs.map((d) => ({ id: d.id, ...d.data() })), hasMore, cursor: next }
   } catch (e) {
     // Missing composite index for the unfiltered feed: fall back to an
-    // unordered org query + client-side sort (no pagination in fallback).
+    // unordered org query + client-side sort. The fallback cannot be walked
+    // with a cursor, so it always serves its single chunk and stops there.
     if (cursor || action) throw e
     const snap = await getDocs(query(
       collection(db, 'audit_events'),
@@ -297,13 +313,14 @@ export async function listAudit(orgId, { action = '', cursorStack = [] } = {}) {
       const bt = b.occurredAt?.toMillis ? b.occurredAt.toMillis() : 0
       return bt - at
     })
-    return { rows: rows.slice(0, AUDIT_PAGE), lastDoc: null, hasMore: false, fallback: true }
+    return { rows: rows.slice(0, AUDIT_PAGE), hasMore: false, cursor: null, fallback: true }
   }
 }
 
 export const AUDIT_ACTIONS = [
   '', 'member.approved', 'member.rejected', 'member.suspended', 'member.reactivated',
-  'member.role_updated', 'member.password_reset_required', 'invite.created',
+  'member.role_updated', 'member.capabilities_updated', 'member.password_reset_required', 'invite.created',
   'invite.revoked', 'invite.accepted', 'org.updated', 'device.revoked',
   'device.reactivated', 'password.changed', 'email.verified',
+  'data.template', 'data.export', 'data.staged', 'data.push',
 ]

@@ -25,11 +25,6 @@ service cloud.firestore {
         && (cap in myMship(orgId).capabilities || '*' in myMship(orgId).capabilities)
       ));
     }
-    function sameOrgCreate() {
-      return signedIn()
-        && request.resource.data.organization_id is string
-        && hasCap(request.resource.data.organization_id, 'patient.create');
-    }
 
     match /platform_admins/{id} {
       allow read, write: if false;
@@ -204,7 +199,15 @@ service cloud.firestore {
     match /medication_requests/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'prescription.create');
-      allow update: if hasCap(resource.data.organization_id, 'prescription.create');
+      // Pharmacists (prescription.dispense) may mark a request issued and record what
+      // has gone out per line. Only fulfilment fields may change — patient,
+      // prescriber and the prescribed quantities themselves are all off limits,
+      // so a pharmacist can never rewrite the script. `items` is writable only
+      // because each line carries its own dispensed_qty.
+      allow update: if hasCap(resource.data.organization_id, 'prescription.create')
+                    || (hasCap(resource.data.organization_id, 'prescription.dispense')
+                        && request.resource.data.diff(resource.data).changedKeys()
+                             .hasOnly(['status', 'reason', 'items', 'dispensed_at', 'updated_at']));
       allow delete: if false;
     }
     match /dispensations/{id} {
@@ -252,6 +255,30 @@ service cloud.firestore {
         && hasCap(resource.data.organization_id, 'beds.manage');
       // An admission is never deleted — discharge is the only way out, so the
       // bed history stays auditable.
+      allow delete: if false;
+    }
+    match /admission_plan_items/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'encounter.edit');
+      allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'round', 'type', 'status', 'text', 'updated_at', 'updated_by_name',
+          'updated_by', 'revisions',
+        ]);
+      // Soft‑delete only: status may be set to 'removed'; everything else is
+      // immutable once created.  `allow delete: if false` above prevents hard
+      // deletion — history is never destroyed.
+      allow delete: if false;
+    }
+    match /imaging_orders/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'lab.order');
+      allow update: if hasCap(resource.data.organization_id, 'lab.order')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'indication', 'priority', 'result', 'completed_at',
+          'verified_at', 'verified_by', 'verified_by_name',
+          'updated_at', 'updated_by_name', 'updated_by',
+        ]);
       allow delete: if false;
     }
     match /beds/{id} {
@@ -305,6 +332,22 @@ service cloud.firestore {
       allow create: if hasCap(request.resource.data.organization_id, 'documents.upload');
       allow update: if hasCap(resource.data.organization_id, 'documents.upload');
       allow delete: if false;
+    }
+    // Result images for lab / imaging orders, stored as Firestore Bytes (no
+    // Storage). One metadata doc per image; the binary lives in the `blob`
+    // subcollection so listing attachments never pulls the payload down.
+    // Append-only: once written an image cannot be edited or removed, keeping
+    // the clinical record intact. Gated by the existing lab result-entry
+    // capability so no role migration is required.
+    match /result_images/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+      allow update, delete: if false;
+      match /blob/{docId} {
+        allow read: if signedIn();
+        allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+        allow update, delete: if false;
+      }
     }
     // Global payer master list (NOT org-scoped — every hospital shares it, which
     // is why reads are just signedIn()). Writes carry organization_id as

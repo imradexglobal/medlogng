@@ -13,6 +13,13 @@ export function authErrorMessage(code) {
       return 'No account found for that email. Register first.'
     case 'auth/email-already-in-use':
       return 'That email is already registered. Sign in instead.'
+    // Emailed reset-link lifecycle (see LoginView's password-reset screen).
+    case 'auth/invalid-action-code':
+      return 'This reset link is invalid or has already been used. Request a new one.'
+    case 'auth/expired-action-code':
+      return 'This reset link has expired — request a new one.'
+    case 'auth/user-disabled':
+      return 'This account has been disabled — contact your hospital admin.'
     case 'auth/weak-password':
       return 'Password must be at least 8 characters.'
     case 'auth/too-many-requests':

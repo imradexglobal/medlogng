@@ -2,7 +2,8 @@ import {
   auth, db, collection, query, where, getDocs, doc, getDoc, setDoc, addDoc, updateDoc,
   serverTimestamp, signInWithEmailAndPassword, signInWithPopup,
   googleProvider, createUserWithEmailAndPassword, signOut, onAuthStateChanged,
-  updatePassword, sendEmailVerification,
+  updatePassword, sendEmailVerification, sendPasswordResetEmail,
+  verifyPasswordResetCode, confirmPasswordReset, limit,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { authErrorMessage, registrationErrorMessage } from '../features/auth/errors.js'
@@ -21,6 +22,11 @@ export async function loadMemberships(uid) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
 }
 
+// Return the membership for a specific organization (or null if not a member)
+export function myMembershipForOrg(memberships, orgId) {
+  return memberships.find((m) => m.organization_id === orgId) || null
+}
+
 export async function loadOrganization(orgId) {
   if (!orgId) return null
   try {
@@ -36,6 +42,78 @@ export async function loadOrganization(orgId) {
 export async function loginEmail(email, password) {
   await signInWithEmailAndPassword(auth, email.trim(), password)
   // onAuthStateChanged listener refreshes store + memberships.
+}
+
+// Password reset by email — the path a signed-OUT user takes from the login
+// screen. Firebase mails a link; the user opens it from their mail app and
+// types the new password TWICE on the app's reset screen (the link returns
+// here via handleCodeInApp). It is Auth-level on purpose (no membership
+// lookup), so a pending or suspended account is not blocked from recovering
+// its password.
+export async function requestPasswordReset(email) {
+  const mail = String(email || '').trim()
+  if (!mail) throw new Error('Enter your email address.')
+  const settings = resetReturnSettings()
+  try {
+    await sendPasswordResetEmail(auth, mail, settings)
+    if (settings) {
+      // The emailed link should be this URL + ?mode=resetPassword&oobCode=…
+      console.info('[auth] Reset link will return to', settings.url)
+    } else {
+      console.warn('[auth] No in-app return URL for ' + window.location.protocol +
+        '// pages (desktop build) — Firebase will host the reset page.')
+    }
+  } catch (e) {
+    // Origin not in the project's Authorized domains (a fresh deploy, a dev
+    // server on localhost, or a domain the admin never added) — resend with
+    // Firebase's own hosted reset page instead of failing outright, so the
+    // user still recovers. LOUD on purpose: the hosted page only offers a
+    // single password field, losing the type-it-twice check.
+    if (e && e.code === 'auth/unauthorized-continue-uri' && settings) {
+      console.warn(
+        '[auth] Reset email fell back to Firebase\'s hosted page — ' +
+        window.location.origin + ' is not an Authorized domain. ' +
+        'Add it in Firebase Console → Authentication → Settings → Authorized domains.',
+      )
+      await sendPasswordResetEmail(auth, mail)
+      return
+    }
+    throw e
+  }
+}
+
+// Where the emailed link should land: back in the app, on the reset screen,
+// so the new password is typed twice there (see LoginView). Firebase only
+// accepts http(s) origins that are in the project's Authorized domains — the
+// desktop build (file://) is not one, so there the link falls back to
+// Firebase's own hosted page, which still resets the password.
+function resetReturnSettings() {
+  try {
+    const here = window.location.href.split('#')[0]
+    if (!/^https?:$/.test(window.location.protocol)) return undefined
+    return { url: here + '#/login', handleCodeInApp: true }
+  } catch { return undefined }
+}
+
+// Validate the one-time code from the link and return the email it belongs to
+// (an invalid/expired code throws — see authErrorMessage).
+export async function verifyResetCode(code) {
+  const c = String(code || '').trim()
+  if (!c) throw new Error('The reset link is missing its code.')
+  return await verifyPasswordResetCode(auth, c)
+}
+
+// Save the new password. The code is single-use: after this the link is dead,
+// so the view strips it from the URL. The session is not signed in here — the
+// user logs in with the new password. No audit row is written: this runs while
+// signed out (logAudit keys off the current user), so there is nothing to
+// attribute the reset to.
+export async function completePasswordReset(code, newPw) {
+  const err = validateNewPassword(newPw)
+  if (err) throw new Error(err)
+  const c = String(code || '').trim()
+  if (!c) throw new Error('The reset link is missing its code.')
+  await confirmPasswordReset(auth, c, newPw)
 }
 
 export async function loginGoogle() {
@@ -170,6 +248,17 @@ export async function registerJoinHospital({ name, email, password, organization
 
 // ---- session ---------------------------------------------------------------
 
+// The hospital name is cosmetic, so when we already know the org id from
+// localStorage its lookup runs alongside the memberships query instead of
+// after it. When we don't (first sign-in on this device) the id only comes out
+// of the memberships result, so that one lookup has to wait for it.
+async function resolveOrg(memberships, saved) {
+  const orgId = saved || memberships[0]?.organization_id || null
+  if (!orgId) return { orgId: null, name: '' }
+  const org = await loadOrganization(orgId)
+  return { orgId, name: org?.name || orgId }
+}
+
 export async function refreshSession() {
   const user = auth.currentUser
   if (!user) {
@@ -177,19 +266,28 @@ export async function refreshSession() {
     return
   }
   let memberships = []
+  let saved = null
+  try { saved = localStorage.getItem('medilogng.activeOrg') } catch {}
   try {
     memberships = await loadMemberships(user.uid)
   } catch (e) {
     console.warn('[auth] loadMemberships failed:', e?.message)
   }
-  let saved = null
-  try { saved = localStorage.getItem('medilogng.activeOrg') } catch {}
-  const activeOrg = saved || memberships[0]?.organization_id || null
+  // Resolve active org: use saved preference, otherwise first active membership
+  let activeOrg = saved
   let activeOrgName = ''
-  if (activeOrg) {
-    const org = await loadOrganization(activeOrg)
-    activeOrgName = org?.name || activeOrg
+  if (!activeOrg && memberships.length) {
+    const firstActive = memberships.find((m) => m.status === 'active')
+    activeOrg = firstActive ? firstActive.organization_id : null
   }
+  // Load organization name if we have an active org
+  if (activeOrg) {
+    try {
+      const org = await loadOrganization(activeOrg)
+      if (org?.name) activeOrgName = org.name
+    } catch {}
+  }
+  // If no saved active org and multiple memberships, store all memberships for UI switching
   authStore.setState({
     user: { uid: user.uid, email: user.email, displayName: user.displayName },
     memberships,
@@ -229,7 +327,10 @@ export function checkAccess() {
   const { ready, user } = authStore.getState()
   const u = auth.currentUser
   if (!ready || !user || !u) return null
-  const hash = (window.location.hash || '').replace(/^#/, '')
+  // Query strings are stripped: a reset link (#/login?mode=resetPassword…) is
+  // still the login screen and must not be bounced to /verify-email or
+  // /change-password by the gates below.
+  const hash = (window.location.hash || '').replace(/^#/, '').split('?')[0]
   if (hash === '/login' || hash === '/register' || hash === '/verify-email' || hash === '/change-password') return null
   const me = myActiveMembership()
   if (!me) return null
@@ -255,8 +356,15 @@ export async function forceLogout(reason) {
   }
   function toast(msg) {
     const t = document.getElementById('toast')
-    if (t) { t.textContent = msg; t.hidden = false }
-    else alert(msg)
+    if (t) { t.textContent = msg; t.hidden = false; return }
+    // Pages without the app shell (login, verify-email, change-password) have
+    // no #toast — build one on the body rather than blocking on alert(), which
+    // the idle logout hits when a session expires on those screens.
+    const el = document.createElement('div')
+    el.className = 'toast'
+    el.textContent = msg
+    document.body.appendChild(el)
+    setTimeout(() => { el.remove() }, 4500)
   }
 }
 
@@ -291,8 +399,14 @@ export async function postLoginRoute() {
   const u = auth.currentUser
   try { await u?.reload() } catch {}
   const me = myActiveMembership()
+  // If email verification required, redirect accordingly
   if (me?.email_verification_required && u && u.emailVerified === false) return '/verify-email'
   if (me?.must_change_password === true) return '/change-password'
+  // If user has multiple active hospitals and no saved preference, show choice
+  const { memberships, activeOrg } = authStore.getState()
+  if (memberships.filter((m) => m.status === 'active').length > 1 && !localStorage.getItem('medilogng.activeOrg')) {
+    return '/hospital-choice' // New route to show hospital selection
+  }
   return '/'
 }
 
@@ -350,16 +464,21 @@ export async function changeOwnPassword(newPw) {
 }
 
 // Get active clinical staff for the current organization (doctors, nurses, admins)
+// Bounded + cached per session (called on every modal).
+const _staffCache = new Map()
 export async function getClinicalStaff(orgId) {
+  const cached = _staffCache.get(orgId)
+  if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.rows
   const snap = await getDocs(
     query(
       collection(db, 'organization_memberships'),
       where('organization_id', '==', orgId),
-      where('status', '==', 'active')
+      where('status', '==', 'active'),
+      limit(100),
     )
   )
   const clinicalRoles = ['hospital_admin', 'doctor', 'nurse']
-  return snap.docs
+  const rows = snap.docs
     .map((d) => ({ id: d.id, ...d.data() }))
     .filter((m) => clinicalRoles.includes(m.role))
     .map((m) => ({
@@ -367,4 +486,6 @@ export async function getClinicalStaff(orgId) {
       label: m.staff_name + (m.role ? ' (' + m.role + ')' : ''),
     }))
     .sort((a, b) => a.label.localeCompare(b.label))
+  _staffCache.set(orgId, { at: Date.now(), rows })
+  return rows
 }

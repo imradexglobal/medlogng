@@ -10,11 +10,16 @@
 //                                        update: patient.demographics.update
 // Both docs are written in one batch so they can never drift apart.
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, writeBatch, serverTimestamp,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, writeBatch, serverTimestamp, limit,
+  orderBy,
 } from '../firebase.js'
+import { runChunk } from './pagination.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
+import {
+  normalizePhone, phoneKey, parseSearchTerm, matchesPatient,
+} from '../features/patients/search.js'
 import { logAudit } from './adminService.js'
 
 const ORG_PATIENTS = 'organization_patients'
@@ -30,28 +35,10 @@ export function myPatientCaps() {
 }
 
 // ---- phone handling ---------------------------------------------------------
-// Accepts 0803…, 234803…, +234 803… → canonical '0XXXXXXXXXX' or '' if invalid.
-export function normalizePhone(raw) {
-  let d = String(raw || '').replace(/\D/g, '')
-  if (!d) return ''
-  if (d.startsWith('234')) d = '0' + d.slice(3)
-  else if (d.length === 10) d = '0' + d
-  return /^0\d{10}$/.test(d) ? d : ''
-}
-
-export function phoneKey(raw) {
-  const local = normalizePhone(raw)
-  return local ? local.slice(1) : ''
-}
-
-export function formatPhone(phone, key) {
-  const d = String(phone || '').replace(/\D/g, '')
-  if (d.length === 13 && d.startsWith('234')) {
-    return '+234 ' + d.slice(3, 6) + ' ' + d.slice(6, 9) + ' ' + d.slice(9)
-  }
-  if (key) return '+234 ' + String(key).replace(/(\d{3})(\d{3})(\d+)/, '$1 $2 $3')
-  return phone || '—'
-}
+// The rules live in features/patients/search.js so they are unit-testable
+// without Firebase; re-exported here because every view already imports them
+// from this module.
+export { normalizePhone, phoneKey, formatPhone, phoneSearchDigits, phoneMatches, parseSearchTerm, patientHaystack, matchesPatient, MIN_PHONE_DIGITS } from '../features/patients/search.js'
 
 // ---- validation -------------------------------------------------------------
 // Only surname, given names and phone are compulsory (product decision).
@@ -128,6 +115,35 @@ export function toPatientRow(r) {
 }
 
 // ---- reads ------------------------------------------------------------------
+// Next chunk of the registry list, cursor-walked for infinite scroll. Orders by
+// patient_id (always present, stable) so the walk never skips/duplicates rows.
+// Needs index:
+// organization_patients: organization_id ASC + patient_id ASC.
+export const PATIENTS_PAGE = 25
+
+export async function listOrgPatientsPage(orgId, { pageSize = PATIENTS_PAGE, cursor = null } = {}) {
+  const base = query(
+    collection(db, ORG_PATIENTS),
+    where('organization_id', '==', orgId),
+    orderBy('patient_id', 'asc'),
+  )
+  const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
+  const rows = docs
+    .map((d) => {
+      const data = d.data() || {}
+      const pid = data.patient_id ||
+        (d.id.startsWith(orgId + '_') ? d.id.slice(orgId.length + 1) : d.id)
+      return toPatientRow({ ...data, patient_id: pid })
+    })
+    .filter((r) => !!r.pid)
+  // Page is already id-ordered; keep a light name sort for display only.
+  rows.sort((a, b) => a.name.localeCompare(b.name))
+  return { rows, hasMore, cursor: next }
+}
+
+
+// Legacy full fetch — kept for dropdowns, duplicate checks and cached search.
+// DO NOT use for the registry table (use listOrgPatientsPage instead).
 export async function listOrgPatients(orgId) {
   const snap = await getDocs(query(collection(db, ORG_PATIENTS), where('organization_id', '==', orgId)))
   const rows = snap.docs
@@ -150,8 +166,8 @@ export async function getPatient(pid) {
   return toPatientRow(r)
 }
 
-export async function listPatientEncounters(pid) {
-  const snap = await getDocs(query(collection(db, 'encounters'), where('patient_id', '==', pid)))
+export async function listPatientEncounters(pid, { limitN = 50 } = {}) {
+  const snap = await getDocs(query(collection(db, 'encounters'), where('patient_id', '==', pid), limit(limitN)))
   const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
   rows.sort((a, b) => tsMillis(b.created_at) - tsMillis(a.created_at))
   return rows
@@ -201,9 +217,9 @@ export function openEncounterExistsError(existing) {
 
 // Generic child read: every clinical collection stores patient_id, so one
 // equality filter (no composite index needed) fetches a patient's rows.
-export async function listPatientDocs(coll, pid) {
+export async function listPatientDocs(coll, pid, { limitN = 50 } = {}) {
   try {
-    const snap = await getDocs(query(collection(db, coll), where('patient_id', '==', pid)))
+    const snap = await getDocs(query(collection(db, coll), where('patient_id', '==', pid), limit(limitN)))
     const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     rows.sort((a, b) => tsMillis(b.created_at) - tsMillis(a.created_at))
     return { rows, error: null }
@@ -298,7 +314,8 @@ async function findDuplicate(orgId, surname, given_names, key, excludePid = '') 
     const q = query(
       patientsCol,
       where('organization_id', '!=', orgId), // exclude current hospital
-      where('status', '==', 'active')
+      where('status', '==', 'active'),
+      limit(20),
     )
     const snap = await getDocs(q)
     const allOther = snap.docs.map((d) => {
@@ -415,6 +432,7 @@ export async function registerPatient(input) {
   const now = serverTimestamp()
   const base = {
     surname: String(input.surname).trim(),
+    search_surname_norm: String(input.surname).trim().toLowerCase(),
     given_names: String(input.given_names).trim(),
     full_name: fullName({ surname: input.surname, given_names: input.given_names }),
     phone: '+234' + key,
@@ -453,6 +471,7 @@ export async function registerPatient(input) {
     updated_at: now,
   })
   await batch.commit()
+  invalidateSearchCache()
 
   try {
     await logAudit({ action: 'patient.created', organizationId: activeOrg, patientId: pid, details: base.full_name + ' · ' + mrn })
@@ -475,16 +494,22 @@ export async function updatePatient(pid, input) {
 
   const key = phoneKey(input.phone)
   const kinKey = phoneKey(input.next_of_kin_phone)
-  const dupInfo = await findDuplicate(activeOrg, input.surname, input.given_names, key, pid)
-  if (dupInfo) {
-    const warning = duplicateWarning(dupInfo)
-    // Return warning info so the UI can show it and let the user decide.
-    // The caller (UI) can choose to proceed or abort.
-    return { warning, existing: dupInfo.existing }
+  // `force` skips the duplicate check — same escape hatch as registerPatient,
+  // used when the user confirms "this is a different person" in the duplicate
+  // warning modal. Without it "Save anyway" silently re-warned forever.
+  if (input.force !== true) {
+    const dupInfo = await findDuplicate(activeOrg, input.surname, input.given_names, key, pid)
+    if (dupInfo) {
+      const warning = duplicateWarning(dupInfo)
+      // Return warning info so the UI can show it and let the user decide.
+      // The caller (UI) can choose to proceed or abort.
+      return { warning, existing: dupInfo.existing }
+    }
   }
 
   const patch = {
     surname: String(input.surname).trim(),
+    search_surname_norm: String(input.surname).trim().toLowerCase(),
     given_names: String(input.given_names).trim(),
     full_name: fullName({ surname: input.surname, given_names: input.given_names }),
     phone: '+234' + key,
@@ -530,6 +555,7 @@ export async function updatePatient(pid, input) {
     })
   }
   await batch.commit()
+  invalidateSearchCache()
 
   try {
     await logAudit({ action: 'patient.updated', organizationId: activeOrg, patientId: pid, details: patch.full_name })
@@ -554,68 +580,105 @@ export function friendlyPatientError(e, fallback = 'Something went wrong. Please
   return e?.message || fallback
 }
 
+// ---- search cache -----------------------------------------------------------
+const searchCache = new Map()
+const CLOUD_CACHE_TTL = 5 * 60 * 1000
+const LOCAL_CACHE_TTL = 1 * 60 * 1000
+
+function getCachedSearch(key, ttl) {
+  const entry = searchCache.get(key)
+  if (!entry) return null
+  if (Date.now() - entry.timestamp > ttl) {
+    searchCache.delete(key)
+    return null
+  }
+  return entry.value
+}
+
+function setCachedSearch(key, value) {
+  searchCache.set(key, { value, timestamp: Date.now() })
+}
+
+export function invalidateSearchCache() {
+  searchCache.clear()
+}
+
 // ---- global search -----------------------------------------------------------
-// Search patients across all hospitals.
+// Search patients across all hospitals by name, patient ID, MRN or mobile number.
 // 1. First returns matches from the current hospital (local data).
 // 2. Then appends matches from other hospitals (cloud), filtering out the
 //    current hospital to avoid duplicate returns.
+// `query` is a free-text search box entry (string) or an already-parsed one
+// from parseSearchTerm — the parsing is what tells a mobile number apart from
+// a name, so callers must NOT split the term themselves.
 // Returns { local: [...], cloud: [...] }
-export async function searchPatientsGlobally(surname, given_names, phone) {
+export async function searchPatientsGlobally(search) {
   const { activeOrg } = authStore.getState()
   if (!activeOrg) return { local: [], cloud: [] }
 
-  const key = phoneKey(phone)
-  const localRows = await listOrgPatients(activeOrg)
+  const parsed = typeof search === 'object' && search !== null ? search : parseSearchTerm(search)
+  if (!parsed || !parsed.term) return { local: [], cloud: [] }
 
-  // --- Local matches (current hospital) ---
-  const localMatches = localRows.filter((r) => {
-    const nameMatch =
-      (!surname || r.surname.trim().toLowerCase().includes(surname.trim().toLowerCase())) &&
-      (!given_names ||
-        r.given_names
-          .trim()
-          .toLowerCase()
-          .includes(given_names.trim().toLowerCase()))
-    const phoneMatch = !key || r.phone_key === key
-    return nameMatch && phoneMatch
-  })
+  const localKey = 'local:' + activeOrg + ':' + parsed.term
+  const cloudKey = 'cloud:' + parsed.term
 
-  const cloudMatches = []
-  try {
-    const patientsCol = collection(db, 'patients')
-    const q = query(patientsCol, where('status', '==', 'active'))
-    const snap = await getDocs(q)
-    const allOther = snap.docs
-      .map((d) => {
-        const data = d.data() || {}
-        const pid = d.id
-        return toPatientRow({ ...data, patient_id: pid })
-      })
-      .filter((r) => r.organization_id !== activeOrg)
-    cloudMatches.push(
-      ...allOther.filter((r) => {
-        const nameMatch =
-          (!surname ||
-            r.surname
-              .trim()
-              .toLowerCase()
-              .includes(surname.trim().toLowerCase())) &&
-          (!given_names ||
-            r.given_names
-              .trim()
-              .toLowerCase()
-              .includes(given_names.trim().toLowerCase()))
-        const phoneMatch = !key || r.phone_key === key
-        return nameMatch && phoneMatch
-      })
-    )
-  } catch (e) {
-    console.warn('[patients] global search cloud failed:', e?.message)
+  const cachedLocal = getCachedSearch(localKey, LOCAL_CACHE_TTL)
+  const cachedCloud = getCachedSearch(cloudKey, CLOUD_CACHE_TTL)
+
+  if (cachedLocal && cachedCloud) {
+    return { local: cachedLocal, cloud: cachedCloud }
   }
 
-  // Sort local first, then cloud, both by name
-  localMatches.sort((a, b) => a.name.localeCompare(b.name))
-  cloudMatches.sort((a, b) => a.name.localeCompare(b.name))
+  let localMatches = cachedLocal || []
+  if (!cachedLocal) {
+    const localRows = await listOrgPatients(activeOrg)
+    localMatches = localRows.filter((r) => matchesPatient(r, parsed))
+    localMatches.sort((a, b) => a.name.localeCompare(b.name))
+    setCachedSearch(localKey, localMatches)
+  }
+
+  let cloudMatches = cachedCloud || []
+  if (!cachedCloud) {
+    try {
+      const patientsCol = collection(db, 'patients')
+      let q
+
+      if (parsed.isPhone) {
+        const digits = parsed.phoneDigits
+        q = query(
+          patientsCol,
+          where('phone_key', '>=', digits),
+          where('phone_key', '<', digits + '\uf8ff'),
+          where('status', '==', 'active'),
+          limit(20)
+        )
+      } else {
+        const surnameTerm = (parsed.surname || '').toLowerCase()
+        q = query(
+          patientsCol,
+          where('search_surname_norm', '>=', surnameTerm),
+          where('search_surname_norm', '<', surnameTerm + '\uf8ff'),
+          where('status', '==', 'active'),
+          limit(20)
+        )
+      }
+
+      const snap = await getDocs(q)
+      cloudMatches = snap.docs
+        .map((d) => {
+          const data = d.data() || {}
+          if (data.organization_id === activeOrg) return null
+          return toPatientRow({ ...data, patient_id: d.id })
+        })
+        .filter(Boolean)
+        .filter((r) => matchesPatient(r, parsed))
+      cloudMatches.sort((a, b) => a.name.localeCompare(b.name))
+      setCachedSearch(cloudKey, cloudMatches)
+    } catch (e) {
+      console.warn('[patients] global search cloud failed:', e?.message)
+      cloudMatches = []
+    }
+  }
 
   return { local: localMatches, cloud: cloudMatches }
 }

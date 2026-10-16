@@ -72,7 +72,10 @@ echo [OK] dist/ freshly rebuilt - no stale code.
 echo.
 echo Starting dev server at http://localhost:5174 ...
 echo Press Ctrl+C to stop.
-start /b cmd /c "timeout /t 6 /nobreak >nul & start http://localhost:5174"
+:: Wait for the port to actually answer before opening Chrome. A fixed sleep
+:: loses the race whenever dep-optimisation runs cold, and Chrome then shows a
+:: connection error that has to be reloaded by hand.
+start /b cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -Command ""$d=(Get-Date).AddSeconds(90); while((Get-Date) -lt $d){ try { if((Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://localhost:5174/).StatusCode -eq 200){ exit 0 } } catch {}; Start-Sleep -Milliseconds 250 }; exit 1"" && start http://localhost:5174"
 call npm run dev
 echo Window stays open so you can copy. Press Enter when done...
 set /p DONE=Press Enter to close...

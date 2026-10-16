@@ -10,7 +10,7 @@ export async function VerifyEmailView(app) {
 
   app.innerHTML =
     '<div class="auth-wrap"><div class="card auth-card">' +
-    '<div class="brand"><span class="brand-mark">✚</span><span><h1>MediLog NG</h1><p class="muted">Verify your email</p></span></div>' +
+    '<div class="brand"><span class="brand-mark">✚</span><span><h1>MedLogNg</h1><p class="muted">Verify your email</p></span></div>' +
     '<p>We sent a verification link to <strong>' + esc(user.email || '') + '</strong>. ' +
     'Open it, then press the button below. You cannot reach the workspace until your email is verified.</p>' +
     '<p id="vmsg" class="muted"></p>' +

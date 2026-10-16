@@ -39,7 +39,7 @@ export async function ChangePasswordView(app) {
 
   app.innerHTML =
     '<div class="auth-wrap"><div class="card auth-card">' +
-    '<div class="brand"><span class="brand-mark">✚</span><span><h1>MediLog NG</h1><p class="muted">Change your password</p></span></div>' +
+    '<div class="brand"><span class="brand-mark">✚</span><span><h1>MedLogNg</h1><p class="muted">Change your password</p></span></div>' +
     '<p>Your administrator requires a password change for <strong>' + esc(user.email || '') + '</strong> ' +
     'before you can continue. Minimum 8 characters, letters + numbers, not a common password.</p>' +
     renderPasswordField('np', 'New password', 'new-password', 'New password') +

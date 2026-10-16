@@ -7,6 +7,8 @@
   "description": "MediLog NG — EMR for Nigerian hospitals (offline-first web + Android + Electron desktop)",
   "scripts": {
     "smoke": "node scripts/smoke.mjs",
+    "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/lab.imaging.test.mjs",
+    "test": "node scripts/smoke.mjs && npm run test:services",
     "dev": "vite --port 5174",
     "build": "vite build",
     "preview": "vite preview --port 5174",
@@ -15,15 +17,16 @@
     "electron:dev": "electron .",
     "electron:test": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --publish never",
-    "publish:desktop": "npm run build && electron-builder --win --publish always",
-    "test": "node scripts/smoke.mjs"
+    "publish:desktop": "npm run build && electron-builder --win --publish always"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.1",
     "@capacitor/cli": "^8.5.1",
     "@capacitor/core": "^8.5.1",
     "electron-updater": "^6.3.0",
-    "firebase": "^12.2.1"
+    "firebase": "^12.2.1",
+    "firebase-admin": "^14.5.0",
+    "sql.js": "^1.14.2"
   },
   "devDependencies": {
     "electron": "^34.0.0",

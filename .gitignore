@@ -5,6 +5,9 @@ android/
 ios/
 .env.local
 .env
+*service-account.json
+*service-account*.json
+hub/keys/
 *.log
 *.err
 new 1.txt

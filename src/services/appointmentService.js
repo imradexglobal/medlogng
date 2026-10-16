@@ -1,13 +1,20 @@
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, orderBy, limit,
+  startAfter,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { listOrgPatients } from './patientService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
+import { watchQuery } from './live.js'
+import { runChunk } from './pagination.js'
 
 const APPOINTMENTS = 'appointments'
+
+// Live listeners are bounded to the 100 most recent rows (cost control);
+// list* stays unbounded so a manual refresh still shows everything.
+const LIVE_LIMIT = 100
 
 // ---- capability check --------------------------------------------------------
 export function myAppointmentCaps() {
@@ -39,14 +46,64 @@ function toAppointmentRow(r) {
 // ---- reads ---------------------------------------------------------------
 // Single equality filter only (no composite index needed, works offline).
 // Extra filtering is done client-side.
-export async function listOrgAppointments(orgId, filters = {}) {
-  const snap = await getDocs(query(collection(db, APPOINTMENTS), where('organization_id', '==', orgId)))
-  let rows = snap.docs.map((d) => toAppointmentRow({ ...d.data(), id: d.id }))
+function buildOrgAppointmentsQuery(orgId) {
+  return query(collection(db, APPOINTMENTS), where('organization_id', '==', orgId))
+}
+
+function mapAppointmentDoc(d) {
+  return toAppointmentRow({ ...d.data(), id: d.id })
+}
+
+// Client-side filter + sort shared by listOrgAppointments and
+// subscribeOrgAppointments so live rows are byte-for-byte identical in shape.
+function applyAppointmentFilters(rows, filters = {}) {
   if (filters.status) rows = rows.filter((r) => r.status === filters.status)
   if (filters.clinic) rows = rows.filter((r) => r.clinic === filters.clinic)
   // Sort by time descending (newest first)
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
+}
+
+export async function listOrgAppointments(orgId, filters = {}) {
+  const snap = await getDocs(buildOrgAppointmentsQuery(orgId))
+  return applyAppointmentFilters(snap.docs.map(mapAppointmentDoc), filters)
+}
+
+// Next chunk of the newest-first list (cursor-walked for infinite scroll).
+// Needs index:
+// appointments: organization_id ASC + created_at DESC.
+export const APPOINTMENTS_PAGE = 25
+
+export async function listOrgAppointmentsPage(orgId, { pageSize = APPOINTMENTS_PAGE, cursor = null, ...filters } = {}) {
+  const base = query(
+    collection(db, APPOINTMENTS),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+  )
+  const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
+  return { rows: applyAppointmentFilters(docs.map(mapAppointmentDoc), filters), hasMore, cursor: next }
+}
+
+
+// Live query: same org scope + row shape as listOrgAppointments, but bounded
+// to the 100 most recent (orderBy+limit needs the composite index in
+// firestore.indexes.json — deploy it or the listener falls back to one-shot).
+function buildOrgAppointmentsLiveQuery(orgId) {
+  return query(
+    collection(db, APPOINTMENTS),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+    limit(LIVE_LIMIT),
+  )
+}
+
+export function subscribeOrgAppointments(orgId, onRows, onError) {
+  return watchQuery(
+    buildOrgAppointmentsLiveQuery(orgId),
+    mapAppointmentDoc,
+    (rows) => onRows(applyAppointmentFilters(rows)),
+    onError,
+  )
 }
 
 // ---- create ---------------------------------------------------------------

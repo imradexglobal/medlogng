@@ -9,13 +9,15 @@
 import { shell, formModal, toast, closeModal, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
-  listOrgAdmissions, createAdmission, dischargeAdmission, myAdmissionCaps,
-  listOrgWards, createWard, updateWardBeds, ADMISSION_TYPES,
+  listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, createAdmission, dischargeAdmission, myAdmissionCaps,
+  listOrgWards, subscribeOrgWards, createWard, updateWardBeds, ADMISSION_TYPES,
   occupancySummary, validateAdmissionInput, validateWardCapacity,
 } from '../services/admissionService.js'
 import { getEncounter } from '../services/consultationService.js'
 import { getClinicalStaff } from '../services/authService.js'
-import { listOrgPatients } from '../services/patientService.js'
+import { listOrgPatientsPage, formatPhone, matchesPatient } from '../services/patientService.js'
+import { onCleanup } from '../lib/lifecycle.js'
+import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 
@@ -29,6 +31,10 @@ export async function AdmissionsView(app, params = {}) {
   // Deep link from the encounter workspace: #/admissions?enc=<id>&new=1
   const linkedEncounterId = String(params.enc || '')
   const autoOpen = String(params.new || '') === '1'
+  // Latched once the deep-linked admit form has been shown. reload() runs again on
+  // every search keystroke, status filter and Refresh click, so an unlatched
+  // `autoOpen` re-pops the modal over the bed board each time.
+  let openedPreset = false
 
   if (!activeOrg) {
     shell(app, {
@@ -42,9 +48,16 @@ export async function AdmissionsView(app, params = {}) {
 
   let admissions = []
   let patients = []
+  let patientIndex = new Map()
   let wards = []
   let clinicalStaff = []
   let linkedEncounter = null
+  let unsubs = []
+  let watchedOrg = activeOrg
+  // Infinite scroll: rows accumulate and `cursor` marks the end of what we hold.
+  let cursor = null
+  let hasMore = false
+  let loading = false
 
   shell(app, {
     active: '/admissions',
@@ -66,35 +79,73 @@ export async function AdmissionsView(app, params = {}) {
       '<select class="input" id="admStatus" style="max-width:170px"><option value="active" selected>Active</option><option value="discharged">Discharged</option><option value="all">All admissions</option></select></div>' +
       '<div class="tblwrap"><table class="tbl" id="adm-tbl"><tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th>From encounter</th><th></th></tr>' +
       '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
-      '</table></div></div>',
+      '</table><div class="loadmore" data-loadmore="1"></div></div></div>',
   })
 
-  async function load() {
+  const more = createLoadMore(loadMore)
+
+  // Append the next chunk of admissions. The first call has no cursor and
+  // replaces the list; later ones walk forward from the last row loaded.
+  async function loadMore() {
+    if (loading) return
+    const first = cursor == null && admissions.length === 0
+    loading = true
+    more.setLoading(true)
+    document.getElementById('adm-tbl')?.closest('.tblwrap')?.classList.add('is-loading')
     try {
-      const [adm, pats, w, staff] = await Promise.all([
-        listOrgAdmissions(activeOrg),
-        listOrgPatients(activeOrg).catch(() => []),
-        listOrgWards(activeOrg).catch(() => []),
+      const [pg, pats, w, staff] = await Promise.all([
+        listOrgAdmissionsPage(activeOrg, { cursor }),
+        first ? listOrgPatientsPage(activeOrg, { pageSize: 100 }).then((r) => r.rows).catch(() => []) : Promise.resolve(patients),
+        first ? listOrgWards(activeOrg).catch(() => []) : Promise.resolve([]),
         // Attending doctors come from the org's own active memberships, so a
         // discharged or renamed clinician cannot linger in a hard-coded list.
-        getClinicalStaff(activeOrg).catch(() => []),
+        first ? getClinicalStaff(activeOrg).catch(() => []) : Promise.resolve([]),
       ])
-      admissions = adm
-      patients = pats
-      wards = w
-      clinicalStaff = staff
-      // Resolve the deep-linked encounter so the admit form can pre-fill the
-      // patient and lock the clinical link. A missing encounter is not fatal —
-      // the page still works, it just cannot pre-fill.
-      if (linkedEncounterId && !linkedEncounter) {
-        linkedEncounter = await getEncounter(linkedEncounterId).catch(() => null)
+      // A row written between two chunk reads shifts the cursor stream and can
+      // repeat the boundary document.
+      const seen = new Set(admissions.map((a) => a.id))
+      admissions = first ? pg.rows : [...admissions, ...pg.rows.filter((a) => !seen.has(a.id))]
+      cursor = pg.cursor
+      hasMore = pg.hasMore
+      if (first) {
+        patients = pats
+        patientIndex = new Map(patients.map((p) => [p.pid, p]))
+        wards = w
+        clinicalStaff = staff
+        // Resolve the deep-linked encounter so the admit form can pre-fill the
+        // patient and lock the clinical link. A missing encounter is not fatal —
+        // the page still works, it just cannot pre-fill.
+        if (linkedEncounterId && !linkedEncounter) {
+          linkedEncounter = await getEncounter(linkedEncounterId).catch(() => null)
+        }
       }
+      loading = false
+      more.setLoading(false)
+      more.setDone(!hasMore)
       render()
-      if (autoOpen) openAdmitForm()
+      if (first && autoOpen && !openedPreset) {
+        openedPreset = true
+        openAdmitForm()
+      }
     } catch (e) {
       console.error('[admissions] list failed:', e)
-      toast('Could not load admissions: ' + friendlyWriteError(e))
+      loading = false
+      more.setLoading(false)
+      if (first) toast('Could not load admissions: ' + friendlyWriteError(e))
+      else more.setError('Could not load more — retry')
+    } finally {
+      document.getElementById('adm-tbl')?.closest('.tblwrap')?.classList.remove('is-loading')
     }
+  }
+
+  // A fresh read of the whole list.
+  function reload() {
+    admissions = []
+    cursor = null
+    hasMore = false
+    more.reset()
+    teardownListeners()
+    loadMore().then(subscribeLive)
   }
 
   function occupiedIn(wardName) {
@@ -109,9 +160,13 @@ export async function AdmissionsView(app, params = {}) {
       if (mode === 'active' && a.status !== 'active') return false
       if (mode === 'discharged' && a.status !== 'discharged') return false
       if (q) {
-        const hay = [a.patientName, a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
+        const p = patientIndex.get(a.patientId)
+        // Bed, ward and doctor stay searchable; the patient's own record is
+        // joined in so a mobile number finds the occupied bed, which the
+        // admission row alone cannot answer.
+        const bedHay = [a.patientName, a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
           .join(' ').toLowerCase()
-        if (!hay.includes(q)) return false
+        if (!bedHay.includes(q) && !(p && matchesPatient(p, q))) return false
       }
       return true
     })
@@ -171,9 +226,6 @@ export async function AdmissionsView(app, params = {}) {
       const encCell = a.encounterId
         ? '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(a.encounterId) + '">View encounter</a>'
         : '<span class="mut">—</span>'
-      const action = a.status === 'active'
-        ? (caps.canDischarge ? '<button class="btn ghost sm" data-discharge="' + esc(a.id) + '">Discharge</button>' : '<span class="mut">—</span>')
-        : '<span class="mut">Discharged</span>'
       return '<tr>' +
         '<td>' + patientCell + '</td>' +
         '<td>' + esc(a.wardName) + ' · ' + esc(a.bedNumber) + '</td>' +
@@ -182,7 +234,7 @@ export async function AdmissionsView(app, params = {}) {
             ? '<div class="mut">out ' + new Date(a.dischargeDate).toLocaleDateString('en-NG') + '</div>' : '') + '</td>' +
         '<td>' + esc(a.attendingProvider || '—') + '</td>' +
         '<td>' + encCell + '</td>' +
-        '<td>' + action + '</td></tr>'
+        '<td>' + (a.status === 'active' ? '<a class="btn ghost sm" href="#/admissions/' + esc(a.id) + '">Workspace</a>' : '<span class="mut">—</span>') + '</td></tr>'
     }).join('')
     if (titleEl) {
       const mode = document.getElementById('admStatus')?.value || 'active'
@@ -191,6 +243,7 @@ export async function AdmissionsView(app, params = {}) {
     if (tbl) {
       tbl.innerHTML = '<tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th>From encounter</th><th></th></tr>' +
         (rows || '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No admissions match this filter</td></tr>')
+      more.mount(tbl.closest('.tblwrap'))
       tbl.querySelectorAll('[data-discharge]').forEach((b) => {
         b.onclick = () => openDischargeForm(b.getAttribute('data-discharge'))
       })
@@ -205,9 +258,14 @@ export async function AdmissionsView(app, params = {}) {
     const fixedPatient = enc && enc.patientId
       ? patients.find((p) => p.pid === enc.patientId) || { pid: enc.patientId, name: enc.patientName || enc.patientId }
       : null
+    // Labels carry the mobile number so the picker's filter box can find a
+    // patient by phone, not just by name.
     const patientOpts = fixedPatient
       ? [{ value: fixedPatient.pid, label: (fixedPatient.name || fixedPatient.pid) + ' · ' + (fixedPatient.mrn || fixedPatient.pid) }]
-      : patients.map((p) => ({ value: p.pid, label: p.name + ' · ' + (p.mrn || p.pid) }))
+      : patients.map((p) => ({
+        value: p.pid,
+        label: p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key),
+      }))
     const wardField = wards.length
       ? { name: 'ward_name', label: 'Ward', type: 'select', options: wards.map((w) => w.name), required: true }
       : { name: 'ward_name', label: 'Ward (no ward master yet — type a name)', required: true, placeholder: 'e.g. Ward A' }
@@ -221,7 +279,7 @@ export async function AdmissionsView(app, params = {}) {
       title: enc ? 'Admit patient (from encounter)' : 'Admit patient',
       submitLabel: 'Confirm admission',
       fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, value: fixedPatient ? fixedPatient.pid : '' },
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, value: fixedPatient ? fixedPatient.pid : '', searchable: !fixedPatient && patientOpts.length > 1, searchPlaceholder: 'Name, ID or mobile…' },
         wardField,
         { name: 'bed_number', label: 'Bed', required: true, placeholder: 'e.g. Bed 1' },
         { name: 'admission_type', label: 'Admission type', type: 'select', options: ADMISSION_TYPES },
@@ -247,7 +305,7 @@ export async function AdmissionsView(app, params = {}) {
         })
         closeModal()
         toast('Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
-        await load()
+        reload()
       },
     })
   }
@@ -270,7 +328,7 @@ export async function AdmissionsView(app, params = {}) {
         }
         closeModal()
         toast('Patient discharged')
-        await load()
+        reload()
       },
     })
   }
@@ -292,7 +350,7 @@ export async function AdmissionsView(app, params = {}) {
         }
         closeModal()
         toast('Ward added')
-        await load()
+        reload()
       },
     })
     // Inject the current ward list at the top of the modal (formModal builds
@@ -337,7 +395,7 @@ export async function AdmissionsView(app, params = {}) {
         await updateWardBeds(wardId, Number(v.total_beds))
         closeModal()
         toast('Ward updated')
-        await load()
+        reload()
       },
     })
     const err = document.getElementById('fmError')
@@ -346,7 +404,7 @@ export async function AdmissionsView(app, params = {}) {
     }
   }
 
-  document.getElementById('refreshBtn').onclick = load
+  document.getElementById('refreshBtn').onclick = reload
   const admitBtn = document.getElementById('admitBtn')
   if (admitBtn) admitBtn.onclick = openAdmitForm
   const wardsBtn = document.getElementById('wardsBtn')
@@ -357,5 +415,59 @@ export async function AdmissionsView(app, params = {}) {
   if (admStatus) admStatus.addEventListener('change', render)
   wireToast(app)
 
-  await load()
+  function teardownListeners() {
+    unsubs.forEach((u) => u())
+    unsubs = []
+  }
+
+  // Live updates for admissions and the ward master (bed totals). The patient
+  // join stays one-shot (registry is never live); a brand-new patient's
+  // contact details may only appear in search after reload.
+  function subscribeLive() {
+    teardownListeners()
+    if (!watchedOrg) return
+    // The live feed only ever knows about the newest slice of the list. Once the
+    // user has scrolled past it, leave the accumulated list alone rather than
+    // truncating it back to one chunk.
+    if (cursor != null) return
+    unsubs.push(
+      subscribeOrgAdmissions(watchedOrg,
+        (rows) => {
+          if (cursor != null) return
+          const seen = new Set(admissions.map((a) => a.id))
+          admissions = rows.filter((a) => !seen.has(a.id)).concat(admissions)
+          render()
+        },
+        (e) => {
+          console.warn('[admissions] live update failed; refreshing once:', e?.message || e)
+          listOrgAdmissionsPage(watchedOrg)
+            .then((r) => { admissions = r.rows; render() })
+            .catch(() => {})
+        }),
+      subscribeOrgWards(watchedOrg,
+        (rows) => { wards = rows; render() },
+        (e) => {
+          console.warn('[wards] live update failed; refreshing once:', e?.message || e)
+          listOrgWards(watchedOrg)
+            .then((r) => { wards = r; render() })
+            .catch(() => {})
+        }),
+    )
+  }
+
+  onCleanup(() => {
+    teardownListeners()
+    unsubAuth()
+  })
+
+  // The app does not re-route on org change, so rebuild the listeners when
+  // the active hospital switches.
+  const unsubAuth = authStore.subscribe((s) => {
+    if (s.activeOrg === watchedOrg) return
+    watchedOrg = s.activeOrg
+    subscribeLive()
+  })
+
+  await loadMore()
+  subscribeLive()
 }

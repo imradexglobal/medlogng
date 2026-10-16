@@ -2,16 +2,25 @@
 // Every encounter is linked to a patient and optionally to an appointment.
 // Workflow: Arrival → Vitals → Consultation → Diagnosis → Plan → Close
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, limit,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, limit, orderBy,
+  startAfter,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { getPatient, createPatientDoc } from './patientService.js'
+import { requestMedicationLines } from './pharmacyService.js'
+import { enqueue } from './clinicalOutbox.js'
 import { can } from '../features/admin/roles.js'
 import { ENCOUNTER_STATUS_FLOW, furtherStatus, stageForTrigger, ENCOUNTER_STATUS_FLOW_META } from '../features/encounters/domain.js'
 import { logAudit } from './adminService.js'
+import { watchQuery } from './live.js'
+import { runChunk } from './pagination.js'
 
 const ENCOUNTERS = 'encounters'
+
+// Live listeners are bounded to the 100 most recent rows (cost control);
+// list* keeps its own 200 bound so a manual refresh is unchanged.
+const LIVE_LIMIT = 100
 
 export const ENCOUNTER_TYPES = ['General Outpatient Department (GOPD) review', 'Antenatal', 'Emergency', 'Follow-up']
 
@@ -58,8 +67,8 @@ function toEncounterRow(r) {
 }
 
 // ---- reads ---------------------------------------------------------------
-export async function listPatientEncounters(pid) {
-  const snap = await getDocs(query(collection(db, ENCOUNTERS), where('patient_id', '==', pid)))
+export async function listPatientEncounters(pid, { limitN = 50 } = {}) {
+  const snap = await getDocs(query(collection(db, ENCOUNTERS), where('patient_id', '==', pid), limit(limitN)))
   const rows = snap.docs.map((d) => toEncounterRow({ ...d.data(), id: d.id }))
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
@@ -115,12 +124,60 @@ export function openEncounterExistsError(existing) {
   )
 }
 
-// List all encounters for the active organization
-export async function listOrgEncounters(orgId) {
-  const snap = await getDocs(query(collection(db, ENCOUNTERS), where('organization_id', '==', orgId), limit(200)))
-  const rows = snap.docs.map((d) => toEncounterRow({ ...d.data(), id: d.id }))
+function buildOrgEncountersQuery(orgId) {
+  return query(collection(db, ENCOUNTERS), where('organization_id', '==', orgId), limit(200))
+}
+
+function mapEncounterDoc(d) {
+  return toEncounterRow({ ...d.data(), id: d.id })
+}
+
+function sortEncounters(rows) {
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
+}
+
+// List all encounters for the active organization (legacy capped fetch)
+export async function listOrgEncounters(orgId) {
+  const snap = await getDocs(buildOrgEncountersQuery(orgId))
+  return sortEncounters(snap.docs.map(mapEncounterDoc))
+}
+
+// Next chunk of the newest-first list (cursor-walked for infinite scroll).
+// Needs index:
+// encounters: organization_id ASC + created_at DESC.
+export const ENCOUNTERS_PAGE = 25
+
+export async function listOrgEncountersPage(orgId, { pageSize = ENCOUNTERS_PAGE, cursor = null } = {}) {
+  const base = query(
+    collection(db, ENCOUNTERS),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+  )
+  const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
+  return { rows: sortEncounters(docs.map(mapEncounterDoc)), hasMore, cursor: next }
+}
+
+
+// Live query: same org scope + row shape as listOrgEncounters, but bounded
+// to the 100 most recent (orderBy+limit needs the composite index in
+// firestore.indexes.json — deploy it or the listener falls back to one-shot).
+function buildOrgEncountersLiveQuery(orgId) {
+  return query(
+    collection(db, ENCOUNTERS),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+    limit(LIVE_LIMIT),
+  )
+}
+
+export function subscribeOrgEncounters(orgId, onRows, onError) {
+  return watchQuery(
+    buildOrgEncountersLiveQuery(orgId),
+    mapEncounterDoc,
+    (rows) => onRows(sortEncounters(rows)),
+    onError,
+  )
 }
 
 // Get single encounter
@@ -355,12 +412,23 @@ export async function addTreatmentPlan(encounterId, plan) {
 // best-effort, same pattern as addDiagnosis. No dispense ticket is created
 // here: dispensing requires `prescription.dispense` (pharmacist), which the
 // prescriber does not hold — the pharmacist dispenses from the request.
+//
+// One call carries the WHOLE script: the encounter keeps a snapshot under
+// `prescription.items`, and every line is appended to the patient's single
+// pharmacy order in one write, so a multi-drug prescription reaches the
+// pharmacy as one order rather than one order per drug.
 export async function addPrescription(encounterId, prescription) {
+  return addPrescriptions(encounterId, [prescription])
+}
+
+export async function addPrescriptions(encounterId, prescriptions) {
   requireEncounterEdit()
+  const lines = (prescriptions || []).filter((p) => p && (p.medicine || p.drug_id))
+  if (!lines.length) throw new Error('Add at least one medicine to the prescription.')
   const encSnap = await getDoc(doc(db, ENCOUNTERS, encounterId))
   const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
   await updateDoc(doc(db, ENCOUNTERS, encounterId), {
-    prescription: prescription,
+    prescription: { items: lines },
     updated_at: serverTimestamp(),
   })
   // Treatment prescribed means the plan is being set.
@@ -368,18 +436,71 @@ export async function addPrescription(encounterId, prescription) {
   try {
     const enc = await getEncounter(encounterId)
     if (enc && enc.patientId) {
-      await createPatientDoc('medication_requests', enc.patientId, {
-        medicine: prescription.medicine || prescription.name || 'Prescription',
-        dosage: prescription.dosage || '',
-        quantity: prescription.qty || prescription.quantity || '',
-        instructions: prescription.instructions || '',
-        status: 'Requested',
-        encounter_id: encounterId,
-      }, 'prescription.create')
+      await requestMedicationLines({
+        patientId: enc.patientId,
+        patientName: enc.patientName || '',
+        encounterId,
+        lines: lines.map((p) => ({
+          drug_id: p.drug_id || '',
+          sku: p.sku || '',
+          medicine: p.medicine || p.name || 'Prescription',
+          unit: p.unit || '',
+          dosage: p.dosage || '',
+          // drug_id/sku/unit are what let the pharmacy dispense this line without
+          // re-matching a display name back to a catalogue lot. Blank on legacy
+          // free-text prescriptions, which the pharmacy still resolves by name.
+          quantity: p.qty || p.quantity || '',
+          instructions: p.instructions || '',
+          // External lines are bought outside the hospital, so the pharmacy
+          // records them without ever checking or decrementing in-house stock.
+          external: !!p.external,
+        })),
+      })
     }
+    return { mirrored: true, pendingSync: false }
   } catch (e) {
-    console.warn('[encounters] prescription mirror skipped:', e?.message)
+    // The handoff MUST reach the pharmacy — swallowing this used to leave the
+    // encounter showing a script the pharmacy never received. Durable outbox
+    // re-runs the mirror when the connection (or the missing read) allows it.
+    // Only a fully lost handoff (outbox itself unavailable) throws.
+    console.warn('[encounters] prescription mirror queued for retry:', e?.message)
+    try {
+      await enqueue('rx_mirror', {
+        patientId: encSnap.exists() ? encSnap.data().patient_id || '' : '',
+        patientName: encSnap.exists() ? encSnap.data().patient_name || '' : '',
+        encounterId,
+        lines: lines.map((p) => ({
+          drug_id: p.drug_id || '',
+          sku: p.sku || '',
+          medicine: p.medicine || p.name || 'Prescription',
+          unit: p.unit || '',
+          dosage: p.dosage || '',
+          quantity: p.qty || p.quantity || '',
+          instructions: p.instructions || '',
+          external: !!p.external,
+        })),
+      })
+      return { mirrored: false, pendingSync: true }
+    } catch (enqueueErr) {
+      throw new Error(
+        'Prescription saved on this device, but the pharmacy handoff failed BOTH ways (' +
+        (e?.message || e) + ' / ' + (enqueueErr?.message || enqueueErr) +
+        '). Tell the pharmacy in person and retry when online.'
+      )
+    }
   }
+}
+
+// The script was edited in place (the "adjust the last prescription" path), so
+// only the encounter's snapshot is refreshed — the workflow stage was already
+// advanced when the prescription was first written, and re-advancing it would
+// push an encounter backwards through the plan steps.
+export async function setEncounterPrescription(encounterId, lines) {
+  requireEncounterEdit()
+  await updateDoc(doc(db, ENCOUNTERS, encounterId), {
+    prescription: { items: (lines || []).filter((p) => p && (p.medicine || p.drug_id)) },
+    updated_at: serverTimestamp(),
+  })
   return true
 }
 
@@ -391,10 +512,14 @@ export async function addLabOrder(encounterId, labOrder) {
   const existing = encSnap.exists() ? (encSnap.data().lab_orders || []) : []
   const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
   const newLabOrder = { ...labOrder, id: labOrder.lab_order_id || ('lab_' + Date.now().toString(36)), ordered_at: Date.now() }
-  await updateDoc(encounterRef, {
-    lab_orders: [...existing, newLabOrder],
-    updated_at: serverTimestamp(),
-  })
+  // Re-run safety (outbox replay): append ONCE per lab_order_id.
+  const alreadyLinked = existing.some((o) => o && o.id === newLabOrder.id)
+  if (!alreadyLinked) {
+    await updateDoc(encounterRef, {
+      lab_orders: [...existing, newLabOrder],
+      updated_at: serverTimestamp(),
+    })
+  }
   // Investigations ordered are part of the Plan (the P of SOAP).
   await advanceTo(encounterId, currentStatus, 'lab_order')
   return true

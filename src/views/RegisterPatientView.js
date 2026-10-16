@@ -398,7 +398,6 @@ export async function RegisterPatientView(app) {
     formModal({
       title: 'Possible duplicate patient',
       submitLabel: 'Register anyway',
-      cancelLabel: 'Cancel',
       body: modalHtml,
       onSubmit: async () => {
         closeModal()

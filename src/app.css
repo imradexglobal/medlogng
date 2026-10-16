@@ -17,10 +17,44 @@
   --emr-bad: #b91c1c;
   --emr-badbg: #fee2e2;
   --r: 14px;
+  /* Inline gutter of the app chrome and the page body. Declared once and
+     re-declared per breakpoint so that anything which "bleeds" to the screen
+     edge (the tab strip, the sticky header) stays exactly in step with the
+     padding it is cancelling out. Getting these out of sync is what makes a
+     strip overhang the viewport by a few pixels and hand the page a horizontal
+     scrollbar. */
+  --pg: 22px;
 }
 
 .emr { display: grid; grid-template-columns: 248px 1fr; min-height: 100vh; background: var(--emr-bg); color: var(--emr-ink); }
-.side { background: linear-gradient(180deg, #07231f 0%, #0a3d37 45%, #0b1b2b 100%); color: #fff; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
+.side { background: linear-gradient(180deg, #07231f 0%, #0a3d37 45%, #0b1b2b 100%); color: #fff; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; height: 100dvh; }
+
+/* ---- "the page must never scroll sideways" ---------------------------------
+   Grid and flex children default to `min-width: auto`, which means they refuse
+   to shrink below their own content. One long patient name, one long medicine
+   name or one wide figure is then enough to push the whole shell past the
+   viewport, and the user gets a horizontal scrollbar on a page that is supposed
+   to scroll top-to-bottom only. Every layout box below is allowed to shrink;
+   the things that genuinely need width (tables) scroll inside `.tblwrap`
+   instead of stretching the page. */
+.emr > *, .grid4 > *, .grid2x > *, .kv > *, .vitals-snapshot > *,
+.wardgrid > *, .summary-item, .summary-item-main, .card-head, .card-head > *,
+.toolbar > *, .phead > *, .top > *, .data-block > *, .fgrid > *,
+.form-grid > *, .clinical-summary > *, .steps-root > * { min-width: 0; }
+
+/* Long unbroken strings (IDs, SKUs, imported names, amounts) must not push the
+   page sideways.
+   `break-word`, never `anywhere`: `anywhere` also shrinks the element's
+   min-content width to a single character. Inside a shrinkable box that is
+   harmless, but inside a table cell it tells the table "this column only needs
+   1px", so the layout engine compresses the column and then wraps the text one
+   letter per line — "Bartholomew" rendered as B/a/r/t/h/o/l/e/m/o/w down a
+   12px column. `break-word` still breaks a word that genuinely cannot fit, but
+   leaves min-content alone, so cells stay legible and the table grows into
+   `.tblwrap`'s horizontal scroll instead. */
+.stat strong, .stat span, .kv strong, .kv em, .ward p, .ward h4,
+.summary-item-label, .summary-item-detail, .tbl td, .tbl .mut,
+.allergy, .phead .meta, .me-meta strong, .card .sub, .msum { overflow-wrap: break-word; }
 .side-brand { display: flex; gap: 10px; align-items: center; padding: 18px 16px; border-bottom: 1px solid rgba(255,255,255,.12); }
 .side-brand strong { display: block; font-size: 1rem; letter-spacing: -.01em; }
 .side-brand em { display: block; font-style: normal; font-size: .72rem; color: rgba(255,255,255,.65); font-weight: 500; }
@@ -33,6 +67,8 @@
 .side-foot { padding: 12px; border-top: 1px solid rgba(255,255,255,.12); display: flex; flex-direction: column; gap: 10px; }
 .sync { display: flex; gap: 8px; align-items: center; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 8px 10px; }
 .sync .dot { width: 9px; height: 9px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 4px rgba(52,211,153,.2); }
+.sync .dot.warn { background: #fbbf24; box-shadow: 0 0 0 4px rgba(251,191,36,.2); }
+.sync .dot.off { background: #f87171; box-shadow: 0 0 0 4px rgba(248,113,113,.18); }
 .sync strong { display: block; font-size: .76rem; }
 .sync em { display: block; font-style: normal; font-size: .7rem; color: rgba(255,255,255,.6); }
 .me { display: flex; gap: 8px; align-items: center; }
@@ -42,12 +78,12 @@
 .me-meta em { font-style: normal; font-size: .7rem; color: rgba(255,255,255,.6); }
 
 .main { min-width: 0; display: flex; flex-direction: column; }
-.top { background: #fff; border-bottom: 1px solid var(--emr-line); padding: 14px 22px; display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 5; }
+.top { background: #fff; border-bottom: 1px solid var(--emr-line); padding: 14px calc(var(--pg) + env(safe-area-inset-right)) 14px calc(var(--pg) + env(safe-area-inset-left)); display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 5; }
 .top-title { flex: 1; min-width: 0; }
 .top-title h1 { margin: 0; font-size: 1.25rem; letter-spacing: -.02em; }
 .top-title p { margin: 2px 0 0; color: var(--emr-muted); font-size: .84rem; }
 .top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-.page { padding: 20px 22px 40px; max-width: 1280px; width: 100%; margin: 0 auto; }
+.page { padding: 20px calc(var(--pg) + env(safe-area-inset-right)) 40px calc(var(--pg) + env(safe-area-inset-left)); max-width: 1280px; width: 100%; margin: 0 auto; min-width: 0; }
 
 .btn { background: var(--emr-teal); color: #fff; border: 1px solid var(--emr-teal-d); padding: 9px 16px; border-radius: 10px; font-weight: 700; font-size: .86rem; cursor: pointer; text-decoration: none; display: inline-block; }
 .btn:hover { background: var(--emr-teal-d); }
@@ -73,7 +109,26 @@
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .card-head h3 { margin: 0; }
 
-.tblwrap { overflow-x: auto; overflow-y: auto; max-height: 500px; border: 1px solid var(--emr-line); border-radius: 12px; }
+/* ---- tables -----------------------------------------------------------------
+   A wide clinical table must keep every column, so it scrolls sideways INSIDE
+   its own bordered box rather than widening the page. `overscroll-behavior-x`
+   stops that sideways swipe from then scrolling the page behind it (and from
+   triggering pull-to-refresh), and the paired gradients are the standard
+   scroll-shadow affordance: the right edge is tinted while there is more table
+   to the right, so it is visible that the table pans at all. */
+.tblwrap {
+  overflow-x: auto; overflow-y: auto; max-height: 500px;
+  border: 1px solid var(--emr-line); border-radius: 12px;
+  overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch;
+  background:
+    linear-gradient(to right, #fff 40%, rgba(255,255,255,0)) left center,
+    linear-gradient(to left, #fff 40%, rgba(255,255,255,0)) right center,
+    radial-gradient(farthest-side at 0 50%, rgba(15,30,46,.16), transparent) left center,
+    radial-gradient(farthest-side at 100% 50%, rgba(15,30,46,.16), transparent) right center;
+  background-repeat: no-repeat;
+  background-size: 34px 100%, 34px 100%, 13px 100%, 13px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
 table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; background: #fff; }
 .tbl thead th { position: sticky; top: 0; z-index: 1; text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--emr-muted); background: #f8fafc; padding: 10px 12px; border-bottom: 1px solid var(--emr-line); white-space: nowrap; }
 .tbl td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
@@ -95,6 +150,20 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 .search .input, .input { width: 100%; padding: 10px 12px; border: 1px solid var(--emr-line); border-radius: 10px; font-size: .88rem; background: #fff; }
 .search .input:focus, .input:focus { outline: 2px solid var(--emr-teal); border-color: var(--emr-teal); }
 
+/* Read-only / auto-computed field (e.g. generated SKU). Visually distinct
+   from editable inputs: tinted background, dashed border, muted monospace
+   text — signals "derived, not typed". */
+.input.ro {
+  background: var(--emr-bg);
+  border-style: dashed;
+  color: var(--emr-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .82rem;
+  letter-spacing: .02em;
+  cursor: default;
+}
+.input.ro:focus { outline: none; border-color: var(--emr-line); }
+
 /* Password toggle */
 .fn-pw-wrap { margin: 12px 0 6px; }
 .fn-pw-input-wrap { position: relative; display: flex; align-items: center; }
@@ -115,7 +184,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 .chip { border: 1px solid var(--emr-line); background: #fff; border-radius: 999px; padding: 6px 12px; font-size: .78rem; font-weight: 700; cursor: pointer; color: var(--emr-muted); }
 .chip.on { background: var(--emr-navy); color: #fff; border-color: var(--emr-navy); }
 
-.tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--emr-line); margin-bottom: 14px; overflow-x: auto; }
+/* The tab strip pans sideways inside its own box when there are more tabs than
+   fit. It deliberately does NOT use negative margins to bleed to the screen
+   edge: the gutter it would have to cancel differs between a tab strip sitting
+   directly in `.page` and one sitting inside a `.card`, and a strip that hangs
+   a few pixels past its container gives the whole card a horizontal scrollbar. */
+.tabs {
+  display: flex; gap: 4px; border-bottom: 2px solid var(--emr-line); margin-bottom: 14px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
 .tabs button { border: 0; background: none; padding: 10px 14px; font-weight: 700; font-size: .84rem; color: var(--emr-muted); cursor: pointer; border-bottom: 2.5px solid transparent; margin-bottom: -2px; white-space: nowrap; }
 .tabs button.on { color: var(--emr-teal-d); border-color: var(--emr-teal); }
 
@@ -139,18 +217,48 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 .fstep.now { background: var(--emr-navy); color: #fff; border-color: var(--emr-navy); }
 .farrow { color: var(--emr-muted); }
 
-.toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--emr-navy); color: #fff; padding: 12px 20px; border-radius: 12px; font-size: .86rem; font-weight: 600; z-index: 99; box-shadow: 0 12px 30px rgba(0,0,0,.3); }
+.toast {
+  position: fixed; bottom: calc(22px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
+  background: var(--emr-navy); color: #fff; padding: 12px 20px; border-radius: 12px;
+  font-size: .86rem; font-weight: 600; z-index: 99; box-shadow: 0 12px 30px rgba(0,0,0,.3);
+  max-width: min(560px, calc(100vw - 32px)); text-align: center;
+}
 .modal { position: fixed; inset: 0; background: rgba(11,27,43,.55); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 90; }
 .modal[hidden], .toast[hidden] { display: none; }
-.modal-card { background: #fff; border-radius: 18px; width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto; }
-.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--emr-line); }
-.modal-head h3 { margin: 0; }
-.modal-body { padding: 18px; }
+/* A dialog is a column, not a scrolling page: the title and the ✕ stay put, only
+   the body scrolls. Previously the whole card scrolled, so on a long form the
+   title — and the only close control — scrolled out of reach. */
+.modal-card {
+  background: #fff; border-radius: 18px; width: 100%; max-width: 560px;
+  max-height: min(90vh, 90dvh);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--emr-line); flex: none; }
+.modal-head h3 { margin: 0; font-size: 1rem; line-height: 1.3; }
+.modal-body { padding: var(--modal-pad, 18px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-height: 0; }
 .fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fld { display: block; font-size: .78rem; font-weight: 700; color: #334155; }
 .fld span { display: block; margin-bottom: 5px; }
 .fld.full { grid-column: 1 / -1; }
-.mrow { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; max-height: 210px; overflow-y: auto; }
+.chk { display: flex; align-items: center; gap: 8px; font-weight: 500; font-size: .82rem; color: #334155; cursor: pointer; }
+.chk input { width: 15px; height: 15px; accent-color: var(--emr-accent, #0d9488); flex: none; }
+.fldhint { display: block; margin-top: 4px; font-size: .72rem; font-weight: 500; line-height: 1.35; color: #64748b; }
+.fldhint[hidden] { display: none; }
+.fldhint.bad { color: var(--emr-bad); }
+.fldhint.warn { color: var(--emr-warn); }
+.fldhint.ok { color: var(--emr-ok); }
+.mrow { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.ghost:hover:disabled { background: #fff; }
+
+/* ---- infinite-scroll loader (shared: components/loadMore.js) -------------- */
+/* Lives inside .tblwrap so it scrolls with the rows and is observed against
+   that element, not the viewport. */
+.loadmore { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: 46px; padding: 10px 8px; }
+
+/* Table stays laid out while the next page loads — only dims, never shrinks. */
+.tblwrap.is-loading { opacity: .55; transition: opacity .15s ease; pointer-events: none; }
 
 .timeline { border-left: 3px solid var(--emr-line); margin-left: 8px; padding-left: 18px; display: flex; flex-direction: column; gap: 12px; }
 .titem { position: relative; background: #fff; border: 1px solid var(--emr-line); border-radius: 12px; padding: 12px 14px; }
@@ -210,15 +318,364 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 #update-banner .upd-bar { height: 7px; border-radius: 99px; background: #e2e8f0; margin-top: 8px; overflow: hidden; }
 #update-banner .upd-bar[hidden] { display: none; }
 #update-banner .upd-fill { height: 100%; width: 0; border-radius: 99px; background: linear-gradient(90deg, var(--emr-teal), #2dd4bf); transition: width .25s ease; }
-#upd-pill { position: fixed; bottom: 14px; left: 14px; z-index: 110; border: 1px solid var(--emr-line); background: rgba(255,255,255,.92); color: var(--emr-muted); border-radius: 999px; padding: 4px 12px; font-size: .72rem; font-weight: 700; cursor: pointer; }
+#upd-pill { position: fixed; bottom: calc(14px + env(safe-area-inset-bottom)); left: 14px; z-index: 110; border: 1px solid var(--emr-line); background: rgba(255,255,255,.92); color: var(--emr-muted); border-radius: 999px; padding: 4px 12px; font-size: .72rem; font-weight: 700; cursor: pointer; }
 #upd-pill:hover { color: var(--emr-ink); border-color: var(--emr-teal); }
+
+/* ---- scrolling locks --------------------------------------------------------
+   `shell.js` adds these while the drawer / a dialog is open. Without them a
+   thumb-drag on the dimmed area scrolls the page behind an overlay that looks
+   solid, and on iOS the rubber-band leaks past the fixed element. */
+body.nav-open, body.modal-open { overflow: hidden; overscroll-behavior: none; }
+
+/* ---- admin: data import / export ------------------------------------------- */
+.data-block { margin-top: 14px; border: 1px solid var(--emr-line); border-radius: 14px; padding: 14px 16px; background: #fbfdff; }
+.data-block h4 { margin: 0 0 4px; }
+.data-block > .sub { margin-top: 4px; }
+.data-block .fgrid { margin: 10px 0; grid-template-columns: repeat(3, 1fr); }
+.ck { display: flex; align-items: center; gap: 7px; font-size: .82rem; font-weight: 600; color: #334155; background: #fff; border: 1px solid var(--emr-line); border-radius: 10px; padding: 8px 10px; cursor: pointer; }
+.ck input { accent-color: var(--emr-teal); }
+.qstats { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 8px; }
+.bar { height: 10px; border-radius: 99px; background: var(--emr-line); overflow: hidden; margin: 8px 0 14px; }
+.barfill { height: 100%; width: 0; border-radius: 99px; background: linear-gradient(90deg, var(--emr-teal), #2dd4bf); transition: width .3s ease; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; vertical-align: middle; }
+.dot.ok { background: #34d399; box-shadow: 0 0 0 4px rgba(52,211,153,.18); }
+.dot.off { background: var(--emr-bad); box-shadow: 0 0 0 4px rgba(239,68,68,.15); }
+.msum { margin-top: 10px; background: #f0fdf4; border: 1px solid #86efac; border-radius: 12px; padding: 10px 12px; font-size: .84rem; }
+.msum .err { margin-top: 6px; }
+@media (max-width: 1080px) {
+  .data-block .fgrid { grid-template-columns: repeat(2, 1fr); }
+}
 
 @media (max-width: 860px) {
   .emr { grid-template-columns: 1fr; }
-  .side { position: fixed; z-index: 50; width: 262px; transform: translateX(-105%); transition: transform .2s; }
+  :root { --pg: 14px; }
+  .side { position: fixed; z-index: 50; width: 262px; transform: translateX(-105%); transition: transform .2s; box-shadow: 0 0 40px rgba(0,0,0,.35); }
   .side.open { transform: none; }
   .only-mobile { display: inline-block; }
-  .page { padding: 14px 14px 40px; }
+  .page { padding-top: 14px; padding-bottom: 40px; }
   .fgrid { grid-template-columns: 1fr; }
   .bedgrid { grid-template-columns: repeat(4, 1fr); }
+}
+
+/* =============================================================================
+   MOBILE / TOUCH LAYER
+   One breakpoint ladder, applied after every screen-level rule so it wins on
+   equal specificity. Nothing here changes what a page contains or how it
+   behaves — only how the same markup is laid out for a thumb.
+     <= 1024px  tablet portrait — two-up cards become comfortable columns
+     <= 860px   phone / small tablet — drawer navigation, stacked toolbars
+     <= 640px   large phone portrait — single column, roomier touch targets
+     <= 400px   small phone — the last squeeze
+   ============================================================================= */
+
+/* ---- navigation drawer ------------------------------------------------------
+   The drawer is created by shell(). The scrim is what makes it read as a layer
+   over the page rather than a panel that slid in and left the content visible
+   and tappable underneath. */
+.side-scrim {
+  display: none; position: fixed; inset: 0; z-index: 45;
+  background: rgba(7, 20, 18, .5);
+  opacity: 0; transition: opacity .2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.side-scrim.on { display: block; opacity: 1; }
+.side-close { margin-left: auto; flex: none; }
+.side-nav a, .side-foot .iconbtn { min-height: 44px; }
+.side-nav a { padding: 11px 12px; }
+
+@media (max-width: 860px) {
+  .side-scrim { display: block; pointer-events: none; }
+  .side-scrim.on { pointer-events: auto; }
+
+  /* Height of the sticky `.top` bar. Filled in at runtime by the ResizeObserver
+     in shell.js; the values here are only the pre-paint guess. */
+  :root { --sticky-top: 60px; --modal-pad: 18px; }
+
+  /* --- topbar: compact, but the title and the actions both stay readable --- */
+  .top { padding-top: 10px; padding-bottom: 10px; gap: 10px; }
+  .top-title h1 { font-size: 1.06rem; line-height: 1.25; }
+  .top-title p { font-size: .78rem; line-height: 1.35; }
+  /* A long hospital name or patient name must not turn the sticky header into a
+     third of the screen. Two lines, then ellipsis — `shell.js` measures the
+     result and republishes --sticky-top, so the header height stays known. */
+  .top-title h1, .top-title p {
+    display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .top-title h1 { -webkit-line-clamp: 2; }
+  .top-title p { -webkit-line-clamp: 2; }
+  .iconbtn { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  /* Actions wrap to their own full-width row instead of crushing the title. */
+  .top-actions { flex-basis: 100%; justify-content: flex-start; }
+  .top:has(.top-actions > :not(:empty)) { flex-wrap: wrap; }
+
+  /* --- stat tiles: two-up, never a sliver -------------------------------- */
+  .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat { padding: 12px 12px; }
+  .stat strong { font-size: 1.32rem; }
+  /* 0.68rem is 10.9px — legible on a monitor, not on a phone held at arm's
+     length. 0.72rem clears the ~11.5px floor without shouting. */
+  .stat em { font-size: .72rem; letter-spacing: .04em; }
+  .kv em { font-size: .74rem; }
+  .pill { font-size: .78rem; padding: 3px 10px; }
+  .feed-meta .pill { font-size: .72rem; }
+
+  /* --- toolbars and filters: one control per line, full width ------------- */
+  .toolbar { gap: 8px; }
+  .toolbar > *, .toolbar .fld, .toolbar .btn, .toolbar .search { width: 100%; max-width: none !important; }
+  .search { min-width: 0; }
+  .chips { gap: 8px; }
+  /* A filter row that pans sideways is easy to miss; let it wrap instead. */
+  .chips { flex-wrap: wrap; }
+
+  /* --- tabs: scrollable but padded so the last one clears the edge -------- */
+  .tabs button { padding: 12px 14px; }
+
+  /* --- tables: taller cells, comfortable type, pinned identity column ---- */
+  .tblwrap { max-height: none; border-radius: 10px; }
+  .tbl { font-size: .84rem; }
+  .tbl td { padding: 11px 10px; }
+  .tbl thead th { padding: 10px 10px; font-size: .72rem; letter-spacing: .04em; }
+  /* A phone cannot show six clinical columns at a readable size. Below the
+     four-column mark the table is given a floor width so it becomes wider than
+     the screen and pans inside `.tblwrap`, rather than compressing columns
+     until the words break down the column. Nothing is dropped or hidden: the
+     row's identity column is pinned (below) so it stays on screen throughout.
+     Two- and three-column tables keep the default `width:100%` and just fit. */
+  .tbl:has(> tr > :nth-child(4)), .tbl:has(> thead > tr > :nth-child(4)) { min-width: 620px; }
+  .tbl:has(> tr > :nth-child(5)), .tbl:has(> thead > tr > :nth-child(5)) { min-width: 740px; }
+  .tbl:has(> tr > :nth-child(7)), .tbl:has(> thead > tr > :nth-child(7)) { min-width: 900px; }
+  /* A control inside a cell is squeezed to the column's share, which for a
+     <select> means the selected value is clipped down to its first letter —
+     "admin" renders as "a" and the row becomes unidentifiable. Give the
+     control a floor and let the table grow into the horizontal scroll instead. */
+  .tbl select.input, .tbl input.input, .tbl textarea.input { min-width: 140px; }
+  .tbl .chips { min-width: 150px; }
+  /* With the sticky page header in the way, a header pinned at top:0 would hide
+     underneath it — offset the table header by the header's own height. */
+  .tbl thead th { top: var(--sticky-top, 0px); }
+  .tbl tbody td:first-child, .tbl thead th:first-child {
+    position: sticky; left: 0; z-index: 1;
+    box-shadow: 1px 0 0 var(--emr-line);
+  }
+  .tbl thead th:first-child { z-index: 3; }
+  /* A pinned cell is out of the row's flow, so it needs its own opaque fill —
+     otherwise the columns scrolling underneath show through it. */
+  .tbl tbody tr td:first-child { background: #fff; }
+  .tbl tr.clickable:hover td:first-child { background: #f0fdfa; }
+  .tbl tr.clickable.sel td:first-child { box-shadow: inset 3px 0 0 var(--emr-teal), 1px 0 0 var(--emr-line); }
+
+  /* --- key/value tiles and ward grids ------------------------------------- */
+  .kv { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .kv div { padding: 9px 10px; }
+  .kv strong { font-size: 1rem; overflow-wrap: anywhere; }
+  .wardgrid { grid-template-columns: 1fr; }
+  .bedgrid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .bed { padding: 12px 2px; font-size: .74rem; }
+
+  /* --- patient header ----------------------------------------------------- */
+  .phead { padding: 12px; gap: 12px; }
+  .pavatar { width: 46px; height: 46px; border-radius: 14px; font-size: 1.05rem; }
+  .phead h2 { font-size: 1.02rem; }
+  .phead > div[style] { min-width: 0 !important; }
+
+  /* --- patient 360 dashboard --------------------------------------------- */
+  .vitals-snapshot { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .vital-label { font-size: .72rem; }
+  .vital-value { font-size: 1.2rem; }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .progress-feed { position: static; max-height: none; }
+  .feed-item { grid-template-columns: 32px minmax(0, 1fr); }
+  .feed-meta { grid-column: span 2; flex-direction: row; justify-content: space-between; align-items: center; width: 100%; white-space: normal; }
+  .feed-filter .fld, .feed-filter select.input { min-width: 0; width: 100%; max-width: none; }
+
+  /* --- invoice summary: a 260px min-width box is a squeeze on a 320 screen */
+  .inv-total { justify-content: stretch; }
+  .inv-total div { min-width: 0; width: 100%; }
+
+  /* --- timeline ----------------------------------------------------------- */
+  .timeline { margin-left: 4px; padding-left: 14px; }
+  .titem::before { left: -20px; }
+
+  /* --- dialogs ------------------------------------------------------------ */
+  .modal { padding: 0; align-items: flex-end; }
+  .modal-card {
+    max-width: none; border-radius: 18px 18px 0 0;
+    max-height: 92dvh;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Actions in a dialog go full width and stack — two half-width buttons side by
+     side is where a mis-tap charges the wrong patient. */
+  .mrow { flex-direction: column-reverse; align-items: stretch; gap: 10px; }
+  .mrow .btn { width: 100%; min-height: 44px; justify-content: center; }
+  /* ...and the row itself stays pinned to the foot of the dialog. On a tall form
+     the Save button was below the fold of the scrolling body, so finishing the
+     form meant scrolling to hunt for it. */
+  .modal-body > .mrow {
+    position: sticky; bottom: calc(var(--modal-pad) * -1); z-index: 2;
+    margin: 16px calc(var(--modal-pad) * -1) calc(var(--modal-pad) * -1);
+    padding: 12px var(--modal-pad);
+    background: #fff; border-top: 1px solid var(--emr-line);
+  }
+  /* Drag handle affordance for the sheet. */
+  .modal-card::before {
+    content: ''; display: block; width: 40px; height: 4px; border-radius: 99px;
+    background: var(--emr-line); margin: 8px auto 0; flex: none;
+  }
+
+  /* --- forms: comfortable on-screen keyboard ----------------------------- */
+  /* Below 16px iOS Safari zooms the page the moment a field is focused, and
+     never zooms back out. 1rem keeps every control at the zoom threshold. */
+  .input, .select, .fn-input, .field input, .field select, .field textarea {
+    font-size: 1rem;
+    min-height: 44px;
+  }
+  textarea.input, .field textarea { min-height: 76px; }
+  .field-hint, .fldhint { font-size: .78rem; }
+
+  /* --- touch targets ------------------------------------------------------ */
+  /* 44px is the smallest reliably hittable box with a fingertip. The full set,
+     including tablets, lives in the (pointer: coarse) block below. */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+
+  /* --- update banner must not sit on top of the content ------------------- */
+  #update-banner {
+    left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom));
+    max-width: none; flex-wrap: wrap;
+  }
+  #update-banner .upd-actions { width: 100%; }
+  #update-banner .upd-actions .btn { flex: 1; }
+  #upd-pill { display: none; }
+}
+
+/* ---- large phone portrait: one column ------------------------------------- */
+@media (max-width: 640px) {
+  :root { --pg: 12px; }
+  .page { padding-top: 12px; padding-bottom: calc(40px + env(safe-area-inset-bottom)); }
+  .card { padding: 14px; margin-bottom: 12px; border-radius: 12px; }
+  .card h3 { font-size: .96rem; }
+
+  /* Stat tiles become one per row: at 320px a two-up tile cannot hold an
+     amount like ₦4,982,500 without either shrinking the type or clipping it. */
+  .grid4 { grid-template-columns: 1fr; }
+  .grid2x { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; }
+
+  .vitals-snapshot { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bedgrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .data-block .fgrid { grid-template-columns: 1fr; }
+
+  /* Section rhythm tightens so a phone screen is not all whitespace. */
+  .summary-card, .ward { padding: 12px; }
+  .dashboard-actions { gap: 8px; }
+  .dashboard-actions .btn { flex: 1 1 auto; }
+
+  /* Step-by-step registration: actions stack, primary last and full width. */
+  .form-actions { flex-direction: column-reverse; align-items: stretch; gap: 10px; }
+  .form-actions .actions-right { width: 100%; flex-direction: column-reverse; gap: 10px; }
+  .form-actions .btn { width: 100%; }
+  .form-actions .spacer { display: none; }
+}
+
+/* ---- small phone ---------------------------------------------------------- */
+@media (max-width: 400px) {
+  :root { --pg: 10px; --modal-pad: 14px; }
+  .top-title h1 { font-size: 1rem; }
+  .stat strong { font-size: 1.22rem; }
+  .bedgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kv strong { font-size: .95rem; }
+  .fstep { padding: 8px 10px; font-size: .74rem; }
+  .modal-body { padding: var(--modal-pad); }
+  .me-meta strong { font-size: .68rem; }
+}
+
+/* ---- very small phones (iPhone SE and older, 320px) ---------------------- */
+@media (max-width: 340px) {
+  .vitals-snapshot { grid-template-columns: 1fr; }
+  .bedgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---- finger-sized controls, at any width ----------------------------------
+   Width alone is the wrong test for these: a tablet at 1024px and a touchscreen
+   laptop are both touched with a finger, and a 25x29px password reveal button
+   is just as unhittable there as on a 320px phone. `pointer: coarse` is the
+   condition that actually describes the input device. The upper bound keeps a
+   large touchscreen laptop from getting phone-sized chrome. */
+@media (pointer: coarse) and (max-width: 1024px) {
+  .btn, .btn.sm, .chip, .tabs button, .fstep, .fn-seg-btn,
+  .modal-card [data-close], .step-dot { min-height: 44px; }
+  .chip, .btn.sm { padding-top: 10px; padding-bottom: 10px; }
+  .fn-pw-toggle { min-width: 44px; min-height: 44px; right: 4px; }
+  .fn-pw-input-wrap .input, .fn-pw-input-wrap .fn-input { padding-right: 52px !important; }
+  .fn-dot { min-width: 44px; min-height: 44px; width: 44px; border-radius: 12px; }
+  .iconbtn { width: 44px; height: 44px; }
+  /* Checkbox / radio rows: the label is the target, so give the row the height. */
+  .ck { min-height: 44px; }
+  .ck input[type="checkbox"], .ck input[type="radio"] { width: 20px; height: 20px; }
+  .tag-remove { width: 28px; height: 28px; }
+  /* Bare links inside a table cell are the row action on a touch screen. */
+  .tbl a { display: inline-block; padding: 6px 2px; }
+}
+
+/* ---- touch devices: un-latch :hover ---------------------------------------
+   A touch screen fires :hover on tap and can leave it set, so a button stays
+   dark and a table row stays tinted until the user taps somewhere else. On a
+   table that tint is indistinguishable from the `.sel` "selected" state, which
+   is how a clerk ends up thinking the wrong patient is selected. These rules
+   restore each element's resting colour on touch; selection, which is driven
+   by a class rather than :hover, is untouched. */
+@media (hover: none) {
+  .btn:hover { background-color: var(--emr-teal); }
+  .btn.ghost:hover { background-color: #fff; }
+  .btn.dark:hover { background-color: var(--emr-navy); }
+  .chip:hover { background-color: #fff; }
+  .chip.on:hover { background-color: var(--emr-navy); }
+  .fn-seg-btn:hover:not(.on) { color: #64748b; }
+  .tbl tr.clickable:hover td { background-color: #fff; }
+  .tbl tr.clickable:hover td:first-child { background-color: #fff; }
+  .tbl tr.clickable.sel td,
+  .tbl tr.clickable.sel td:first-child { background-color: #f0fdfa; }
+  .bed:hover { filter: none; }
+}
+
+/* Keyboard users get a clear focus ring; touch users never see it. */
+:focus-visible { outline: 2px solid var(--emr-teal); outline-offset: 2px; border-radius: 6px; }
+/* Kill the grey flash iOS/Android paint over a tappable element. */
+a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
+  -webkit-tap-highlight-color: rgba(14, 107, 94, .12);
+}
+
+/* ---- Print (Laboratory / Imaging request & report) ------------------------ */
+#print-root { display: none; }
+
+@media print {
+  @page { margin: 14mm; }
+  html, body { background: #fff !important; }
+  body.printing > :not(#print-root) { display: none !important; }
+  body.printing #print-root { display: block !important; }
+
+  .print-sheet {
+    color: #000;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 12pt;
+    line-height: 1.4;
+  }
+  .p-head { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 14px; }
+  .p-hospital { font-size: 15pt; font-weight: 800; }
+  .p-sub { font-size: 10pt; color: #444; }
+  .p-doctitle { font-size: 13pt; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; text-align: right; }
+  .p-meta { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+  .p-meta td { padding: 3px 8px; vertical-align: top; font-size: 11pt; border-bottom: 1px solid #ddd; }
+  .p-meta td.k { color: #444; width: 32%; font-weight: 600; }
+  .p-h4 { font-size: 11pt; text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 4px; }
+  .p-list { margin: 0 0 8px 18px; padding: 0; }
+  .p-list li { margin: 2px 0; }
+  .p-tbl { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  .p-tbl th, .p-tbl td { border: 1px solid #999; padding: 5px 8px; font-size: 11pt; text-align: left; }
+  .p-tbl th { background: #f0f0f0; }
+  .p-sign { display: flex; gap: 40px; margin-top: 44px; }
+  .p-sign > div { flex: 1; }
+  .p-line { border-top: 1px solid #000; height: 0; margin-bottom: 4px; }
+  .p-cap { font-size: 10pt; color: #444; }
+  .p-note { font-size: 10pt; font-style: italic; background: #f7f7f7; border-left: 3px solid #999; padding: 6px 10px; margin: 8px 0; }
+  .p-foot { margin-top: 22px; font-size: 9pt; color: #666; border-top: 1px solid #ddd; padding-top: 6px; }
 }

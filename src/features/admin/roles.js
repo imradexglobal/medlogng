@@ -1,6 +1,28 @@
 // Fixed org role → capability map (pure, unit-testable, no Firebase imports).
 // Capability strings MUST match firestore.rules exactly.
 
+export const ALL_CAPS = [
+  'patient.create',
+  'patient.demographics.update',
+  'encounter.create',
+  'encounter.edit',
+  'vitals.create',
+  'diagnosis.create',
+  'prescription.create',
+  'lab.order',
+  'lab.result.enter',
+  'lab.result.verify',
+  'appointment.create',
+  'beds.manage',
+  'documents.upload',
+  'prescription.dispense',
+  'billing.invoice',
+  'billing.payment',
+  'encounter.status.advance',
+  'admin.roles.manage',
+  'admin.devices.manage',
+]
+
 export const ROLE_CAPS = {
   hospital_admin: ['*'],
   doctor: [
@@ -58,8 +80,21 @@ export const ROLE_CAPS = {
 
 export const ROLE_OPTIONS = Object.keys(ROLE_CAPS)
 
-// Admin-only capabilities (used to gate the Administration page itself).
 export const ADMIN_CAPS = ['admin.roles.manage', 'admin.devices.manage']
+
+export function uniqueCaps(caps) {
+  const seen = new Set()
+  const out = []
+  for (const c of (caps || [])) {
+    const v = String(c || '').trim()
+    if (!v) continue
+    if (seen.has(v)) continue
+    seen.add(v)
+    out.push(v)
+  }
+  return out
+}
+
 
 // At most this many ACTIVE hospital_admins per organization.
 // Enforced in adminService (client); Firestore Rules cannot count docs,
@@ -71,6 +106,20 @@ export function can(membership, cap) {
   if (!membership || membership.status !== 'active') return false
   const caps = membership.capabilities || []
   return caps.includes('*') || caps.includes(cap)
+}
+
+export function capsForRole(role) {
+  if (role && ROLE_CAPS[role]) return uniqueCaps(ROLE_CAPS[role])
+  return []
+}
+
+export function normalizeCaps(caps) {
+  const arr = uniqueCaps(caps)
+  if (arr.includes('*')) {
+    // Keep star alone for simplicity and to match existing semantics
+    return ['*']
+  }
+  return arr
 }
 
 export function isOrgAdmin(membership) {

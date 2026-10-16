@@ -64,7 +64,7 @@ function createWindow() {
   const winOpts = {
     width: 1280,
     height: 800,
-    title: 'MediLog NG',
+    title: 'MedLogNg',
     backgroundColor: '#0f172a',
     show: false,
     webPreferences: {

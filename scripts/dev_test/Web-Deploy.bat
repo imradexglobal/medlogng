@@ -52,6 +52,16 @@ set /p DONE=Press Enter to close...
         exit /b 1
     )
 )
+if not exist "node_modules\.bin\firebase.cmd" (
+    echo [2/5] firebase-tools missing - installing dependencies...
+    call npm install
+    if errorlevel 1 (
+        echo [ERROR] npm install failed - firebase-tools missing.
+        echo Window stays open so you can copy. Press Enter when done...
+set /p DONE=Press Enter to close...
+        exit /b 1
+    )
+)
 
 echo [3/5] Cleaning stale output (full rebuild, no leftovers)...
 if exist "dist" rmdir /s /q "dist"
@@ -88,9 +98,11 @@ set /p DONE=Press Enter to close...
 echo [OK] dist/ freshly rebuilt from current source - verified dist\index.html exists.
 
 echo [5/5] Deploying to Firebase (hosting + firestore^)...
-call npx firebase deploy --only hosting,firestore
+call npx --no-install firebase deploy --only hosting,firestore --project medlogng --non-interactive
 if errorlevel 1 (
-    echo [ERROR] Deploy failed. Run: npx firebase login
+    echo [ERROR] Deploy failed. Check you are logged in: npx firebase login
+    echo and that project "medlogng" exists. If Firestore is being enabled
+    echo for the first time, the first deploy can take a few minutes.
     echo Window stays open so you can copy. Press Enter when done...
 set /p DONE=Press Enter to close...
     exit /b 1

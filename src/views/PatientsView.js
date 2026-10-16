@@ -2,10 +2,11 @@
 import { shell, statusBadge, toast, wireToast, formModal, closeModal } from '../components/shell.js'
 import { navigate } from '../router.js'
 import { authStore } from '../store/authStore.js'
-import {
-  listOrgPatients, myPatientCaps, friendlyPatientError, formatPhone,
-  searchPatientsGlobally, getPatient, findOpenEncounterForPatient,
+import { listOrgPatientsPage, myPatientCaps, friendlyPatientError, formatPhone,
+  searchPatientsGlobally, parseSearchTerm, matchesPatient,
+  getPatient, findOpenEncounterForPatient,
 } from '../services/patientService.js'
+import { createLoadMore } from '../components/loadMore.js'
 import { payerOptions } from '../services/payerService.js'
 import { createEncounter, ENCOUNTER_TYPES } from '../services/consultationService.js'
 import { getClinicalStaff } from '../services/authService.js'
@@ -29,11 +30,22 @@ export async function PatientsView(app) {
   }
 
   let rows = []
+  // Infinite scroll state: rows accumulate, and `cursor` is the last document
+  // of the chunk we hold — hand it back to fetch the next one.
+  let cursor = null
+  let hasMore = false
+  let loading = false
   let searchTerm = ''
+  let parsed = parseSearchTerm('')
   let chip = 'All'
   let payerChips = []
   let isSearching = false
   let searchResults = []
+  // The search box drives a full read of the registry, so keystrokes are
+  // debounced and every in-flight run is tagged — a slow early request must
+  // not overwrite the results of a later one.
+  let searchTimer = null
+  let searchSeq = 0
 
   shell(app, {
     active: '/patients',
@@ -47,13 +59,70 @@ export async function PatientsView(app) {
       '<div class="search"><input id="q" class="input" placeholder="Search all hospitals — name, ID, MRN or phone…" /></div>' +
       '<div class="chips" id="chips"></div></div>' +
       '<div id="ptbl"></div>' +
-      '<p class="sub" id="pcount" style="margin-top:10px">Loading…</p></div>' +
+      '<p class="sub" id="pcount" style="margin-top:10px">Loading…</p>' +
+      '</div>' +
       (caps.canCreate ? '' : '<p class="sub">Your role cannot register patients — an administrator must grant the <strong>patient.create</strong> capability.</p>'),
   })
 
   const tableHost = document.getElementById('ptbl')
   const countEl = document.getElementById('pcount')
   const chipsHost = document.getElementById('chips')
+
+  const more = createLoadMore(loadMore)
+
+  // Fetch the next chunk and append it. The first call has no cursor and
+  // replaces the list; later ones walk forward from the last row loaded.
+  async function loadMore() {
+    if (loading) return
+    const first = cursor == null && rows.length === 0
+    loading = true
+    more.setLoading(true)
+    // Keep the current table laid out (dimmed) while the next chunk loads —
+    // clearing it made the whole card shrink and pop back.
+    tableHost.querySelector('.tblwrap')?.classList.add('is-loading')
+    try {
+      const [pg, names] = await Promise.all([
+        listOrgPatientsPage(activeOrg, { cursor }),
+        first ? payerOptions().catch(() => []) : Promise.resolve([]),
+      ])
+      // Dedupe on patient_id: a row written between two chunk reads shifts the
+      // cursor stream and can repeat the boundary document.
+      const seen = new Set(rows.map((r) => r.pid))
+      rows = first ? pg.rows : [...rows, ...pg.rows.filter((r) => !seen.has(r.pid))]
+      cursor = pg.cursor
+      hasMore = pg.hasMore
+      if (first) payerChips = names.map((o) => o.value).filter((n) => n && n !== 'Not set')
+      loading = false
+      more.setLoading(false)
+      more.setDone(!hasMore)
+      render()
+    } catch (e) {
+      console.error('[patients] list failed:', e)
+      loading = false
+      more.setLoading(false)
+      if (first) {
+        tableHost.innerHTML = '<div class="card"><p class="sub">Could not load patients: ' + esc(friendlyPatientError(e)) + '</p>' +
+          '<button class="btn" id="retryBtn">Retry</button></div>'
+        countEl.textContent = ''
+        const rb = document.getElementById('retryBtn')
+        if (rb) rb.onclick = () => { cursor = null; loadMore() }
+      } else {
+        // The rows already on screen stay usable; the loader offers a retry.
+        more.setError('Could not load more — retry')
+      }
+    } finally {
+      tableHost.querySelector('.tblwrap')?.classList.remove('is-loading')
+    }
+  }
+
+  // A fresh read of the whole list (refresh button).
+  function reload() {
+    rows = []
+    cursor = null
+    hasMore = false
+    more.reset()
+    loadMore()
+  }
 
   function renderChips() {
     const list = ['All', 'Active', ...payerChips]
@@ -70,9 +139,11 @@ export async function PatientsView(app) {
     if (isSearching) {
       tableHost.innerHTML = '<div class="card"><p class="sub">Searching all hospitals…</p></div>'
       countEl.textContent = 'Searching…'
+      more.destroy()
       return
     }
     if (searchTerm) {
+      more.destroy()
       renderSearchResults()
       return
     }
@@ -98,23 +169,27 @@ export async function PatientsView(app) {
           '<td>' + statusBadge(r.status) + '</td>' +
           '<td class="mut">' + (r.registered ? new Date(r.registered).toLocaleDateString('en-NG') : '—') + '</td>' +
           '</tr>').join('')
-        : '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No patients registered yet</td></tr>') +
-      '</tbody></table></div>'
+        : '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">' +
+          (rows.length ? 'No patients match this filter' : 'No patients registered yet') + '</td></tr>') +
+      '</tbody></table><div class="loadmore" data-loadmore="1"></div></div>'
     countEl.textContent = rows.length
-      ? 'Showing ' + shown.length + ' of ' + rows.length + (rows.length === 1 ? ' patient' : ' patients') + ' registered at your hospital'
-      : 'No patients registered yet.'
+      ? shown.length + ' patient' + (shown.length === 1 ? '' : 's') +
+        (shown.length !== rows.length ? ' (filtered from ' + rows.length + ')' : '')
+      : (rows.length ? 'No patients match this filter.' : 'No patients registered yet.')
     tableHost.querySelectorAll('tr[data-pid]').forEach((tr) => {
       tr.onclick = () => { window.location.hash = '#/patients/' + tr.getAttribute('data-pid') }
     })
+    more.mount(tableHost.querySelector('.tblwrap'))
   }
 
   function renderSearchResults() {
     const shown = searchResults.filter((r) => {
       if (chip === 'Active' && r.status !== 'Active') return false
       if (chip !== 'All' && chip !== 'Active' && String(r.payer || '').toLowerCase() !== chip.toLowerCase()) return false
-      const q = searchTerm
-      const hay = (r.name + ' ' + r.pid + ' ' + r.mrn + ' ' + r.phone).toLowerCase()
-      return hay.includes(q)
+      // Same matcher the service used, so a result the registry returned is
+      // never discarded here. Matching on the formatted '+234 803…' string used
+      // to drop every phone hit, which is why mobile search found nothing.
+      return matchesPatient(r, parsed)
     })
     tableHost.innerHTML =
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Patient</th><th>MRN</th><th>Phone</th><th>Sex / Age</th><th>Payer</th><th>Source</th><th>Actions</th></tr></thead><tbody>' +
@@ -139,10 +214,17 @@ export async function PatientsView(app) {
     const cloudCount = searchResults.filter((r) => !r.isLocal).length
     countEl.textContent = searchResults.length
       ? 'Found ' + searchResults.length + ' — ' + localCount + ' from your hospital, ' + cloudCount + ' from other hospitals'
-      : 'No patients found.'
+      : parsed.isPhone
+        // A clerk who mistypes a digit needs to know partial numbers are fine.
+        ? 'No patient has that mobile number. Partial numbers work — try the first 4 or more digits.'
+        : 'No patients found.'
     tableHost.querySelectorAll('tr[data-pid]').forEach((tr) => {
+      // closest(), not e.target: a click can land on an icon or a <strong>
+      // nested inside the encounter button, and e.target would then miss the
+      // [data-enc] guard entirely and navigate away instead of opening the
+      // encounter form.
       tr.onclick = (e) => {
-        if (e.target.dataset.enc) return
+        if (e.target.closest('[data-enc]')) return
         window.location.hash = '#/patients/' + tr.getAttribute('data-pid')
       }
     })
@@ -151,50 +233,33 @@ export async function PatientsView(app) {
     })
   }
 
-  async function load() {
-    countEl.textContent = 'Loading patients…'
-    tableHost.innerHTML = ''
-    try {
-      const [list, names] = await Promise.all([
-        listOrgPatients(activeOrg),
-        payerOptions().catch(() => []),
-      ])
-      rows = list
-      payerChips = names.map((o) => o.value).filter((n) => n && n !== 'Not set')
-      render()
-    } catch (e) {
-      console.error('[patients] list failed:', e)
-      tableHost.innerHTML = '<div class="card"><p class="sub">Could not load patients: ' + esc(friendlyPatientError(e)) + '</p>' +
-        '<button class="btn" id="retryBtn">Retry</button></div>'
-      countEl.textContent = ''
-      const rb = document.getElementById('retryBtn')
-      if (rb) rb.onclick = load
-    }
-  }
-
   async function runSearch() {
     if (!searchTerm) {
       searchResults = []
       renderLocalList()
       return
     }
+    const query = parsed
+    const seq = ++searchSeq
     isSearching = true
     render()
     try {
-      const parts = searchTerm.split(/\s+/)
-      const surname = parts[0] || ''
-      const given_names = parts.slice(1).join(' ') || ''
-      const { local, cloud } = await searchPatientsGlobally(surname, given_names, '')
+      const { local, cloud } = await searchPatientsGlobally(query)
+      if (seq !== searchSeq) return // a newer keystroke already won
+      // Defensive de-dupe: a patient of this hospital must never be re-listed
+      // as an "Other Hospital" hit, whatever the registry returns.
       const localPids = new Set(rows.map((r) => r.pid))
       searchResults = [
         ...local.map((r) => ({ ...r, isLocal: true })),
-        ...cloud.map((r) => ({ ...r, isLocal: localPids.has(r.pid) })),
+        ...cloud.filter((r) => !localPids.has(r.pid)).map((r) => ({ ...r, isLocal: false })),
       ]
     } catch (e) {
+      if (seq !== searchSeq) return
       console.error('[search] failed:', e)
       searchResults = []
       toast('Search failed: ' + friendlyPatientError(e))
     }
+    if (seq !== searchSeq) return
     isSearching = false
     render()
   }
@@ -203,7 +268,8 @@ export async function PatientsView(app) {
     if (searchTerm) {
       runSearch()
     } else {
-      load()
+      // Fresh data: drop every chunk loaded so far and walk again from the top.
+      reload()
     }
   }
   const regBtn = document.getElementById('regBtn')
@@ -211,10 +277,15 @@ export async function PatientsView(app) {
 
   const q = document.getElementById('q')
   q.oninput = () => {
-    searchTerm = q.value.trim().toLowerCase()
+    searchTerm = q.value.trim()
+    parsed = parseSearchTerm(searchTerm)
+    searchTerm = parsed.term.toLowerCase()
+    clearTimeout(searchTimer)
     if (searchTerm) {
-      runSearch()
+      searchTimer = setTimeout(runSearch, 500)
     } else {
+      searchSeq++
+      isSearching = false
       searchResults = []
       renderLocalList()
     }
@@ -222,7 +293,7 @@ export async function PatientsView(app) {
   renderChips()
   wireToast(app)
 
-  await load()
+  await loadMore()
 
   async function openEncounterModal(pid) {
     const { activeOrg } = authStore.getState()

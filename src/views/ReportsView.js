@@ -1,13 +1,14 @@
 // Reports — real aggregation from Firestore (offline-first, cached).
 import { shell, toast, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
-import { listOrgPatients } from '../services/patientService.js'
-import { listOrgAppointments } from '../services/appointmentService.js'
-import { listOrgEncounters } from '../services/consultationService.js'
-import { listOrgAdmissions } from '../services/admissionService.js'
-import { listOrgLabs } from '../services/laboratoryService.js'
-import { listOrgDrugs } from '../services/pharmacyService.js'
-import { listOrgInvoices } from '../services/billingService.js'
+import { listOrgPatientsPage } from '../services/patientService.js'
+import { listOrgAppointmentsPage } from '../services/appointmentService.js'
+import { listOrgEncountersPage } from '../services/consultationService.js'
+import { listOrgAdmissionsPage } from '../services/admissionService.js'
+import { listOrgLabsPage } from '../services/laboratoryService.js'
+import { listOrgDrugsPage } from '../services/pharmacyService.js'
+import { listOrgInvoicesPage } from '../services/billingService.js'
+import { countOrgDocs } from '../services/pagination.js'
 import { esc } from '../utils/sanitize.js'
 
 function naira(n) {
@@ -51,14 +52,27 @@ export async function ReportsView(app) {
     const statusEl = document.getElementById('rep-status')
     try {
       if (statusEl) statusEl.textContent = 'Loading live data…'
-      const [patientsAll, apptsAll, encsAll, admsAll, labsAll, drugsAll, invoicesAll] = await Promise.all([
-        listOrgPatients(activeOrg).catch(() => []),
-        listOrgAppointments(activeOrg).catch(() => []),
-        listOrgEncounters(activeOrg).catch(() => []),
-        listOrgAdmissions(activeOrg).catch(() => []),
-        listOrgLabs(activeOrg).catch(() => []),
-        listOrgDrugs(activeOrg).catch(() => []),
-        listOrgInvoices(activeOrg).catch(() => []),
+      // Bounded: counts for totals (no doc reads) + capped recent pages for
+      // breakdowns. Large hospitals no longer download every document to
+      // render this page. Sums (revenue) cover the sampled page — see note.
+      const CAP = 200
+      const [counts, patientsAll, apptsAll, encsAll, admsAll, labsAll, drugsAll, invoicesAll] = await Promise.all([
+        Promise.all([
+          countOrgDocs('organization_patients', activeOrg).catch(() => null),
+          countOrgDocs('appointments', activeOrg).catch(() => null),
+          countOrgDocs('encounters', activeOrg).catch(() => null),
+          countOrgDocs('admissions', activeOrg).catch(() => null),
+          countOrgDocs('lab_orders', activeOrg).catch(() => null),
+          countOrgDocs('stock_lots', activeOrg).catch(() => null),
+          countOrgDocs('invoices', activeOrg).catch(() => null),
+        ]),
+        listOrgPatientsPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
+        listOrgAppointmentsPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
+        listOrgEncountersPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
+        listOrgAdmissionsPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
+        listOrgLabsPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
+        listOrgDrugsPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
+        listOrgInvoicesPage(activeOrg, { pageSize: CAP }).then((r) => r.rows).catch(() => []),
       ])
       const patients = patientsAll.filter((p) => inRange(p.registered))
       const appts = apptsAll.filter((a) => inRange(a.createdAt))
@@ -81,7 +95,10 @@ export async function ReportsView(app) {
       const rangeTxt = (startMs != null || endMs != null)
         ? ' · range ' + (startMs != null ? new Date(startMs).toLocaleDateString('en-NG') : '…') + ' → ' + (endMs != null ? new Date(endMs).toLocaleDateString('en-NG') : '…')
         : ' · all time'
-      if (statusEl) statusEl.textContent = 'Live data · ' + patients.length + ' patients · ' + invoices.length + ' invoices' + rangeTxt
+      const [cPat, cApt, , cAdm, , , cInv] = counts
+      const totTxt = (cPat ?? patients.length) + ' patients · ' + (cInv ?? invoices.length) + ' invoices'
+      if (statusEl) statusEl.textContent = 'Live data · ' + totTxt + rangeTxt + ' · sampled ' + CAP + ' most recent per list' +
+        ((cApt != null && cApt > CAP) || (cAdm != null && cAdm > CAP) ? ' (totals are exact counts; breakdowns cover the sample)' : '')
       const grid = document.getElementById('rep-grid')
       if (grid) {
         grid.innerHTML = cards.map((c) =>

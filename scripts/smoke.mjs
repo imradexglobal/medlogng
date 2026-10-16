@@ -357,4 +357,430 @@ const twoInA = [...admRows, { ...canonical, id: 'a5', bedNumber: 'Bed 8' }]
 assert.equal(occupiedInWard(twoInA, 'Ward A'), 2, 'Ward A holds two')
 assert.equal(validateWardCapacity(1, twoInA, 'Ward A'), 'Cannot set below current occupancy (2).')
 
+// ---- security rules + indexes (regression guards) ----------------------------
+// Firestore cannot express "authorize against the org that OWNS the doc" by
+// accident, so guard the two ways this has gone wrong before:
+//
+//   1. An update authorized on request.resource.data.organization_id lets any
+//      caller who holds the capability SOMEWHERE rewrite a doc owned by a
+//      DIFFERENT org and re-file it into their own. The beds module must pin
+//      organization_id instead.
+//   2. Composite indexes cost a write on every document change, so an index on
+//      a field no writer ever sets is pure waste.
+import fs from 'node:fs'
+
+const rulesSrc = fs.readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8')
+const indexesSrc = fs.readFileSync(new URL('../firestore.indexes.json', import.meta.url), 'utf8')
+
+function matchBlock(name) {
+  const m = rulesSrc.match(new RegExp('match\\s+/' + name + '/\\{[^}]*\\}\\s*\\{([\\s\\S]*?)\\n\\s{4}\\}', 'm'))
+  assert.ok(m, 'firestore.rules has a match block for ' + name)
+  return m[1]
+}
+
+for (const coll of ['admissions', 'wards', 'beds', 'rooms']) {
+  const block = matchBlock(coll)
+  const update = block.match(/allow update:[^;]+;/)
+  assert.ok(update, coll + ' has an explicit update rule')
+  assert.ok(
+    /resource\.data\.organization_id\s*==\s*request\.resource\.data\.organization_id/.test(update[0]),
+    coll + ' update must PIN organization_id (found: ' + update[0].trim() + ')'
+  )
+  assert.ok(
+    !/hasCap\(\s*request\.resource\.data\.organization_id/.test(update[0]),
+    coll + ' update must not authorize against the org being written to'
+  )
+}
+
+// An admission is the audit record of a bed; it is discharged, never deleted.
+assert.ok(/allow delete: if false;/.test(matchBlock('admissions')), 'admissions must never be deleted')
+
+// Admissions queries need: org + the one-way encounter link, plus org +
+// created_at for the server-paginated list (see admissionService
+// listOrgAdmissionsPage). `admitDateTime` was indexed but no writer ever set it.
+const admIndexes = JSON.parse(indexesSrc).indexes.filter((i) => i.collectionGroup === 'admissions')
+const admPaths = admIndexes.map((i) => i.fields.map((f) => f.fieldPath).join('+'))
+assert.ok(
+  admPaths.includes('organization_id+encounter_id'),
+  'admissions index must serve the org + encounter_id lookup',
+)
+assert.ok(
+  admPaths.includes('organization_id+created_at'),
+  'admissions index must serve the org + created_at paginated list',
+)
+assert.ok(!indexesSrc.includes('admitDateTime'), 'no index may reference the never-written admitDateTime')
+
+// ---- patient search (real module) ---------------------------------------------
+// Query parsing and phone/name matching live in src/features/patients/search.js,
+// which is deliberately free of Firebase imports so this test exercises the real
+// implementation rather than a copy.
+import {
+  MIN_PHONE_DIGITS, normalizePhone, phoneKey, phoneSearchDigits, phoneMatches,
+  parseSearchTerm, patientHaystack, matchesPatient,
+} from '../src/features/patients/search.js'
+
+// A registered patient, exactly as toPatientRow shapes it.
+const ada = {
+  pid: 'pidAda0001', mrn: 'IMR-PIDADA', name: 'Okoro Ada', surname: 'Okoro',
+  given_names: 'Ada', sex: 'F', dob: '1990-04-02',
+  phone: '+2348031234567', phone_key: '8031234567',
+}
+const eve = {
+  pid: 'pidEve00002', mrn: 'IMR-PIDEVE00', name: 'Ada Eve', surname: 'Eve',
+  given_names: 'Ada Chidinma', sex: 'F', dob: '',
+  phone: '+2348039999999', phone_key: '8039999999',
+}
+
+// ---- the phone regression: searching by mobile number found nothing ----------
+// The registry used to feed '08031234567' to the SURNAME matcher, so a number
+// that existed returned zero rows. It must be recognised as a phone search.
+let p = parseSearchTerm('08031234567')
+assert.equal(p.isPhone, true, 'a full local number is a phone search, not a surname')
+assert.equal(p.surname, '', 'a phone search must not be parsed as a name')
+assert.equal(p.phoneDigits, '8031234567', 'trunk zero stripped')
+assert.equal(matchesPatient(ada, p), true, 'searching by mobile finds the registered patient')
+assert.equal(matchesPatient(eve, p), false, 'and only that patient')
+
+// Every way a clerk can type the same number resolves to the same record.
+for (const typed of ['08031234567', '0803 123 4567', '0803-123-4567', '+2348031234567',
+  '+234 803 123 4567', '2348031234567', '8031234567', '803 123 4567', '  08031234567  ']) {
+  assert.equal(matchesPatient(ada, typed), true, '"' + typed + '" must find the patient')
+}
+assert.equal(matchesPatient(ada, '08031234568'), false, 'a different number must not match')
+assert.equal(matchesPatient(ada, '07031234567'), false, 'another network must not match')
+
+// Partial numbers work. Exact-only matching meant retyping all 11 digits.
+assert.equal(matchesPatient(ada, '8031'), true, 'leading digits find the patient')
+assert.equal(matchesPatient(ada, '34567'), true, 'trailing digits find the patient')
+assert.equal(matchesPatient(ada, '8032'), false, 'digits belonging to nobody match nobody')
+assert.equal(matchesPatient(eve, '8031'), false, 'partials do not leak across patients')
+
+// A number typed with the country code must still hit the 10-digit key.
+assert.equal(phoneMatches(ada, '+234 803 123 4567'), true)
+assert.equal(phoneMatches(ada, '08031234567'), true)
+
+// Records written before phone_key existed are still findable by phone.
+assert.equal(phoneMatches({ phone: '+2348031234567' }, '8031234567'), true, 'phone fallback')
+assert.equal(phoneMatches({ phone_key: '8031234567' }, '08031234567'), true, 'key is enough')
+assert.equal(phoneMatches({}, '8031234567'), false, 'a patient with no phone does not match')
+assert.equal(phoneMatches(ada, ''), true, 'an empty phone query is not a filter')
+
+// Too few digits is not a phone search — it is still a name/ID search.
+assert.equal(parseSearchTerm('803').isPhone, false, '3 digits is not a mobile number')
+assert.ok(MIN_PHONE_DIGITS >= 4, 'the threshold cannot drop below 4')
+
+// An ID or MRN contains letters, so it can never be mistaken for a number.
+p = parseSearchTerm('IMR-PIDADA')
+assert.equal(p.isPhone, false, 'an MRN is a text search')
+assert.equal(matchesPatient(ada, p), true, 'MRN search works')
+
+p = parseSearchTerm('pidAda0001')
+assert.equal(p.isPhone, false, 'a patient ID is a text search')
+assert.equal(matchesPatient(ada, p), true, 'patient ID search works')
+
+// ---- name search -------------------------------------------------------------
+assert.equal(matchesPatient(ada, 'okoro'), true, 'surname matches')
+assert.equal(matchesPatient(ada, 'OKORO'), true, 'surname match is case-insensitive')
+assert.equal(matchesPatient(ada, 'ada'), true, 'given name matches')
+assert.equal(matchesPatient(ada, 'Ada Okoro'), true, 'given + surname in either order')
+assert.equal(matchesPatient(ada, 'okoro ada'), true, 'surname + given')
+assert.equal(matchesPatient(eve, 'Ada'), true, 'given name finds the other patient too')
+assert.equal(matchesPatient(eve, 'Ada Okoro'), false, 'a name from another patient does not match')
+
+// Whitespace must not break the parse.
+assert.equal(matchesPatient(ada, '  Okoro   Ada  '), true, 'extra spaces tolerated')
+assert.equal(matchesPatient(ada, 'Ada\tOkoro'), true, 'tab-separated name tolerated')
+
+// ---- empty query -------------------------------------------------------------
+assert.deepEqual(parseSearchTerm(''), { term: '', text: '', surname: '', given_names: '', phoneDigits: '', isPhone: false })
+assert.equal(parseSearchTerm('   ').term, '', 'whitespace is an empty query')
+assert.equal(matchesPatient(ada, ''), true, 'an empty query matches everything')
+assert.equal(matchesPatient(ada, null), true, 'a null query matches everything')
+assert.equal(matchesPatient(ada, undefined), true, 'an undefined query matches everything')
+
+// ---- strict phone validation is unchanged -------------------------------------
+// normalizePhone still REJECTS a partial number — only search is lenient, so a
+// half-typed number can never be saved as a patient's contact.
+assert.equal(normalizePhone('08031234567'), '08031234567')
+assert.equal(normalizePhone('+234 803 123 4567'), '08031234567')
+assert.equal(normalizePhone('8031234567'), '08031234567', 'bare 10 digits get a trunk zero')
+assert.equal(normalizePhone('803123'), '', 'a partial number is not a valid phone')
+assert.equal(normalizePhone('12345'), '')
+assert.equal(normalizePhone(''), '')
+assert.equal(normalizePhone(null), '')
+assert.equal(phoneKey('+2348031234567'), '8031234567', 'key drops the trunk zero')
+assert.equal(phoneKey('nonsense'), '')
+assert.equal(phoneSearchDigits('+234 803 123 4567'), '8031234567')
+assert.equal(phoneSearchDigits('08031234567'), '8031234567')
+// Normalising twice must be a no-op — phoneMatches re-normalises the digits
+// that parseSearchTerm already normalised.
+const once = phoneSearchDigits('+234 803 123 4567')
+assert.equal(phoneSearchDigits(once), once, 'phoneSearchDigits is idempotent')
+assert.equal(matchesPatient(ada, phoneSearchDigits('+234 803 123 4567')), true, 'pre-normalised query still matches')
+
+// '234' is a real Nigerian mobile prefix, so a bare 10-digit number starting 234
+// must not be mistaken for the country code — in validation or in search.
+assert.equal(normalizePhone('2345678901'), '02345678901', 'local 234 prefix is not a country code')
+assert.equal(phoneSearchDigits('2345678901'), '2345678901', 'same in search')
+assert.equal(phoneKey('2345678901'), '2345678901')
+assert.equal(normalizePhone('+2342345678901'), '02345678901', 'country code still stripped when present')
+assert.equal(matchesPatient({ phone_key: '2345678901' }, '02345678901'), true, 'a 234-prefixed number is findable')
+
+// ---- the search box must actually route a number to the phone matcher --------
+// Regression guard on the wiring, not just the rule: PatientsView used to call
+// searchPatientsGlobally(name, givenNames, '') with a hard-coded empty phone
+// argument, so every mobile search was downgraded to a surname search.
+const patientsViewSrc = fs.readFileSync(new URL('../src/views/PatientsView.js', import.meta.url), 'utf8')
+const searchCall = patientsViewSrc.match(/searchPatientsGlobally\(([^)]*)\)/)
+assert.ok(searchCall, 'PatientsView calls the global registry search')
+assert.ok(!searchCall[1].includes("''"), 'PatientsView must pass the parsed query through, not an empty phone')
+assert.ok(/parseSearchTerm/.test(patientsViewSrc), 'PatientsView parses the term before searching')
+// One registry read per keystroke is a full collection scan; debounce it.
+assert.ok(/setTimeout\(runSearch/.test(patientsViewSrc), 'the registry search is debounced')
+
+// Every patient picker must be reachable by mobile number too. A <select> cannot
+// be typed into, so a clerk who only knows the number had no way in at all.
+for (const view of ['AppointmentsView', 'BillingView', 'LaboratoryView', 'AdmissionsView']) {
+  const src = fs.readFileSync(new URL('../src/views/' + view + '.js', import.meta.url), 'utf8')
+  const opts = src.match(/const patientOpts =[\s\S]*?\n    \}/)
+  assert.ok(opts, view + ' builds a patient option list')
+  assert.ok(/formatPhone/.test(opts[0]), view + ' patient options carry the mobile number')
+  assert.ok(/searchable:/.test(src), view + ' patient picker is filterable')
+}
+
+// Encounters are started ONLY from the Patients page. Consultations is a queue
+// + workspace, so it must not carry its own start-encounter form/patient picker.
+{
+  const src = fs.readFileSync(new URL('../src/views/ConsultationsView.js', import.meta.url), 'utf8')
+  assert.ok(!/openStartForm|id="startBtn"/.test(src), 'ConsultationsView has no start-encounter form')
+  const patientsView = fs.readFileSync(new URL('../src/views/PatientsView.js', import.meta.url), 'utf8')
+  assert.ok(/openEncounterModal/.test(patientsView), 'PatientsView still starts encounters')
+}
+
+// The filter must be digit-aware, or '+234 803 123 4567' is unreachable by
+// typing '0803…' — the exact string a Nigerian clerk would type.
+const shellSrc = fs.readFileSync(new URL('../src/components/shell.js', import.meta.url), 'utf8')
+assert.ok(/data-filter-for/.test(shellSrc), 'formModal renders a filter box for searchable selects')
+assert.ok(/replace\(\/\\D\/g, ''\)\.includes\(digits\)/.test(shellSrc), 'the filter matches on digits')
+
+// ---- haystack ----------------------------------------------------------------
+assert.ok(patientHaystack(ada).includes('+2348031234567'), 'the stored phone is searchable')
+assert.ok(patientHaystack(ada).includes('8031234567'), 'the phone key is searchable')
+assert.ok(patientHaystack(ada).includes('imr-pidada'), 'the MRN is searchable in the haystack')
+assert.equal(patientHaystack(null), '', 'a missing row has no haystack, not a crash')
+
+// ---- bulk data schema (real module) -------------------------------------------
+// The admin SQLite <-> Firestore mapping lives in src/features/data/schema.js,
+// which is deliberately free of Firebase imports so it is unit-testable here.
+import {
+  IMPORT_ORDER_TABLES, TABLE_BY_TABLE, TABLE_BY_COLLECTION,
+  buildCreateTableSql, REFERENCE_TABLE_DDL, META_TABLE_DDL,
+  rowToDoc, docToRow, validateRow, tsColumns, hasColumn, fkTargets, tsToIso,
+} from '../src/features/data/schema.js'
+
+const patients = TABLE_BY_TABLE.patients
+const orgPats = TABLE_BY_TABLE.organization_patients
+
+assert.equal(IMPORT_ORDER_TABLES.length, 19, 'registry covers clinical + operational + org config')
+assert.equal(Object.keys(TABLE_BY_TABLE).length, 19, 'every table is indexable by name')
+assert.equal(TABLE_BY_COLLECTION.encounters.collection, 'encounters', 'collection index round-trips')
+assert.ok(orgPats.orgKeyed, 'organization_patients is org-keyed')
+assert.ok(orgPats.derived, 'organization_patients is derived from patients')
+
+// Firestore rules require `status` on several collections; if a table lists it
+// as a rules-required field, the importer must default it or imports fail.
+for (const entry of IMPORT_ORDER_TABLES) {
+  if ((entry.rulesRequired || []).includes('status')) {
+    assert.ok(entry.defaultStatus, entry.table + ' must default status (rules require it)')
+  }
+}
+
+// Child tables must reference parents that actually exist in the registry.
+for (const entry of IMPORT_ORDER_TABLES) {
+  for (const fk of fkTargets(entry)) {
+    assert.ok(TABLE_BY_TABLE[fk.table], entry.table + '.' + fk.column + ' FK targets a registered table: ' + fk.table)
+    assert.ok(hasColumn(TABLE_BY_TABLE[fk.table], fk.col), fk.table + ' has the FK column ' + fk.col)
+  }
+}
+
+// ---- SQL DDL ---------------------------------------------------------------
+const patientsDdl = buildCreateTableSql(patients)
+assert.match(patientsDdl, /PRIMARY KEY \("id"\)/, 'patients table has a text primary key')
+assert.ok(!/PRIMARY KEY \("id" TEXT NOT NULL/.test(patientsDdl), 'id is declared once, as the primary key line')
+const encDdl = buildCreateTableSql(TABLE_BY_TABLE.encounters)
+assert.match(encDdl, /FOREIGN KEY \("patient_id"\) REFERENCES "patients"\("id"\)/, 'encounter FK to patients')
+assert.match(encDdl, /"vitals" TEXT/, 'json columns stored as TEXT')
+assert.match(encDdl, /"patient_id" TEXT/, 'text columns are TEXT')
+assert.match(REFERENCE_TABLE_DDL, /"references" TEXT/, 'schema_reference table is DDL-safe')
+assert.match(META_TABLE_DDL, /PRIMARY KEY/, '__meta key/value table')
+
+// ---- row -> doc coercion -----------------------------------------------------
+const vitals = TABLE_BY_TABLE.vitals
+const row = {
+  id: 'v1', patient_id: 'p1', encounter_id: 'e1',
+  bp_systolic: '120', bp_diastolic: 80, pulse: '72', temp_c: '36.7', spo2: '98',
+  note: 'stable',
+  created_by: 'u1', created_at: '2024-01-02T03:04:05.000Z', updated_at: '',
+}
+const doc = rowToDoc(vitals, row)
+assert.equal(doc.bp_systolic, 120, 'int coercion from text')
+assert.equal(doc.bp_diastolic, 80, 'int coercion from number')
+assert.equal(doc.temp_c, 36.7, 'real coercion')
+assert.equal(doc.created_at, '2024-01-02T03:04:05.000Z', 'ts stays an ISO string in the outbox')
+assert.equal(doc.updated_at, '', 'blank ts is blank, dropped later')
+
+// bool / json coercion on patients.
+const payer = TABLE_BY_TABLE.payers
+const payerDoc = rowToDoc(payer, { id: 'py1', name: 'NHIA', category: 'nhia', sort_order: '20', active: 1, code: '' })
+assert.equal(payerDoc.active, true, 'bool from 1')
+assert.equal(payerDoc.sort_order, 20, 'int from text')
+const pRow = { id: 'p1', surname: 'Okoro', given_names: 'Ada', allergy: '["penicillin"]', status: 'active', created_by: '', created_at: '', updated_at: '' }
+const pDoc = rowToDoc(TABLE_BY_TABLE.patients, pRow)
+assert.deepEqual(pDoc.allergy, ['penicillin'], 'json text parses to array')
+assert.ok(hasColumn(TABLE_BY_TABLE.patients, 'updated_at'), 'patients keep updated_at')
+
+// ---- doc -> row (export) -----------------------------------------------------
+const tsLike = { toMillis: () => 1700000000000 }
+const docBack = {
+  id: 'enc1', patient_id: 'p1', patient_name: 'Ada Okoro', appointment_id: '', status: 'closed',
+  type: 'General', clinician: 'Dr B', chief_complaint: 'Fever', vitals: { BP: '120/80' },
+  diagnoses: [{ condition: 'Malaria' }], diagnosis: '', treatment_plan: '', prescription: {}, lab_orders: [],
+  created_by: 'u1', created_by_name: 'Dr B', created_at: tsLike, updated_at: null,
+}
+const encRow = docToRow(TABLE_BY_TABLE.encounters, docBack)
+assert.deepEqual(JSON.parse(encRow.vitals), { BP: '120/80' }, 'json object stringified to text')
+assert.deepEqual(JSON.parse(encRow.diagnoses), [{ condition: 'Malaria' }], 'array stringified to text')
+assert.equal(encRow.created_at, '2023-11-14T22:13:20.000Z', 'Timestamp -> ISO via tsToIso')
+assert.equal(tsToIso('2024-05-06T07:08:09.000Z'), '2024-05-06T07:08:09.000Z', 'ISO string passes through')
+assert.equal(tsToIso('nonsense'), 'nonsense', 'unparseable ts preserved, never silently dropped')
+assert.equal(tsToIso(1700000000000), '2023-11-14T22:13:20.000Z', 'epoch millis -> ISO')
+assert.equal(encRow.updated_at, '', 'missing ts exported as blank, not a broken value')
+
+// ---- validation --------------------------------------------------------------
+assert.equal(validateRow(TABLE_BY_TABLE.patients, { ...pDoc, patient_id: undefined }), null, 'patients do not require patient_id')
+assert.equal(validateRow(TABLE_BY_TABLE.patients, { ...pDoc, surname: '' }), 'Missing required field "surname"', 'surname is a rules requirement')
+assert.equal(validateRow(TABLE_BY_TABLE.payments, { invoice_id: 'inv1', amount_kobo: '0' }), 'amount_kobo must be a positive integer (Security Rules)', 'zero payment refused')
+assert.equal(validateRow(TABLE_BY_TABLE.payments, { invoice_id: 'inv1', amount_kobo: 500 }), null, 'valid payment passes')
+const ward = { name: 'Ward A' }
+assert.equal(validateRow(TABLE_BY_TABLE.wards, { ...ward, total_beds: 0 }), 'total_beds must be at least 1', 'beds floor of 1')
+assert.equal(validateRow(TABLE_BY_TABLE.wards, { ...ward, total_beds: 5 }), null, 'valid ward passes')
+
+// ---- bulk queue status summary (pure) ---------------------------------------
+import { QUEUE_STATUSES, summarize } from '../src/services/bulkQueue.js'
+assert.deepEqual(QUEUE_STATUSES, ['queued', 'sending', 'written', 'synced', 'error'], 'full state machine')
+const qsum = summarize([
+  { table: 'patients', status: 'queued' },
+  { table: 'patients', status: 'queued' },
+  { table: 'patients', status: 'synced' },
+  { table: 'payers', status: 'error' },
+  { table: 'encounters', status: 'written' },
+  { table: 'encounters', status: 'written' },
+])
+assert.equal(qsum.length, 3, 'per-table rollup')
+const pats = qsum.find((t) => t.table === 'patients')
+assert.deepEqual([pats.total, pats.queued, pats.synced], [3, 2, 1], 'per-table counts roll up')
+assert.ok(qsum.sort((a, b) => a.table.localeCompare(b.table)).every((t, i, arr) => i === 0 || arr[i - 1].table <= t.table), 'summarize sorts by table')
+
+// Auto-written mirror rows are counted so the upload-status table can fold them
+// under the table they mirror instead of showing a confusing second table.
+const qsumAuto = summarize([
+  { table: 'patients', status: 'queued' },
+  { table: 'organization_patients', status: 'queued', auto: true },
+  { table: 'organization_patients', status: 'queued', auto: true },
+])
+assert.equal(qsumAuto.find((t) => t.table === 'organization_patients').auto, 2, 'auto-mirror rows are counted per table')
+assert.equal(qsumAuto.find((t) => t.table === 'patients').auto, 0, 'normal rows are not auto')
+
+// ---- review the wiring of the admin tab (no stale audit filter enum) --------
+const adminViewSrc = fs.readFileSync(new URL('../src/views/AdminView.js', import.meta.url), 'utf8')
+assert.ok(adminViewSrc.includes("'Data import / export'"), 'admin nav includes the data tab')
+assert.ok(/import \{[\s\S]*bulkDataService/.test(adminViewSrc), 'AdminView wires the bulk service')
+assert.ok(/stageImport|generateTemplate|exportToDatabase/.test(adminViewSrc), 'template + export + stage are all called')
+assert.ok(/setInterval\(refreshStatus, 1000\)/.test(adminViewSrc), 'live upload-status polling is wired')
+assert.ok(/waitForPendingWrites|flushPending/.test(adminViewSrc), 'cloud-sync status is surfaced')
+
+// ---- inactivity auto-logout (real module) --------------------------------------
+// Closing the app must NOT end the session (Firebase local persistence keeps
+// the user signed in); 20 minutes without a single interaction must. The
+// rules are pure in src/features/session/idle.js; the localStorage + DOM
+// wiring lives in src/services/idleService.js.
+import { IDLE_TIMEOUT_MS, idleElapsed, isIdleExpired } from '../src/features/session/idle.js'
+
+assert.equal(IDLE_TIMEOUT_MS, 20 * 60 * 1000, '20 minutes of inactivity ends the session')
+const t0 = 1700000000000
+assert.equal(isIdleExpired(t0, t0), false, 'fresh activity is never expired')
+assert.equal(isIdleExpired(t0 + IDLE_TIMEOUT_MS - 1, t0), false, '19:59 is still active')
+assert.equal(isIdleExpired(t0 + IDLE_TIMEOUT_MS, t0), true, 'exactly 20 minutes expires')
+assert.equal(isIdleExpired(t0 + 45 * 60 * 1000, t0), true, 'a tab left open for 45 min expires')
+assert.equal(idleElapsed(t0, 0), 0, 'no stamp counts as just-started')
+assert.equal(isIdleExpired(t0, 0), false, 'a missing stamp must not sign out a live session')
+assert.equal(idleElapsed(t0, t0 + 60 * 1000), 0, 'a future stamp (clock skew) is clamped')
+assert.equal(isIdleExpired(t0, t0 + 60 * 1000), false, 'clock skew cannot expire a session')
+
+const mainSrc = fs.readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+assert.ok(/startIdleWatch\(\)/.test(mainSrc), 'main.js boots the inactivity watcher')
+
+const idleSrc = fs.readFileSync(new URL('../src/services/idleService.js', import.meta.url), 'utf8')
+for (const ev of ['mousedown', 'keydown', 'wheel', 'touchstart']) {
+  assert.ok(idleSrc.includes("'" + ev + "'"), 'interaction listener: ' + ev)
+}
+// Relaunching the app is not interaction. A stamp on focus/visibilitychange
+// would reset the clock every time the app is reopened, so a device left in a
+// drawer for hours would still be "active".
+const eventsLine = idleSrc.match(/const ACTIVITY_EVENTS = \[[^\]]*\]/)[0]
+assert.ok(!/focus|visibilitychange/.test(eventsLine), 'focus/visibility must not count as activity')
+assert.ok(idleSrc.includes('visibilitychange'), 'returning to a hidden tab re-checks the clock')
+assert.ok(/localStorage/.test(idleSrc), 'the stamp lives in localStorage, so a closed app keeps timing')
+assert.ok(/authStateReady/.test(idleSrc), 'the first check waits for the persisted session to be restored')
+assert.ok(/forceLogout/.test(idleSrc), 'expiry signs the user out through the shared forced-logout path')
+assert.ok(/clearStamp/.test(idleSrc), 'expiry clears the stamp')
+
+// ---- forgot password (email reset) ---------------------------------------------
+// The login screen used to answer "Forgot password?" with "coming soon" and
+// send the user to their admin. It now mails a Firebase reset link.
+const loginSrc = fs.readFileSync(new URL('../src/views/LoginView.js', import.meta.url), 'utf8')
+assert.ok(/requestPasswordReset/.test(loginSrc), 'LoginView requests the reset email')
+assert.ok(!/coming soon/.test(loginSrc), 'the "reset is coming soon" stub is gone')
+assert.ok(/id="resetFields"/.test(loginSrc), 'the reset form is its own inline pane')
+assert.ok(/id="rem"/.test(loginSrc), 'the reset form collects the address')
+assert.ok(/id="backLogin"/.test(loginSrc), 'the user can get back to the login form')
+assert.ok(/markActivity/.test(loginSrc), 'signing in restarts the inactivity clock')
+
+const authSrc = fs.readFileSync(new URL('../src/services/authService.js', import.meta.url), 'utf8')
+assert.ok(/sendPasswordResetEmail\(auth,/.test(authSrc), 'authService calls the Firebase reset API')
+assert.ok(/export async function requestPasswordReset/.test(authSrc), 'requestPasswordReset is exported for the view')
+assert.ok(/export async function verifyResetCode/.test(authSrc), 'the reset link code can be verified in-app')
+assert.ok(/export async function completePasswordReset/.test(authSrc), 'the new password is saved through confirmPasswordReset')
+assert.ok(/handleCodeInApp: true/.test(authSrc), 'the emailed link returns to the app so the password is entered there')
+assert.ok(!/sendPasswordResetEmail\(auth, mail,\s*\}\)/.test(authSrc), 'the reset email carries a continue URL')
+assert.ok(/auth\/unauthorized-continue-uri/.test(authSrc), 'an unauthorized origin falls back to the hosted reset page instead of failing')
+assert.ok(/seg\.style\.display = 'none'/.test(loginSrc), 'the reset screen hides the mode switcher inline (.fn-seg sets display:flex, which beats the hidden attribute)')
+
+// The new password must be typed twice, and both must match before saving.
+assert.ok(/renderPasswordField\('np'/.test(loginSrc), 'the reset screen has a new-password field')
+assert.ok(/renderPasswordField\('cp'/.test(loginSrc), 'the reset screen has a confirm-password field')
+assert.ok(/Passwords do not match/.test(loginSrc), 'a mismatch is refused before saving')
+assert.ok(/completePasswordReset\(code, np\)/.test(loginSrc), 'both fields are checked before the reset is submitted')
+assert.ok(/mode === 'resetPassword' && params\.oobCode/.test(loginSrc), 'the emailed link is handled on the login screen')
+
+// A reset link must render even with a live session (the user is locked out on
+// that device), and must not be bounced away by the auth gates.
+const routerSrc = fs.readFileSync(new URL('../src/router.js', import.meta.url), 'utf8')
+assert.ok(/isResetLink/.test(routerSrc), 'the router lets a reset link through the guest redirect')
+assert.ok(/route\.guest && user && !isResetLink/.test(routerSrc), 'the signed-in bounce is skipped for reset links')
+assert.ok(/split\('\?'\)\[0\]/.test(authSrc), 'checkAccess compares the path only, ignoring the reset query')
+
+const errorsSrc = fs.readFileSync(new URL('../src/features/auth/errors.js', import.meta.url), 'utf8')
+for (const code of ['auth/invalid-action-code', 'auth/expired-action-code']) {
+  assert.ok(errorsSrc.includes(code), 'friendly message for ' + code)
+}
+
+// A hash router cannot see ?mode=resetPassword&oobCode=… on a plain URL (the
+// action-link shape), so main.js folds them into the hash before booting.
+const mainSrc2 = fs.readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+assert.ok(/foldResetLinkIntoHash/.test(mainSrc2), 'main.js folds action links into the hash')
+assert.ok(/mode=resetPassword/.test(mainSrc2), 'only resetPassword links are folded')
+assert.ok(/oobCode/.test(mainSrc2), 'the one-time code is carried into the hash')
+assert.ok(/replaceState/.test(mainSrc2), 'the fold rewrites the URL without reloading or adding history')
+
 console.log('smoke: all assertions passed')

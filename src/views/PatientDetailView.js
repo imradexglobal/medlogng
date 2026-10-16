@@ -14,6 +14,12 @@ import {
   createAdmission, dischargeAdmission, listOrgWards, validateAdmissionInput, normalizeAdmission,
   ADMISSION_TYPES,
 } from '../services/admissionService.js'
+import { listOrgDrugs, requestMedicationLines, updateRequestItems } from '../services/pharmacyService.js'
+import { openPrescriptionModal } from '../features/pharmacy/prescriptionModal.js'
+import * as R from '../features/pharmacy/requests.js'
+import { printDocument } from '../lib/print.js'
+import { prescriptionHtml } from '../lib/prescriptionPrint.js'
+import { enqueue } from '../services/clinicalOutbox.js'
 
 const TABS = ['Dashboard', 'Personal Data', 'Blood & Allergies', 'Next of Kin', 'Timeline', 'Encounters', 'Vitals', 'Diagnoses', 'Medications', 'Labs', 'Admissions', 'Documents']
 const SEXES = [{ value: '', label: 'Not set' }, 'Female', 'Male']
@@ -180,10 +186,12 @@ export async function PatientDetailView(app, params = {}) {
       // Active diagnoses (status === 'Active')
       const activeDiagnoses = (diagnosesRes.rows || []).filter(d => (d.status || 'Active') === 'Active')
 
-      // Active medications (status === 'Active' or 'Dispensed')
+      // Current medications: medicines from scripts that are active or partly
+      // issued. Legacy rows carry their medicine at the top level rather than in
+      // `items`, so normalizeRequest is what makes both shapes comparable.
       const activeMeds = (medsRes.rows || []).filter(m => {
-        const status = (m.status || 'Requested')
-        return status === 'Active' || status === 'Dispensed'
+        const script = R.normalizeRequest(m)
+        return script.status === 'Dispensed' || script.status === 'Partially dispensed'
       })
 
       // Allergies from patient record
@@ -437,16 +445,27 @@ export async function PatientDetailView(app, params = {}) {
       `).join('')
       : '<p class="sub">No active diagnoses.</p>'
 
-    const medsHtml = d.activeMeds.length
-      ? d.activeMeds.map(m => `
+    // Flattened to one entry per medicine, since a prescription holds several.
+    const activeLines = d.activeMeds.flatMap(m => R.toRequestItems(m).map(l => ({
+      line: l,
+      script: R.normalizeRequest(m),
+      createdBy: m.created_by_name || m.created_by || '',
+      createdAt: m.created_at,
+    })))
+
+    const medsHtml = activeLines.length
+      ? activeLines.map(({ line: l, script, createdBy, createdAt }) => {
+        const issued = R.toQty(l.dispensed_qty, 0)
+        const owed = R.lineOutstanding(l)
+        return `
         <div class="summary-item">
           <div class="summary-item-main">
-            <span class="summary-item-label">${esc(m.medicine || m.name)}</span>
-            <span class="summary-item-detail">${esc(m.dosage)} ${m.quantity ? '×' + m.quantity : ''} · ${esc(m.status || 'Active')} · ${esc(s(m.created_by_name || m.created_by))}</span>
+            <span class="summary-item-label">${esc(l.medicine)}</span>
+            <span class="summary-item-detail">${esc(l.dosage)} ${l.quantity ? '×' + l.quantity : ''} · ${esc(when(createdAt))} · ${esc(createdBy)}</span>
           </div>
-          <span class="pill ${m.status === 'Dispensed' ? 'ok' : 'info'}">${esc(m.status || 'Active')}</span>
-        </div>
-      `).join('')
+          <span class="pill ${owed === 0 ? 'ok' : 'warn'}">${owed === 0 ? 'Dispensed' : issued + ' of ' + R.toQty(l.quantity, 0) + ' issued'}</span>
+        </div>`
+      }).join('')
       : '<p class="sub">No current medications.</p>'
 
     const allergiesHtml = d.allergies.length
@@ -479,7 +498,7 @@ export async function PatientDetailView(app, params = {}) {
             </div>
             <div class="summary-card">
               <div class="summary-header">
-                <div class="summary-title">💊 Current Medications <span class="summary-count">${d.activeMeds.length}</span></div>
+                <div class="summary-title">💊 Current Medications <span class="summary-count">${activeLines.length}</span></div>
               </div>
               <div class="summary-list">${medsHtml}</div>
             </div>
@@ -533,7 +552,7 @@ function paneHtml(t) {
         '<div><em>Address</em><strong>' + esc(s(p.address, 'Not recorded')) + '</strong></div>' +
         '<div><em>Payer</em><strong>' + esc(s(p.payer, 'Not recorded')) + '</strong></div>' +
         '</div>' +
-        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit demographics</button>' : '') +
+        (caps.canUpdate ? '<br/><button class="btn ghost" data-edit-pane>Edit demographics</button>' : '') +
         '</div>' +
         '<div>' +
         '<div class="card"><h3>Billing</h3><p class="sub">Outstanding balance: no invoices linked to this patient yet.</p>' +
@@ -549,7 +568,7 @@ function paneHtml(t) {
         '<div><em>Blood group (ABO/Rh)</em><strong>' + esc(s(p.blood_group, 'Not recorded')) + '</strong></div>' +
         '<div><em>Genotype</em><strong>' + esc(s(p.genotype, 'Not recorded')) + '</strong></div>' +
         '</div>' +
-        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit blood group</button>' : '') +
+        (caps.canUpdate ? '<br/><button class="btn ghost" data-edit-pane>Edit blood group</button>' : '') +
         '</div>' +
         '<div class="card"><h3>Allergies</h3>' +
         '<p class="sub">Always confirm before prescribing.</p>' +
@@ -558,7 +577,7 @@ function paneHtml(t) {
           ? p.allergy.map(a => '<span class="allergy-tag-display">' + esc(a) + '</span>').join('')
           : '<span class="mut">None known</span>') +
         '</div>' +
-        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit allergies</button>' : '') +
+        (caps.canUpdate ? '<br/><button class="btn ghost" data-edit-pane>Edit allergies</button>' : '') +
         '</div>' +
         '</div>'
     }
@@ -570,7 +589,7 @@ function paneHtml(t) {
         '<div><em>Phone</em><strong>' + esc(formatPhone(p.next_of_kin_phone, p.next_of_kin_phone_key)) + '</strong></div>' +
         '<div><em>Address</em><strong>' + esc(s(p.next_of_kin_address, 'Not recorded')) + '</strong></div>' +
         '</div>' +
-        (caps.canUpdate ? '<br/><button class="btn ghost" id="editBtn2">Edit next of kin</button>' : '') +
+        (caps.canUpdate ? '<br/><button class="btn ghost" data-edit-pane>Edit next of kin</button>' : '') +
         '</div>'
     }
     if (t === 'Timeline') {
@@ -607,12 +626,51 @@ function paneHtml(t) {
           (d.icd_code ? '<div class="mut">' + esc(d.icd_code) + '</div>' : '') + '</td>' +
           '<td>' + esc(when(d.created_at)) + '</td><td>' + statusBadge(s(d.status, 'Active')) + '</td></tr>') +
           (canDx ? '<br/><button class="btn ghost" id="dxBtn">+ Add diagnosis</button>' : '')
-      case 'Medications':
-        return table(['Medicine', 'Dosage', 'Qty', 'Status', 'Ordered'], rows, (m) =>
-          '<tr><td><strong>' + esc(s(m.medicine || m.name)) + '</strong></td><td>' + esc(s(m.dosage)) + '</td>' +
-          '<td>' + esc(s(m.quantity)) + '</td><td>' + statusBadge(s(m.status, 'Requested')) + '</td>' +
-          '<td class="mut">' + esc(when(m.created_at)) + '</td></tr>') +
+      case 'Medications': {
+        // ONE row per prescription. A request is a whole script for this
+        // patient, so the chart reads it as a single order you can open — not a
+        // row per pill. The row expands to every line it holds, prints for the
+        // patient, and offers an edit while the script is still open.
+        const scriptRows = rows.map((raw) => {
+          const script = R.normalizeRequest(raw)
+          const id = esc(script.id)
+          const open = R.isOpenRequest(script.status) || script.status === R.REQUEST_STATUS.EXTERNAL
+          const names = script.items.map((l) => l.medicine || 'item')
+          const summary = (names.slice(0, 2).join(', ') || '—') +
+            (names.length > 2 ? ' <span class="mut">+' + (names.length - 2) + ' more</span>' : '')
+          const lines = script.items.map((l) => {
+            const issued = R.toQty(l.dispensed_qty, 0)
+            return '<tr><td><strong>' + esc(s(l.medicine)) + '</strong>' +
+              (l.external ? ' <span class="pill info">external</span>' : '') + '</td>' +
+              '<td>' + esc(s(l.dosage)) + '</td>' +
+              '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
+              '<td>' + (issued ? esc(issued) : '<span class="mut">—</span>') + '</td>' +
+              '<td class="mut">' + esc(s(l.instructions)) + '</td></tr>'
+          }).join('')
+          return '<tr class="clickable" data-rx-row="' + id + '">' +
+            '<td><span class="mut" data-rx-caret>▸</span> <span class="mut">Script ' + esc(String(script.id).slice(0, 8)) + '</span></td>' +
+            '<td>' + summary + '</td>' +
+            '<td>' + statusBadge(script.status) + '</td>' +
+            '<td class="mut">' + esc(when(raw.created_at)) +
+            (raw.created_by_name || raw.created_by ? '<div class="mut">' + esc(s(raw.created_by_name || raw.created_by)) + '</div>' : '') + '</td>' +
+            '<td style="white-space:nowrap">' +
+              '<button class="btn ghost sm" data-rx-print="' + id + '">🖨 Print</button>' +
+              (canRx && open ? '<button class="btn ghost sm" data-rx-adjust="' + id + '">Adjust</button>' : '') +
+            '</td></tr>' +
+            '<tr data-rx-detail="' + id + '" style="display:none"><td colspan="5" style="background:#f8fafc">' +
+            (lines
+              ? '<div class="tblwrap"><table class="tbl" style="margin:6px 0">' +
+                '<tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Instructions</th></tr>' +
+                lines + '</table></div>'
+              : '<p class="sub" style="margin:8px 0">No medicines on this prescription.</p>') +
+            '</td></tr>'
+        }).join('')
+        return '<div class="tblwrap"><table class="tbl">' +
+          '<tr><th>Prescription</th><th>Medicines</th><th>Status</th><th>Ordered</th><th></th></tr>' +
+          (scriptRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No prescriptions yet.</td></tr>') +
+          '</table></div>' +
           (canRx ? '<br/><button class="btn" id="rxBtn">+ New prescription</button>' : '')
+      }
       case 'Labs':
         return table(['Order', 'Test', 'Stage', 'Ordered'], rows, (l) =>
           '<tr><td><strong>' + esc(s(l.id)) + '</strong></td><td>' + esc(s(l.test || l.test_panel || l.panel)) + '</td>' +
@@ -703,23 +761,125 @@ function paneHtml(t) {
     })
   }
 
-  function openPrescription() {
-    formModal({
+  // Same in-stock-only catalogue picker as the consultation workspace, so a
+  // prescription written from the chart is dispensable by the pharmacy in the
+  // same way. Catalogue loads on first open rather than with the page.
+  let drugsCache = null
+  async function loadCatalogue() {
+    drugsCache = drugsCache || await listOrgDrugs(authStore.getState().activeOrg)
+    return drugsCache
+  }
+
+  // Stored lines → the shape the prescription form prefills from. `quantity`
+  // becomes `qty` so the field reads back as it was typed, and line_id rides
+  // along so an edit lands on the same line instead of appending a duplicate.
+  function toModalLines(script) {
+    return script.items.map((l) => ({
+      line_id: l.line_id,
+      drug_id: l.drug_id || '',
+      sku: l.sku || '',
+      unit: l.unit || '',
+      medicine: l.medicine || '',
+      dosage: l.dosage || '',
+      qty: l.quantity === '' || l.quantity == null ? '' : String(l.quantity),
+      instructions: l.instructions || '',
+      external: !!l.external,
+      dispensed_qty: l.dispensed_qty,
+    }))
+  }
+
+  // The chart-side print: the same document the pharmacy hands the patient.
+  function printScript(raw) {
+    const script = R.normalizeRequest(raw)
+    printDocument('Prescription', prescriptionHtml({
+      hospitalName: authStore.getState().activeOrgName,
+      patientName: p.name,
+      mrn: p.mrn,
+      encounterId: script.encounterId,
+      scriptId: script.id,
+      status: script.status,
+      items: script.items,
+      prescribedBy: script.prescribedBy,
+      prescribedAt: raw.created_at,
+    }))
+  }
+
+  // Re-open a script that is still open as an editable form. Lines the pharmacy
+  // has already issued come back locked, and a quantity can never be dragged
+  // below what has already gone out (the service enforces both).
+  async function adjustScript(raw) {
+    if (!canRx) { toast('Your role cannot prescribe. Ask an administrator.'); return }
+    const script = R.normalizeRequest(raw)
+    let catalogue
+    try {
+      catalogue = await loadCatalogue()
+    } catch (e) {
+      toast('Could not load the pharmacy catalogue: ' + friendlyPatientError(e))
+      return
+    }
+    openPrescriptionModal({
+      drugs: catalogue,
+      title: 'Adjust prescription',
+      submitLabel: 'Save changes',
+      hint: 'Edit this script. Medicines the pharmacy has already issued are locked and stay on the prescription.',
+      initialLines: toModalLines(script),
+      onSubmit: async (lines) => {
+        try {
+          await updateRequestItems(script.id, lines)
+        } catch (e) {
+          throw new Error(friendlyPatientError(e))
+        }
+        closeModal()
+        toast('Prescription updated — ' + lines.length + ' medicine' + (lines.length === 1 ? '' : 's'))
+        loadCache.Medications = null
+        await render('Medications')
+      },
+    })
+  }
+
+  // The whole script is written in one submit, so a four-drug prescription
+  // reaches the pharmacy as one order with four lines — and joins the script
+  // already open for this patient rather than spawning a rival row per drug.
+  async function openPrescription() {
+    if (!canRx) { toast('Your role cannot prescribe. Ask an administrator.'); return }
+    let catalogue
+    try {
+      catalogue = await loadCatalogue()
+    } catch (e) {
+      toast('Could not load the pharmacy catalogue: ' + friendlyPatientError(e))
+      return
+    }
+    openPrescriptionModal({
+      drugs: catalogue,
       title: 'New prescription',
       submitLabel: 'Send to pharmacy',
-      fields: [
-        { name: 'medicine', label: 'Medicine', required: true, full: true, placeholder: 'e.g. Amlodipine 5mg' },
-        { name: 'dosage', label: 'Dosage', placeholder: '1 tab daily' },
-        { name: 'quantity', label: 'Qty', type: 'number', placeholder: '30' },
-        { name: 'instructions', label: 'Instructions', full: true, placeholder: 'After food…' },
-      ],
-      onSubmit: async (v) => {
-        await createPatientDoc('medication_requests', pid, {
-          medicine: v.medicine, dosage: v.dosage || '', quantity: num(v.quantity) ?? '',
-          instructions: v.instructions || '', status: 'Requested',
-        }, 'prescription.create')
+      onSubmit: async (lines) => {
+        const rxArgs = { patientId: pid, patientName: p.name || '', lines }
+        let created = false
+        let queued = false
+        try {
+          ({ created } = await requestMedicationLines(rxArgs))
+        } catch (e) {
+          // The handoff must not vanish (e.g. offline: the "find open script"
+          // read fails). Queue it durably instead of losing it.
+          try {
+            await enqueue('rx_mirror', rxArgs)
+            queued = true
+          } catch {
+            throw new Error(friendlyPatientError(e))
+          }
+        }
         closeModal()
-        toast('Prescription sent to pharmacy queue')
+        const n = lines.length
+        const plural = n === 1 ? '' : 's'
+        const allExternal = lines.every((l) => l.external)
+        toast(queued
+          ? 'Prescription saved — will reach the pharmacy when the connection allows'
+          : allExternal
+            ? 'External prescription saved to the patient record — ' + n + ' medicine' + plural
+            : (created
+              ? 'Prescription sent to pharmacy queue — ' + n + ' medicine' + plural
+              : n + ' medicine' + plural + ' added to the open prescription'))
         loadCache.Medications = null
         await render('Medications')
       },
@@ -904,11 +1064,35 @@ function paneHtml(t) {
   }
 
   function wirePane() {
-    const e1 = document.getElementById('editBtn2'); if (e1) e1.onclick = () => { openEdit() }
+    // Wire every edit button, not just the first: several tabs each render their
+    // own, and the Blood & Allergies tab renders two in the same pane. An id
+    // lookup returned only the first match, leaving "Edit allergies" dead.
+    document.querySelectorAll('[data-edit-pane]').forEach((e1) => { e1.onclick = () => { openEdit() } })
     const c = document.getElementById('consentBtn'); if (c) c.onclick = openConsent
     const v = document.getElementById('vitalsBtn'); if (v) v.onclick = openVitals
     const d = document.getElementById('dxBtn'); if (d) d.onclick = openDiagnosis
     const r = document.getElementById('rxBtn'); if (r) r.onclick = openPrescription
+    // Prescription rows: click to expand the script's lines, print it for the
+    // patient, or adjust it while it is still open. The detail row always sits
+    // directly under its own row, so finding it needs no id lookup.
+    pane.querySelectorAll('[data-rx-row]').forEach((row) => {
+      row.onclick = (ev) => {
+        if (ev.target.closest('button')) return
+        const detail = row.nextElementSibling
+        if (!detail || !detail.hasAttribute('data-rx-detail')) return
+        const show = detail.style.display === 'none'
+        detail.style.display = show ? '' : 'none'
+        const caret = row.querySelector('[data-rx-caret]')
+        if (caret) caret.textContent = show ? '▾' : '▸'
+      }
+    })
+    const scriptFor = (id) => (loadCache.Medications?.rows || []).find((x) => x.id === id)
+    pane.querySelectorAll('[data-rx-print]').forEach((b) => {
+      b.onclick = () => { const raw = scriptFor(b.getAttribute('data-rx-print')); if (raw) printScript(raw) }
+    })
+    pane.querySelectorAll('[data-rx-adjust]').forEach((b) => {
+      b.onclick = () => { const raw = scriptFor(b.getAttribute('data-rx-adjust')); if (raw) adjustScript(raw) }
+    })
     const a = document.getElementById('admBtn'); if (a) a.onclick = openAdmission
     // Discharge buttons rendered inside the Admissions tab rows.
     pane.querySelectorAll('[data-discharge-adm]').forEach((b) => {

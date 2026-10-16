@@ -6,27 +6,34 @@ import { initAuthListener } from './services/authService.js'
 import { primePayers } from './services/payerService.js'
 import { registerRoute, initRouter, handleRoute, navigate, setGuard } from './router.js'
 import { checkAccess, startAccessWatch } from './services/authService.js'
-import { LoginView } from './views/LoginView.js'
-import { RegisterView } from './views/RegisterView.js'
-import { DashboardView } from './views/DashboardView.js'
-import { PatientsView } from './views/PatientsView.js'
-import { PatientDetailView } from './views/PatientDetailView.js'
-import { RegisterPatientView } from './views/RegisterPatientView.js'
-import { EditPatientView } from './views/EditPatientView.js'
-import { AppointmentsView } from './views/AppointmentsView.js'
-import { ConsultationsView } from './views/ConsultationsView.js'
-import { AdmissionsView } from './views/AdmissionsView.js'
-import { LaboratoryView } from './views/LaboratoryView.js'
-import { PharmacyView } from './views/PharmacyView.js'
-import { BillingView } from './views/BillingView.js'
-import { InvoiceDetailView } from './views/InvoiceDetailView.js'
-import { ReportsView } from './views/ReportsView.js'
-import { AdminView } from './views/AdminView.js'
-import { VerifyEmailView } from './views/VerifyEmailView.js'
-import { ChangePasswordView } from './views/ChangePasswordView.js'
+import { startIdleWatch } from './services/idleService.js'
 import { initUpdater } from './components/updater.js'
+import { startOutboxSync } from './services/clinicalOutbox.js'
 
-registerRoute('/login', LoginView, { guest: true })
+// Views are loaded on demand (see registerRoute in router.js). Login is pulled
+// in eagerly because it is the screen a cold, signed-out load lands on.
+import { LoginView } from './views/LoginView.js'
+
+const DashboardView = () => import('./views/DashboardView.js').then((m) => m.DashboardView)
+const RegisterView = () => import('./views/RegisterView.js').then((m) => m.RegisterView)
+const PatientsView = () => import('./views/PatientsView.js').then((m) => m.PatientsView)
+const PatientDetailView = () => import('./views/PatientDetailView.js').then((m) => m.PatientDetailView)
+const RegisterPatientView = () => import('./views/RegisterPatientView.js').then((m) => m.RegisterPatientView)
+const EditPatientView = () => import('./views/EditPatientView.js').then((m) => m.EditPatientView)
+const AppointmentsView = () => import('./views/AppointmentsView.js').then((m) => m.AppointmentsView)
+const ConsultationsView = () => import('./views/ConsultationsView.js').then((m) => m.ConsultationsView)
+const AdmissionsView = () => import('./views/AdmissionsView.js').then((m) => m.AdmissionsView)
+const AdmissionWorkspaceView = () => import('./views/AdmissionWorkspaceView.js').then((m) => m.AdmissionWorkspaceView)
+const LaboratoryView = () => import('./views/LaboratoryView.js').then((m) => m.LaboratoryView)
+const PharmacyView = () => import('./views/PharmacyView.js').then((m) => m.PharmacyView)
+const BillingView = () => import('./views/BillingView.js').then((m) => m.BillingView)
+const InvoiceDetailView = () => import('./views/InvoiceDetailView.js').then((m) => m.InvoiceDetailView)
+const ReportsView = () => import('./views/ReportsView.js').then((m) => m.ReportsView)
+const AdminView = () => import('./views/AdminView.js').then((m) => m.AdminView)
+const VerifyEmailView = () => import('./views/VerifyEmailView.js').then((m) => m.VerifyEmailView)
+const ChangePasswordView = () => import('./views/ChangePasswordView.js').then((m) => m.ChangePasswordView)
+
+registerRoute('/login', async () => LoginView, { guest: true })
 registerRoute('/register', RegisterView, { guest: true })
 registerRoute('/', DashboardView, { auth: true })
 registerRoute('/welcome', DashboardView, { auth: true })
@@ -36,6 +43,7 @@ registerRoute('/patients/:id', PatientDetailView, { auth: true })
 registerRoute('/patients/:id/edit', EditPatientView, { auth: true })
 registerRoute('/appointments', AppointmentsView, { auth: true })
 registerRoute('/consultations', ConsultationsView, { auth: true })
+registerRoute('/admissions/:id', AdmissionWorkspaceView, { auth: true })
 registerRoute('/admissions', AdmissionsView, { auth: true })
 registerRoute('/laboratory', LaboratoryView, { auth: true })
 registerRoute('/pharmacy', PharmacyView, { auth: true })
@@ -45,6 +53,27 @@ registerRoute('/reports', ReportsView, { auth: true })
 registerRoute('/admin', AdminView, { auth: true })
 registerRoute('/verify-email', VerifyEmailView, { auth: true })
 registerRoute('/change-password', ChangePasswordView, { auth: true })
+
+// Emailed action links land on a plain URL — /reset?mode=resetPassword&oobCode=…
+// — a hash router reads only location.hash, so without this fold the reset
+// parameters are invisible and the user sees the ordinary log-in screen.
+// Runs before the router is initialised so the first render is already the
+// reset screen.
+function foldResetLinkIntoHash() {
+  let q
+  try { q = new URLSearchParams(window.location.search) } catch { return }
+  if (q.get('mode') !== 'resetPassword' || !q.get('oobCode')) return
+  const hash = '#/login?mode=resetPassword&oobCode=' + encodeURIComponent(q.get('oobCode'))
+  try {
+    // replaceState (not location.hash =): no reload, no history entry, and the
+    // one-time code leaves the address bar in the same tick.
+    window.history.replaceState(null, '', window.location.pathname + hash)
+  } catch {
+    window.location.hash = hash
+  }
+}
+
+foldResetLinkIntoHash()
 
 setGuard(checkAccess)
 
@@ -63,10 +92,13 @@ authStore.subscribe((s) => {
   })
   const hash = (window.location.hash || '').replace(/^#/, '')
   if (!hash || hash === '/' || hash === '/welcome') {
-    navigate(s.user ? '/' : '/login')
-    // If hash didn't change (e.g. already at #/), handleRoute won't fire
-    // via hashchange — call it directly.
-    handleRoute()
+    const target = s.user ? '/' : '/login'
+    navigate(target)
+// navigate() only fires hashchange when the hash actually changes. If we
+    // are already sitting on the target (e.g. cold load at #/ while signed in),
+    // no event will arrive, so render here instead. Calling it unconditionally
+    // would enter the same route twice and mount the view twice.
+    if (window.location.hash.replace(/^#/, '') === target) handleRoute()
   } else {
     handleRoute()
   }
@@ -75,5 +107,20 @@ authStore.subscribe((s) => {
 initRouter()
 initAuthListener()
 startAccessWatch()
+startIdleWatch()
 initUpdater()
+startOutboxSync() // retry queued cross-department handoffs (offline -> online)
 handleRoute()
+
+// Register the app-shell service worker (web only, production only). Skipped
+// in Electron (loads from file://, no SW support) and dev (no caching during
+// HMR). Firestore's own offline cache lives in IndexedDB and is independent
+// of this — the SW only makes the HTML/JS/CSS shell available offline.
+if (import.meta.env.PROD && 'serviceWorker' in navigator &&
+    !navigator.userAgent.includes('Electron')) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {
+      /* offline support degrades to Firestore's data cache only */
+    })
+  })
+}

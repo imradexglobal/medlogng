@@ -15,7 +15,7 @@
 // A patient/invoice stores the payer's `name` (a plain string), not the doc id,
 // so renaming or deactivating a payer never rewrites or orphans history.
 import {
-  db, collection, query, getDocs, doc, setDoc, updateDoc, deleteDoc, serverTimestamp,
+  db, collection, query, getDocs, doc, setDoc, updateDoc, deleteDoc, serverTimestamp, limit,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
@@ -107,7 +107,7 @@ export function cachedPayers() {
 }
 
 async function fetchFromCloud() {
-  const snap = await getDocs(query(collection(db, COLLECTION)))
+  const snap = await getDocs(query(collection(db, COLLECTION), limit(100)))
   return snap.docs.map(toPayerRow).filter((r) => r.name).sort(byOrder)
 }
 

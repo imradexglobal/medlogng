@@ -2,15 +2,20 @@
 // Invoices + payments + price catalogue + NHIA/HMO claims
 // CRITICAL: Preserves existing billing calculations - do not change charge/discount logic
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, orderBy, limit, startAfter,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
+import { watchQuery } from './live.js'
 
 const INVOICES = 'invoices'
 const PAYMENTS = 'payments'
+
+// Live listeners are bounded to the 100 most recent rows (cost control);
+// list* stays unbounded so a manual refresh still shows everything.
+const LIVE_LIMIT = 100
 
 // ---- capability check --------------------------------------------------------
 export function myBillingCaps() {
@@ -46,20 +51,79 @@ function toInvoiceRow(r) {
 
 // ---- reads ---------------------------------------------------------------
 // Single equality filter only (no composite index needed, works offline).
-export async function listOrgInvoices(orgId, filters = {}) {
-  const snap = await getDocs(query(collection(db, INVOICES), where('organization_id', '==', orgId)))
-  let rows = snap.docs.map((d) => toInvoiceRow({ ...d.data(), id: d.id }))
+function buildOrgInvoicesQuery(orgId) {
+  return query(collection(db, INVOICES), where('organization_id', '==', orgId))
+}
+
+function mapInvoiceDoc(d) {
+  return toInvoiceRow({ ...d.data(), id: d.id })
+}
+
+// Client-side filter + sort shared by listOrgInvoices and
+// subscribeOrgInvoices so live rows match one-shot rows exactly.
+function applyInvoiceFilters(rows, filters = {}) {
   if (filters.status) rows = rows.filter((r) => r.status === filters.status)
   if (filters.payer) rows = rows.filter((r) => r.payer === filters.payer)
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
 }
 
-export async function listPatientInvoices(pid) {
-  const snap = await getDocs(query(collection(db, INVOICES), where('patient_id', '==', pid)))
+export async function listOrgInvoices(orgId, filters = {}) {
+  const snap = await getDocs(buildOrgInvoicesQuery(orgId))
+  return applyInvoiceFilters(snap.docs.map(mapInvoiceDoc), filters)
+}
+
+// Next chunk of the newest-first list (cursor-walked for infinite scroll).
+// Needs index:
+// invoices: organization_id ASC + created_at DESC.
+export const INVOICES_PAGE = 25
+
+export async function listOrgInvoicesPage(orgId, { pageSize = INVOICES_PAGE, cursor = null, ...filters } = {}) {
+  const { runChunk } = await import('./pagination.js')
+  const base = query(
+    collection(db, INVOICES),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+  )
+  const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
+  return { rows: applyInvoiceFilters(docs.map(mapInvoiceDoc), filters), hasMore, cursor: next }
+}
+
+
+// Live query: same org scope + row shape as listOrgInvoices, but bounded to
+// the 100 most recent (orderBy+limit needs the composite index in
+// firestore.indexes.json — deploy it or the listener falls back to one-shot).
+function buildOrgInvoicesLiveQuery(orgId) {
+  return query(
+    collection(db, INVOICES),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+    limit(LIVE_LIMIT),
+  )
+}
+
+export function subscribeOrgInvoices(orgId, onRows, onError) {
+  return watchQuery(
+    buildOrgInvoicesLiveQuery(orgId),
+    mapInvoiceDoc,
+    (rows) => onRows(applyInvoiceFilters(rows)),
+    onError,
+  )
+}
+
+export async function listPatientInvoices(pid, { limitN = 50 } = {}) {
+  const snap = await getDocs(query(collection(db, INVOICES), where('patient_id', '==', pid), limit(limitN)))
   const rows = snap.docs.map((d) => toInvoiceRow({ ...d.data(), id: d.id }))
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
+}
+
+export async function listSessionInvoices(sid) {
+  const snap = await getDocs(query(
+    collection(db, INVOICES),
+    where('admission_session_id', '==', sid),
+  ))
+  return snap.docs.map((d) => ({ ...d.data(), id: d.id }))
 }
 
 export async function getInvoice(iid) {
@@ -128,6 +192,8 @@ export async function createInvoice(input) {
     paid_kobo: 0,  // initially 0
     status: 'unpaid',
     date: input.date || new Date().toLocaleDateString('en-NG'),
+    admission_session_id: input.admission_session_id || '',
+    encounter_id: input.encounter_id || '',
     created_by: user?.uid || null,
     created_by_name: user?.email || '',
     created_at: now,

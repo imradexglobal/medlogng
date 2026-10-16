@@ -277,16 +277,21 @@ export async function EditPatientView(app, params) {
       }
 
       try {
-        await updatePatient(pid, formData)
+        // updatePatient RETURNS { warning, existing } for a duplicate match —
+        // it does not throw. The old code only inspected the catch block, so a
+        // duplicate edit fell through to the success path and toasted "Saved"
+        // while nothing had been written.
+        const res = await updatePatient(pid, formData)
+        if (res && res.warning) {
+          isSubmitting = false
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Save Changes' }
+          showDuplicateWarning(res, formData)
+          return
+        }
         toast('Saved ' + formData.given_names + ' ' + formData.surname + ' to Firestore')
         navigate('/patients/' + pid)
       } catch (e) {
         isSubmitting = false
-        if (e?.warning) {
-          // Handle duplicate warning
-          showDuplicateWarning(e, formData)
-          return
-        }
         submitError = friendlyPatientError(e)
         if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Save Changes' }
         render()
@@ -410,7 +415,6 @@ export async function EditPatientView(app, params) {
       formModal({
         title: 'Possible duplicate patient',
         submitLabel: 'Save anyway',
-        cancelLabel: 'Cancel',
         body: modalHtml,
         onSubmit: async () => {
           closeModal()

@@ -7,7 +7,8 @@
 // no chance of the two documents disagreeing. Reverse lookups query by
 // `encounter_id` (see the composite index in firestore.indexes.json).
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, orderBy, limit,
+  startAfter,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
@@ -23,8 +24,15 @@ import {
   admissionsForEncounter, validateAdmissionInput, validateDischargeInput,
   occupiedInWard, validateWardCapacity,
 } from '../features/admissions/domain.js'
+import { watchQuery } from './live.js'
 
 const ADMISSIONS = 'admissions'
+
+// Live listeners are bounded to the 100 most recent rows (cost control);
+// list* stays unbounded so a manual refresh still shows everything.
+// Admissions sort by admissionDate||createdAt, and admissionDate always
+// falls back to created_at, so ordering the live query by created_at matches.
+const LIVE_LIMIT = 100
 
 // Pure rules live in features/admissions/domain.js so the smoke test can
 // exercise them without pulling in Firebase. Re-exported for the views.
@@ -57,11 +65,61 @@ function toAdmissionRow(r) {
 }
 
 // ---- reads ---------------------------------------------------------------
+function buildOrgAdmissionsQuery(orgId) {
+  return query(collection(db, ADMISSIONS), where('organization_id', '==', orgId))
+}
+
+function mapAdmissionDoc(d) {
+  return toAdmissionRow({ ...d.data(), id: d.id })
+}
+
+function normalizeAndSortAdmissions(rows) {
+  const normalized = normalizeAdmissions(rows)
+  normalized.sort((a, b) => (b.admissionDate || b.createdAt) - (a.admissionDate || a.createdAt))
+  return normalized
+}
+
 export async function listOrgAdmissions(orgId) {
-  const snap = await getDocs(query(collection(db, ADMISSIONS), where('organization_id', '==', orgId)))
-  const rows = normalizeAdmissions(snap.docs.map((d) => toAdmissionRow({ ...d.data(), id: d.id })))
-  rows.sort((a, b) => (b.admissionDate || b.createdAt) - (a.admissionDate || a.createdAt))
-  return rows
+  const snap = await getDocs(buildOrgAdmissionsQuery(orgId))
+  return normalizeAndSortAdmissions(snap.docs.map(mapAdmissionDoc))
+}
+
+// Next chunk of the newest-first list (cursor-walked for infinite scroll).
+// Needs index:
+// admissions: organization_id ASC + created_at DESC.
+export const ADMISSIONS_PAGE = 25
+
+export async function listOrgAdmissionsPage(orgId, { pageSize = ADMISSIONS_PAGE, cursor = null } = {}) {
+  const { runChunk } = await import('./pagination.js')
+  const base = query(
+    collection(db, ADMISSIONS),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+  )
+  const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
+  return { rows: normalizeAndSortAdmissions(docs.map(mapAdmissionDoc)), hasMore, cursor: next }
+}
+
+
+// Live query: same org scope + row shape as listOrgAdmissions, but bounded
+// to the 100 most recent (orderBy+limit needs the composite index in
+// firestore.indexes.json — deploy it or the listener falls back to one-shot).
+function buildOrgAdmissionsLiveQuery(orgId) {
+  return query(
+    collection(db, ADMISSIONS),
+    where('organization_id', '==', orgId),
+    orderBy('created_at', 'desc'),
+    limit(LIVE_LIMIT),
+  )
+}
+
+export function subscribeOrgAdmissions(orgId, onRows, onError) {
+  return watchQuery(
+    buildOrgAdmissionsLiveQuery(orgId),
+    mapAdmissionDoc,
+    (rows) => onRows(normalizeAndSortAdmissions(rows)),
+    onError,
+  )
 }
 
 // Get single admission
@@ -71,9 +129,9 @@ export async function getAdmission(aid) {
   return toAdmissionRow({ ...snap.data(), id: snap.id })
 }
 
-// List admissions for a specific patient
-export async function listPatientAdmissions(pid) {
-  const snap = await getDocs(query(collection(db, ADMISSIONS), where('patient_id', '==', pid)))
+// List admissions for a specific patient (bounded to the 50 most recent rows)
+export async function listPatientAdmissions(pid, { limitN = 50 } = {}) {
+  const snap = await getDocs(query(collection(db, ADMISSIONS), where('patient_id', '==', pid), limit(limitN)))
   const rows = normalizeAdmissions(snap.docs.map((d) => toAdmissionRow({ ...d.data(), id: d.id })))
   rows.sort((a, b) => (b.admissionDate || b.createdAt) - (a.admissionDate || a.createdAt))
   return rows
@@ -234,7 +292,7 @@ export async function dischargeAdmission(admissionId, dischargeInput) {
 
 // ---- wards ---------------------------------------------------------------
 // Re-exported from wardService so a view that manages beds needs one import.
-export { listOrgWards, createWard, updateWardBeds, myWardCaps } from './wardService.js'
+export { listOrgWards, subscribeOrgWards, createWard, updateWardBeds, myWardCaps } from './wardService.js'
 
 // Bed capacity cannot drop below the patients already holding a bed.
 export async function validateWardBedsChange(orgId, wardId, newTotal) {

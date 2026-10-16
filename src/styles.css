@@ -219,6 +219,7 @@ a { color: var(--primary); }
   background: #f1f5f9; border: 1px solid var(--border); color: #475569;
   border-radius: 10px; padding: 9px 12px; font-size: 0.85rem; margin: 10px 0 0;
 }
+.fn-note-ok { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
 
 /* Password toggle */
 .fn-pw-wrap { margin: 14px 0 6px; }
@@ -310,11 +311,85 @@ a { color: var(--primary); }
 .fn-dot.on { background: #fff; width: 40px; }
 .fn-trust { margin: 0; color: rgba(255, 255, 255, 0.7); font-size: 0.8rem; font-weight: 600; }
 
+/* The showcase panel is the first thing to go: it is decoration, and it costs
+   half the screen on any width where the two columns would not both fit. */
 @media (max-width: 960px) {
-  .fn-page { grid-template-columns: 1fr; }
+  .fn-page { grid-template-columns: minmax(0, 1fr); }
   .fn-right { display: none; }
   .fn-left { padding: 24px 16px; }
   .fn-form { padding: 24px 20px 20px; border-radius: 20px; }
+}
+
+/* ---- the auth card on a phone ---------------------------------------------
+   The split layout is a desktop idea and the showcase panel is the first thing
+   to go, but the form KEEPS its card. Flattening it onto the gradient instead
+   means every label, hint and inline link in the pane has to be re-coloured for
+   a dark field, and the ones that are not obvious from the markup (the labels
+   inside `.fn-pw-wrap`, the `fn-linkbtn`s) silently stay dark-on-dark. Keeping
+   the white card preserves the product's identity and the contrast that is
+   already correct; what actually needed fixing on a phone was sizing. */
+@media (max-width: 560px) {
+  .fn-left {
+    padding: 16px 12px calc(24px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+    align-items: flex-start;
+  }
+  /* The soft glow ring sits behind the card; on a narrow screen it just bleeds
+     colour into the page edges. */
+  .fn-left::after { width: 340px; height: 340px; opacity: .7; }
+  .fn-form {
+    padding: 20px 16px 16px; border-radius: 18px;
+    max-width: 460px; margin: 0 auto;
+  }
+  .fn-brand { margin-bottom: 18px; }
+  .fn-brand .brand-mark { width: 40px; height: 40px; border-radius: 13px; font-size: 1.2rem; }
+  .fn-seg { margin-bottom: 20px; }
+  .fn-title { font-size: 1.55rem; }
+  .fn-sub { margin-bottom: 16px; }
+  .fn-foot { margin-top: 16px; }
+
+  /* 16px is the threshold below which iOS Safari zooms the page on focus and
+     never zooms back out, which then breaks the whole layout. */
+  .fn-input, .fn-label, .field input, .field select, .field textarea { font-size: 1rem; }
+  .fn-input { min-height: 46px; }
+  .fn-primary { min-height: 48px; }
+
+  .reg-container { padding: 4px 0 20px; }
+  .step-dot { width: 28px; height: 28px; font-size: .8rem; }
+  .step-dot.active { transform: scale(1.05); }
+  .step-panel legend { font-size: 1rem; gap: 8px; }
+  .form-grid { gap: 12px; }
+  .form-grid .field input, .form-grid .field select, .form-grid .field textarea { min-height: 46px; }
+  .form-actions { flex-direction: column-reverse; align-items: stretch; }
+  .form-actions .actions-right { width: 100%; flex-direction: column-reverse; gap: 10px; }
+  .form-actions .btn { width: 100%; min-height: 46px; }
+  .form-actions .spacer { display: none; }
+  .tag-remove { width: 26px; height: 26px; }
+  .allergy-tag-input { min-height: 52px; }
+  .allergy-suggestions { max-height: 46dvh; }
+}
+
+/* Auth-screen touch targets. Keyed to the input device rather than to a width,
+   because a tablet at 768px runs the same pane as a phone and has the same
+   problem with a 20px-tall inline link. */
+@media (pointer: coarse) and (max-width: 1024px) {
+  .fn-seg-btn { min-height: 44px; }
+  .fn-pw-toggle { right: 6px; min-width: 44px; min-height: 44px; }
+  .fn-pw-input-wrap .fn-input { padding-right: 52px !important; }
+  /* Inline links inside a sentence must not be 20px tall, but giving them real
+     height would break the line box they sit in. Padding plus an equal negative
+     margin grows the hit area without moving anything on screen. */
+  .fn-linkbtn { padding: 12px 4px; margin: -12px -4px; display: inline-block; }
+  .fn-linkbtn.fn-forgot { margin-right: -6px; }
+}
+
+/* Very small phones: the split-screen panels need a tighter scale or the
+   segmented control and the primary button both overflow. */
+@media (max-width: 360px) {
+  .fn-title { font-size: 1.6rem; }
+  .fn-seg-btn { font-size: .82rem; padding: 12px 4px; }
+  .btn-sm { padding: 8px 12px; font-size: .8rem; }
 }
 
 /* ===== Modern Registration Stepper ===== */
@@ -429,8 +504,9 @@ a { color: var(--primary); }
   .form-grid { grid-template-columns: 1fr; }
   .form-actions { flex-direction: column-reverse; }
   .actions-right { width: 100%; justify-content: flex-end; }
-  .progress-steps { display: none; }
-  .step-dot { width: 28px; height: 28px; font-size: 0.85rem; }
+  /* The step markers stay visible — they are the only indication of which of
+     the three steps the clerk is on. They are scaled to fit instead of hidden. */
+  .step-dot { width: 30px; height: 30px; font-size: .82rem; }
   .shell-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 }
 

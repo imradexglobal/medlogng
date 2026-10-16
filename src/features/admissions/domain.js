@@ -62,6 +62,11 @@ export function isAdmissionActive(raw) {
 // Canonical admission row (camelCase) for both writers described above.
 export function normalizeAdmission(r) {
   const raw = r || {}
+  // Idempotency guard: if already converted to camelCase, return as-is.
+  // This fixes the "Unknown patient" bug caused by double-normalization in the
+  // admissionService list paths (normalizeAdmission → mapAdmissionDoc →
+  // normalizeAndSortAdmissions → normalizeAdmissions).
+  if (raw.patientId !== undefined) return r
   const createdAt = tsMillis(raw.created_at)
   return {
     id: raw.id || '',

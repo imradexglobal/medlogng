@@ -1,10 +1,19 @@
 import { authStore } from './store/authStore.js'
+import { runCleanups } from './lib/lifecycle.js'
+import { HospitalChoiceView } from './views/HospitalChoiceView.js'
 
 const routes = []
 
+// `render` is a loader: () => import(...).then(m => m.View). It is called on
+// first navigation and the resolved view is cached, so each screen is fetched
+// once — and only when it is actually opened. Keeping the loader (not the view
+// itself) means a cold dev load no longer pulls every view in the app through
+// the module graph before the first paint.
 export function registerRoute(path, render, opts = {}) {
   routes.push({ path, render, ...opts })
 }
+
+registerRoute('/hospital-choice', () => import('./views/HospitalChoiceView.js').then((m) => m.HospitalChoiceView))
 
 let beforeEach = null
 export function setGuard(fn) {
@@ -70,41 +79,75 @@ function bootScreen() {
   return true
 }
 
+// Single-flight lock. Cold start fires handleRoute() both from the boot
+// authStore subscription and from the module-level call, so the same route can
+// be entered twice; without this the view mounts twice and the first mount's
+// timers/subscriptions keep running against DOM that has already been replaced.
+// A repeat call for the same route+params is ignored outright — there is
+// nothing to redo, and re-mounting would duplicate timers and live listeners.
+let lastKey = null
+let inFlight = null
+
 export async function handleRoute() {
   const app = document.getElementById('app')
   const found = matchRoute(window.location.hash)
   if (!found) { navigate('/login'); return }
   const { route, params } = found
+  const key = route.path + '?' + JSON.stringify(params)
+  // Only latch AFTER the guards below: they early-return without rendering, and
+  // latching first would make the later retry (auth becoming ready) a no-op and
+  // strand the user on the boot splash.
+  if (lastKey === key) return
   const { user, ready } = authStore.getState()
   if (!ready) {
     bootScreen()
     return
   }
-  if (route.auth && !user) { navigate('/login'); return }
-  if (route.guest && user) { navigate('/welcome'); return }
+  // A password-reset link arrives as #/login?mode=resetPassword&oobCode=… and
+  // must render even with a live session: the user is on that screen exactly
+  // because they are setting a new password on this device.
+  const isResetLink = /[?&]mode=resetPassword(?:&|$)/.test(String(window.location.hash || ''))
+  if (route.auth && !user && !isResetLink) { navigate('/login'); return }
+  if (route.guest && user && !isResetLink) { navigate('/welcome'); return }
   if (beforeEach) {
     const redirect = beforeEach()
     if (redirect) { navigate(redirect); return }
   }
+  lastKey = key
   // First paint after a reload has nothing to fade from; later navigations keep
   // the old page mounted behind the progress bar.
   bootScreen()
+  // Serialise mounts: a navigation arriving while one is in flight waits for it,
+  // so two views never write into #app concurrently and a slow earlier route
+  // cannot overwrite the page the user already moved to.
+  if (inFlight) { try { await inFlight } catch {} }
   pendingDepth += 1
   routePending(true)
-  try {
-    await route.render(app, params)
-  } catch (err) {
-    console.error(err)
-    if (app) {
-      app.innerHTML = '<div class="card card-error"><h2>Page failed to load</h2><p>Please retry.</p><p class="muted">' +
-        String(err?.message || err) + '</p></div>'
+  inFlight = (async () => {
+    try {
+      const view = route.view || (route.view = await route.render())
+      // Tear down the previous view's listeners right before the new one mounts.
+      // Guard redirects / the not-ready splash return above and never reach this.
+      runCleanups()
+      await view(app, params)
+    } catch (err) {
+      // Unlatch on failure so the user can retry the same route.
+      if (lastKey === key) lastKey = null
+      console.error(err)
+      if (app) {
+        app.innerHTML = '<div class="card card-error"><h2>Page failed to load</h2><p>Please retry.</p><p class="muted">' +
+          String(err?.message || err) + '</p></div>'
+      }
+    } finally {
+      pendingDepth = Math.max(0, pendingDepth - 1)
+      if (pendingDepth === 0) routePending(false)
     }
-  } finally {
-    pendingDepth = Math.max(0, pendingDepth - 1)
-    if (pendingDepth === 0) routePending(false)
-  }
+  })()
+  await inFlight
+  inFlight = null
 }
 
 export function initRouter() {
   window.addEventListener('hashchange', handleRoute)
+  window.addEventListener('beforeunload', runCleanups)
 }

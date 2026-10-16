@@ -2,9 +2,11 @@
 import { shell, statusBadge, formModal, toast, closeModal, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
-  listOrgAppointments, createAppointment, updateAppointmentStatus, myAppointmentCaps,
+  listOrgAppointments, listOrgAppointmentsPage, subscribeOrgAppointments, createAppointment, updateAppointmentStatus, myAppointmentCaps,
 } from '../services/appointmentService.js'
-import { listOrgPatients } from '../services/patientService.js'
+import { listOrgPatientsPage, formatPhone } from '../services/patientService.js'
+import { createLoadMore } from '../components/loadMore.js'
+import { onCleanup } from '../lib/lifecycle.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 
@@ -29,6 +31,12 @@ export async function AppointmentsView(app) {
   let appointments = []
   let patients = []
   let chip = 'All'
+  let unsubs = []
+  let watchedOrg = activeOrg
+  // Infinite scroll: rows accumulate and `cursor` marks the end of what we hold.
+  let cursor = null
+  let hasMore = false
+  let loading = false
 
   shell(app, {
     active: '/appointments',
@@ -47,22 +55,55 @@ export async function AppointmentsView(app) {
       '</div></div>' +
       '<div class="tblwrap"><table class="tbl" id="appt-tbl"><tr><th>Time</th><th>Patient</th><th>Clinic</th><th>Doctor</th><th>Type</th><th>Status</th><th></th></tr>' +
       '<tr><td colspan="7" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
-      '</table></div></div>',
+      '</table><div class="loadmore" data-loadmore="1"></div></div></div>',
   })
 
-  async function load() {
+  const more = createLoadMore(loadMore)
+
+  // Append the next chunk of the schedule. The first call has no cursor and
+  // replaces the list; later ones walk forward from the last row loaded.
+  async function loadMore() {
+    if (loading) return
+    const first = cursor == null && appointments.length === 0
+    loading = true
+    more.setLoading(true)
+    const wrap = document.querySelector('#appt-tbl')?.closest('.tblwrap')
+    wrap?.classList.add('is-loading')
     try {
-      const [appts, pats] = await Promise.all([
-        listOrgAppointments(activeOrg),
-        listOrgPatients(activeOrg).catch(() => []),
+      const [pg, pats] = await Promise.all([
+        listOrgAppointmentsPage(activeOrg, { cursor }),
+        first ? listOrgPatientsPage(activeOrg, { pageSize: 100 }).then((r) => r.rows).catch(() => []) : Promise.resolve(patients),
       ])
-      appointments = appts
+      // A row written between two chunk reads shifts the cursor stream and can
+      // repeat the boundary document.
+      const seen = new Set(appointments.map((a) => a.id))
+      appointments = first ? pg.rows : [...appointments, ...pg.rows.filter((a) => !seen.has(a.id))]
+      cursor = pg.cursor
+      hasMore = pg.hasMore
       patients = pats
+      loading = false
+      more.setLoading(false)
+      more.setDone(!hasMore)
       render()
     } catch (e) {
       console.error('[appointments] list failed:', e)
-      toast('Could not load appointments: ' + friendlyWriteError(e))
+      loading = false
+      more.setLoading(false)
+      if (first) toast('Could not load appointments: ' + friendlyWriteError(e))
+      else more.setError('Could not load more — retry')
+    } finally {
+      wrap?.classList.remove('is-loading')
     }
+  }
+
+  // A fresh read of the whole list.
+  function reload() {
+    appointments = []
+    cursor = null
+    hasMore = false
+    more.reset()
+    teardownListeners()
+    loadMore().then(subscribeLive)
   }
 
   function render() {
@@ -90,12 +131,13 @@ export async function AppointmentsView(app) {
       '<td>' + (a.status === 'scheduled' && caps.canCreate ? '<button class="btn ghost sm" data-checkin="' + esc(a.id) + '">Check-in</button>' : '') + '</td>' +
       '</tr>').join('')
     tbl.innerHTML = head + (rows || '<tr><td colspan="7" class="mut" style="text-align:center;padding:22px 8px">No appointments yet</td></tr>')
+    more.mount(tbl.closest('.tblwrap'))
     tbl.querySelectorAll('[data-checkin]').forEach((b) => {
       b.onclick = async () => {
         try {
           await updateAppointmentStatus(b.getAttribute('data-checkin'), 'checked-in')
           toast('Checked in')
-          await load()
+          reload()
         } catch (e) { toast(friendlyWriteError(e, 'Check-in failed')) }
       }
     })
@@ -106,12 +148,17 @@ export async function AppointmentsView(app) {
       toast('No patients registered yet — register a patient first.')
       return
     }
-    const patientOpts = patients.map((p) => ({ value: p.pid, label: p.name + ' · ' + (p.mrn || p.pid) }))
+    // The label carries the mobile number so the picker's filter box can find
+    // a patient by phone, not just by name.
+    const patientOpts = patients.map((p) => ({
+      value: p.pid,
+      label: p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key),
+    }))
     formModal({
       title: 'Book appointment',
       submitLabel: 'Book slot',
       fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true },
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, searchable: patientOpts.length > 1, searchPlaceholder: 'Name, ID or mobile…' },
         { name: 'clinic', label: 'Clinic', type: 'select', options: CLINICS, required: true },
         { name: 'doctor', label: 'Doctor', type: 'select', options: DOCTORS },
         { name: 'time', label: 'Date/Time', placeholder: 'e.g. 2026-09-27 10:40', required: true },
@@ -135,12 +182,12 @@ export async function AppointmentsView(app) {
         }
         closeModal()
         toast('Appointment booked')
-        await load()
+        reload()
       },
     })
   }
 
-  document.getElementById('refreshBtn').onclick = load
+  document.getElementById('refreshBtn').onclick = reload
   const bookBtn = document.getElementById('bookBtn')
   if (bookBtn) bookBtn.onclick = openBookForm
   document.querySelectorAll('#appt-chips .chip').forEach((c) => {
@@ -153,5 +200,50 @@ export async function AppointmentsView(app) {
   })
   wireToast(app)
 
-  await load()
+  function teardownListeners() {
+    unsubs.forEach((u) => u())
+    unsubs = []
+  }
+
+  // Live updates for the appointment list. The patient picker stays one-shot
+  // (registry is never live); a brand-new patient may only appear after reload.
+  function subscribeLive() {
+    teardownListeners()
+    if (!watchedOrg) return
+    // The live feed only ever knows about the newest slice of the schedule.
+    // When the user has already scrolled past it, leave the accumulated list
+    // alone rather than truncating it back to one chunk.
+    if (cursor != null) return
+    unsubs.push(
+      subscribeOrgAppointments(watchedOrg,
+        (rows) => {
+          if (cursor != null) return
+          const seen = new Set(appointments.map((a) => a.id))
+          appointments = rows.filter((a) => !seen.has(a.id)).concat(appointments)
+          render()
+        },
+        (e) => {
+          console.warn('[appointments] live update failed; refreshing once:', e?.message || e)
+          listOrgAppointments(watchedOrg)
+            .then((r) => { appointments = r; render() })
+            .catch(() => {})
+        }),
+    )
+  }
+
+  onCleanup(() => {
+    teardownListeners()
+    unsubAuth()
+  })
+
+  // The app does not re-route on org change, so rebuild the listener when the
+  // active hospital switches.
+  const unsubAuth = authStore.subscribe((s) => {
+    if (s.activeOrg === watchedOrg) return
+    watchedOrg = s.activeOrg
+    subscribeLive()
+  })
+
+  await loadMore()
+  subscribeLive()
 }

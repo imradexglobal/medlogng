@@ -11,6 +11,7 @@ import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
+import { watchQuery } from './live.js'
 
 const WARDS = 'wards'
 
@@ -33,11 +34,33 @@ function toWardRow(r) {
 }
 
 // Single equality filter only (no composite index, works offline).
-export async function listOrgWards(orgId) {
-  const snap = await getDocs(query(collection(db, WARDS), where('organization_id', '==', orgId)))
-  const rows = snap.docs.map((d) => toWardRow({ ...d.data(), id: d.id }))
+function buildOrgWardsQuery(orgId) {
+  return query(collection(db, WARDS), where('organization_id', '==', orgId))
+}
+
+function mapWardDoc(d) {
+  return toWardRow({ ...d.data(), id: d.id })
+}
+
+function sortWards(rows) {
   rows.sort((a, b) => a.name.localeCompare(b.name))
   return rows
+}
+
+export async function listOrgWards(orgId) {
+  const snap = await getDocs(buildOrgWardsQuery(orgId))
+  return sortWards(snap.docs.map(mapWardDoc))
+}
+
+// Same query, same ordering and row shape as listOrgWards, pushed on every
+// change. AdmissionsView watches this so bed totals update live too.
+export function subscribeOrgWards(orgId, onRows, onError) {
+  return watchQuery(
+    buildOrgWardsQuery(orgId),
+    mapWardDoc,
+    (rows) => onRows(sortWards(rows)),
+    onError,
+  )
 }
 
 export function validateWard(v) {
