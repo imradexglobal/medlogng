@@ -9,6 +9,8 @@
     "smoke": "node scripts/smoke.mjs",
     "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/lab.imaging.test.mjs",
     "test": "node scripts/smoke.mjs && npm run test:services",
+    "test:hub": "node scripts/test/hub.smoke.mjs",
+    "hub": "node hub/server.js",
     "dev": "vite --port 5174",
     "build": "vite build",
     "preview": "vite preview --port 5174",
@@ -17,6 +19,7 @@
     "electron:dev": "electron .",
     "electron:test": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish never",
     "publish:desktop": "npm run build && electron-builder --win --publish always"
   },
   "dependencies": {
@@ -36,6 +39,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "type": "module"
+  }
 }

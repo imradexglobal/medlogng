@@ -5,7 +5,7 @@ import { navigate } from '../router.js'
 import { esc } from '../utils/sanitize.js'
 import { ORG } from '../data/mockData.js'
 import { onCleanup } from '../lib/lifecycle.js'
-import { onUpdate } from '../services/clinicalOutbox.js'
+import { onUpdate, getSyncMode } from '../services/clinicalOutbox.js'
 
 export const NAV = [
   { path: '/', label: 'Dashboard', icon: '▦' },
@@ -24,7 +24,7 @@ export function statusBadge(s) {
   const map = {
     Paid: 'ok', Dispensed: 'ok', Verified: 'ok', Synced: 'ok', Completed: 'ok', Active: 'ok', 'Checked-in': 'ok',
     'Part-paid': 'warn', Pending: 'warn', Ready: 'warn', Waiting: 'warn', Low: 'warn', 'With vitals': 'warn',
-    Requested: 'warn', 'Partially dispensed': 'warn',
+    Requested: 'warn', 'Partially dispensed': 'warn', Reversed: 'warn',
     'In consultation': 'info', Processing: 'info', Confirmed: 'info', Admitted: 'info', Accepted: 'info', 'Specimen collected': 'info',
     External: 'info',
     Unpaid: 'bad', Out: 'bad', Expiring: 'bad', Overdue: 'bad',
@@ -146,15 +146,24 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
     const plural = n === 1 ? '' : 's'
     dot.className = 'dot' + (!isOnline ? ' off' : (n > 0 ? ' warn' : ''))
     if (!isOnline) {
+      const { mode, at } = getSyncMode()
+      const viaHub = mode === 'hub' && Date.now() - at < 120000
       state.textContent = 'Offline · local cache'
       detail.textContent = n > 0
         ? n + ' change' + plural + ' waiting to sync'
-        : 'writes queue until you reconnect'
+        : (viaHub ? 'handoffs routed via hospital hub' : 'writes queue until you reconnect')
     } else {
+      // Name the transport when it was the hospital hub — the whole point of
+      // Phase 2 is that staff can SEE a handoff go out over the LAN while the
+      // internet is down.
+      const { mode, at } = getSyncMode()
+      const viaHub = mode === 'hub' && Date.now() - at < 120000
       state.textContent = 'Online · Firestore'
       detail.textContent = n > 0
-        ? 'syncing ' + n + ' change' + plural + '…'
-        : 'writes sync to the cloud'
+        ? (mode === 'hub'
+            ? 'sending ' + n + ' change' + plural + ' via hospital hub…'
+            : 'syncing ' + n + ' change' + plural + '…')
+        : (viaHub ? 'last handoff delivered via hospital hub' : 'writes sync to the cloud')
     }
   }
   const onNetChange = () => updateSync()

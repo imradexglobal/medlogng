@@ -1,0 +1,64 @@
+# MediLog NG Host — the hospital's on-premise server build.
+# Separate from the normal desktop installer (electron-builder.yml): its
+# package.json carries the 'MediLog NG Host' product name, which switches the
+# app into host mode (hub server + tray + first-run wizard). The Firebase
+# service-account key is NEVER included — the wizard imports it on the host
+# PC at first run.
+
+appId: com.medilogng.host
+productName: MediLog NG Host
+# productName above only names the INSTALLER — extraMetadata is what actually
+# lands in the app's package.json so app.getName() reports 'MediLog NG Host'
+# and the app boots into host mode (wizard + tray + hub).
+extraMetadata:
+  productName: MediLog NG Host
+copyright: Copyright (c) Imradex Global
+artifactName: MediLogHost-Setup-${version}.${ext}
+
+directories:
+  output: release
+  buildResources: public
+
+asar: true
+
+# The hub (ESM), the pure rules it imports, and the web app must live on real
+# disk inside the install so Node's module loader and the static file server
+# reach them reliably.
+asarUnpack:
+  - hub/**/*
+  - dist/**/*
+  - src/features/pharmacy/requests.js
+
+files:
+  - dist/**/*
+  - electron/**/*
+  - hub/**/*
+  - src/features/pharmacy/requests.js
+  - package.json
+  # firebase-admin is REQUIRED here (unlike the normal build): the relay
+  # writes to Firestore with the service-account key.
+  - '!node_modules/@capacitor/android/**/*'
+  - '!node_modules/@capacitor/cli/**/*'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  publisherName: Imradex Global
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MediLog NG Host
+  menuCategory: Imradex Global
+  deleteAppDataOnUninstall: true
+  differentialPackage: false
+
+# Host updates are installed by re-running the installer (kept off the
+# desktop app's auto-update channel so the building's server is never
+# replaced out from under it mid-shift).

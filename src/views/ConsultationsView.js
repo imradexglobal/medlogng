@@ -5,7 +5,7 @@ import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
   addLabOrder, myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META,
 } from '../services/consultationService.js'
-import { listOrgPatientsPage, formatPhone, matchesPatient } from '../services/patientService.js'
+import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
   listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, myAdmissionCaps, indexAdmissionsByEncounter, activeAdmissionForEncounter,
 } from '../services/admissionService.js'
@@ -86,6 +86,11 @@ export async function ConsultationsView(app, params = {}) {
   let encounters = []
   let patients = []
   let pIndex = new Map()
+  // The registry join only loads one bounded page of organization_patients, so
+  // a patient past that page — or an encounter whose snapshot lost
+  // patient_name — would read as "Unknown patient". fillIndex() fetches those
+  // on demand and drops them into pIndex; see ensureVisibleMeta().
+  let fillIndex = createPatientIndexFiller(activeOrg)
   // Infinite scroll: rows accumulate and `cursor` marks the end of what we hold.
   let cursor = null
   let hasMore = false
@@ -161,6 +166,19 @@ export async function ConsultationsView(app, params = {}) {
       payer: p.payer || '',
       allergy: p.allergy || '',
     }
+  }
+
+  // Name the patients the screen is actually showing but the bounded index
+  // missed. Filled rows land in pIndex and repaint exactly once — a render
+  // that finds nothing new stops the cycle, so this can never loop.
+  async function ensureVisibleMeta() {
+    if (!document.getElementById('enc-tbl')) return
+    const ids = visibleEncounters().map((e) => e.patientId)
+    if (selectedEncounter) ids.push(selectedEncounter.patientId)
+    const changed = await fillIndex.fill(pIndex, ids)
+    if (!changed || !document.getElementById('enc-tbl')) return
+    renderQueue()
+    renderWorkspace()
   }
 
   // The admissions join (per-encounter index + per-patient active bed). Shared
@@ -239,6 +257,7 @@ export async function ConsultationsView(app, params = {}) {
     encounters = []
     cursor = null
     hasMore = false
+    fillIndex.reset()
     more.reset()
     teardownListeners()
     loadMore().then(subscribeLive)
@@ -310,6 +329,7 @@ export async function ConsultationsView(app, params = {}) {
         renderWorkspace()
       }
     })
+    ensureVisibleMeta()
   }
 
   function renderWorkspace() {
@@ -408,6 +428,7 @@ export async function ConsultationsView(app, params = {}) {
       }
     }
     loadEncRx()
+    ensureVisibleMeta()
   }
 
   // ---- prescriptions for this encounter ------------------------------------
@@ -980,6 +1001,9 @@ export async function ConsultationsView(app, params = {}) {
   const unsubAuth = authStore.subscribe((s) => {
     if (s.activeOrg === watchedOrg) return
     watchedOrg = s.activeOrg
+    // The filler is scoped to one hospital; a switch must not keep resolving
+    // against the old org's registry.
+    fillIndex = createPatientIndexFiller(watchedOrg)
     subscribeLive()
   })
 

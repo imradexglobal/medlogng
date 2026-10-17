@@ -643,6 +643,162 @@ export async function dispense(input) {
   })
 }
 
+// ---- reverse a dispense (one medicine line) ---------------------------------
+// Undoes ONE issued line: the units go back on the shelf, that line's
+// `dispensed_qty` drops to zero so the medicine is editable again, and the
+// request's status is re-derived — a fully dispensed script returns to
+// `Requested`, so every prescribing surface offers Adjust once more.
+//
+// The original 'out' movement and dispense ticket stay exactly as they were:
+// they record what physically left the cupboard. The undo is written as a
+// compensating 'in' movement plus an append-only 'reversed' ticket, so the
+// ledger still balances and nothing is rewritten after the fact.
+export async function reverseDispenseIssue({ requestId, lineId }) {
+  const { activeOrg, user } = authStore.getState()
+  if (!activeOrg) throw new Error('No hospital selected.')
+  const caps = myPharmacyCaps()
+  if (!caps.canDispense) {
+    throw new Error('Your role cannot reverse a dispense (missing "prescription.dispense" capability). Ask an administrator.')
+  }
+  if (!requestId || !lineId) throw new Error('Nothing selected to reverse.')
+  const now = serverTimestamp()
+  const ms = (t) => (t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : 0))
+
+  // Read the request and lot up front purely to validate the line and to learn
+  // whether the lot's batch/expiry were cleared on the way to zero. The
+  // transaction re-reads both before writing, so this cannot race a dispense.
+  const preSnap = await getDoc(doc(db, REQUESTS, requestId))
+  if (!preSnap.exists()) throw new Error('This prescription no longer exists.')
+  if (preSnap.data().organization_id !== activeOrg) throw new Error('This prescription belongs to a different hospital.')
+  const preLine = toRequestItems({ id: preSnap.id, ...preSnap.data() }).find((l) => l.line_id === lineId)
+  if (!preLine) throw new Error('That medicine is no longer on this prescription.')
+  const medicine = preLine.medicine || 'This medicine'
+  if (preLine.external) {
+    throw new Error('"' + medicine + '" is an external prescription — it never left in-house stock, so there is nothing to reverse.')
+  }
+  if (toQty(preLine.dispensed_qty, 0) <= 0) {
+    throw new Error('"' + medicine + '" has not been dispensed, so there is nothing to reverse.')
+  }
+  if (!preLine.drug_id) {
+    throw new Error('"' + medicine + '" is not matched to a catalogue item, so its stock cannot be returned.')
+  }
+
+  const lotRef = doc(db, DRUGS, preLine.drug_id)
+  const preLot = await getDoc(lotRef)
+  if (!preLot.exists()) {
+    throw new Error('The catalogue item for "' + medicine + '" no longer exists — its stock was not returned.')
+  }
+  // A lot drawn down to zero loses its batch/expiry, and the 'out' movement is
+  // the only record of which batch went out — read it back so returned units
+  // do not come back as stock with no batch left to dispense from.
+  let restore = null
+  if (!preLot.data().batch) {
+    const moves = await getDocs(query(
+      collection(db, 'stock_movements'),
+      where('medication_request_id', '==', requestId),
+      where('drug_id', '==', preLine.drug_id),
+    ))
+    const out = moves.docs
+      .map((d) => d.data())
+      .filter((m) => m && m.type === 'out' && m.batch)
+      .sort((a, b) => ms(b.created_at) - ms(a.created_at))[0]
+    if (out) restore = { batch: out.batch || '', expiry: out.expiry || '' }
+  }
+
+  return runTransaction(db, async (tx) => {
+    const reqRef = doc(db, REQUESTS, requestId)
+    const reqSnap = await tx.get(reqRef)
+    if (!reqSnap.exists()) throw new Error('This prescription no longer exists.')
+    const data = reqSnap.data()
+    if (data.organization_id !== activeOrg) throw new Error('This prescription belongs to a different hospital.')
+
+    const items = toRequestItems({ id: reqSnap.id, ...data })
+    const line = items.find((l) => l.line_id === lineId)
+    if (!line || line.external) throw new Error('"' + medicine + '" can no longer be reversed.')
+    const qty = toQty(line.dispensed_qty, 0)
+    if (qty <= 0) throw new Error('"' + medicine + '" has not been dispensed, so there is nothing to reverse.')
+
+    const lotSnap = await tx.get(lotRef)
+    if (!lotSnap.exists()) throw new Error('The catalogue item for "' + medicine + '" no longer exists — its stock was not returned.')
+    const lot = lotSnap.data()
+    const batch = lot.batch || (restore ? restore.batch : '')
+    const expiry = lot.expiry || (restore ? restore.expiry : '')
+    const newStock = Number(lot.stock || 0) + qty
+
+    const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
+    tx.set(doc(db, 'stock_movements', movementId), {
+      type: 'in',
+      organization_id: activeOrg,
+      drug_id: line.drug_id,
+      sku: lot.sku || '',
+      name: lot.name || medicine,
+      qty,
+      batch,
+      expiry,
+      reason: 'Dispense reversed',
+      patient_id: data.patient_id || '',
+      medication_request_id: requestId,
+      line_id: lineId,
+      created_by: user?.uid || null,
+      created_by_name: user?.email || '',
+      created_at: now,
+    })
+
+    tx.update(lotRef, {
+      stock: newStock,
+      batch,
+      expiry,
+      // status is derived from stock, exactly as dispense() keeps it.
+      status: newStock === 0 ? 'Out' : (newStock < 20 ? 'Low' : 'OK'),
+      updated_at: now,
+    })
+
+    // Dispensations are append-only (firestore.rules: update is false), so the
+    // undo is a second ticket on the same request rather than an edit.
+    const ticketId = 'rev_' + Date.now() + Math.random().toString(36).slice(2)
+    tx.set(doc(db, DISPENSE, ticketId), {
+      patient_id: data.patient_id || '',
+      patient_name: data.patient_name || '',
+      items: JSON.stringify([{
+        drug_id: line.drug_id, sku: lot.sku || '', name: lot.name || medicine,
+        batch, qty, unit: lot.unit || 'tabs',
+      }]),
+      by: user?.email || '',
+      status: 'reversed',
+      reason: 'Dispense reversed for "' + medicine + '"',
+      organization_id: activeOrg,
+      medication_request_id: requestId,
+      line_id: lineId,
+      created_at: now,
+      updated_at: now,
+    })
+
+    const next = items.map((l) => (l.line_id === lineId ? { ...l, dispensed_qty: 0 } : l))
+    const progress = requestProgress(next)
+    tx.update(reqRef, {
+      items: next,
+      status: statusForProgress(progress),
+      reason: 'Dispense reversed',
+      // A reversal always leaves this line owing its full quantity again, so
+      // the script can no longer be complete.
+      dispensed_at: null,
+      updated_at: now,
+    })
+
+    try {
+      await logAudit({
+        action: 'dispense.reversed',
+        organizationId: activeOrg,
+        details: `${data.patient_name || 'patient'} · ${qty} × ${medicine}`,
+      })
+    } catch (e) {
+      console.warn('[pharmacy] audit append failed:', e?.message)
+    }
+
+    return { requestId, lineId, qty, medicine, newStock, items: next, status: statusForProgress(progress) }
+  })
+}
+
 // ---- medication requests (prescription orders) ------------------------------
 // One request = one prescription script for one patient/encounter, holding every
 // line the prescriber wrote. Prescribing a second drug joins the open script
@@ -691,7 +847,12 @@ export async function requestMedication(args) {
 // The same, for a whole script written in one go: every line lands on ONE
 // request in ONE write, so a four-drug prescription is one order with four
 // lines rather than four racing writes that could each open their own order.
-export async function requestMedicationLines({ patientId, patientName = '', encounterId = '', lines = [], admissionSessionId = '' }) {
+//
+// `syncKey` (optional) is the outbox's idempotency key: a replayed handoff
+// (cloud retry after a lost ack, or hub relay racing the browser) carries the
+// same key, and a request already stamped with it short-circuits — without
+// this, a replay would re-merge the same lines and double every quantity.
+export async function requestMedicationLines({ patientId, patientName = '', encounterId = '', lines = [], admissionSessionId = '', syncKey = '' }) {
   const { activeOrg, user } = authStore.getState()
   if (!activeOrg) throw new Error('No hospital selected.')
   const me = myActiveMembership()
@@ -703,6 +864,15 @@ export async function requestMedicationLines({ patientId, patientName = '', enco
     .map((l, i) => toLine(l, i))
     .filter((l) => l.medicine || l.drug_id)
   if (!normalised.length) throw new Error('Choose at least one medicine to prescribe.')
+
+  // Replay guard (single-field array-contains needs no composite index).
+  if (syncKey) {
+    const replay = await getDocs(query(collection(db, REQUESTS), where('sync_keys', 'array-contains', syncKey)))
+    if (replay.docs.length) {
+      const d = replay.docs[0]
+      return { id: d.id, items: toRequestItems({ id: d.id, ...d.data() }), deduped: true, created: false }
+    }
+  }
 
   const existing = await findOpenRequest({ patientId, encounterId, admissionSessionId })
   const now = serverTimestamp()
@@ -717,6 +887,11 @@ export async function requestMedicationLines({ patientId, patientName = '', enco
     //Stamp admission_session_id when updating an existing request
     if (admissionSessionId && existing.raw?.admission_session_id !== admissionSessionId) {
       updateData.admission_session_id = admissionSessionId
+    }
+    if (syncKey) {
+      const seen = new Set(existing.raw?.sync_keys || [])
+      seen.add(syncKey)
+      updateData.sync_keys = [...seen]
     }
     await updateDoc(doc(db, REQUESTS, existing.id), updateData)
     return { id: existing.id, items, created: false }
@@ -735,6 +910,7 @@ export async function requestMedicationLines({ patientId, patientName = '', enco
     created_by_name: user?.email || '',
     created_at: now,
     updated_at: now,
+    ...(syncKey ? { sync_keys: [syncKey] } : {}),
   }
   await setDoc(ref, requestData)
   return { id: ref.id, items: normalised, created: true }

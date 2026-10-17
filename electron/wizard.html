@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>MediLog NG Host — First-time setup</title>
+  <style>
+    :root { color-scheme: light }
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f172a; color: #e2e8f0;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; padding: 24px;
+    }
+    .card { width: 100%; max-width: 460px }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px }
+    .brand .dot { width: 14px; height: 14px; border-radius: 50%; background: #0e6b5e }
+    h1 { font-size: 20px; font-weight: 600 }
+    .sub { color: #94a3b8; font-size: 13px; margin-bottom: 22px }
+    .step {
+      background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+      padding: 14px 16px; margin-bottom: 12px;
+    }
+    .step h2 { font-size: 14px; font-weight: 600; margin-bottom: 4px; display: flex; gap: 8px; align-items: center }
+    .step h2 .n {
+      background: #0e6b5e; color: #fff; width: 20px; height: 20px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center; font-size: 11px;
+    }
+    .step p { font-size: 12.5px; color: #94a3b8; margin: 4px 0 10px }
+    button {
+      background: #0e6b5e; color: #fff; border: 0; border-radius: 8px;
+      padding: 8px 14px; font-size: 13px; cursor: pointer; font-weight: 600;
+    }
+    button:hover { background: #10826f }
+    button.secondary { background: #334155 }
+    button:disabled { opacity: .5; cursor: default }
+    .ok { color: #4ade80; font-size: 12px; margin-top: 6px }
+    .err { color: #f87171; font-size: 12px; margin-top: 6px }
+    .addr {
+      font-family: Consolas, monospace; font-size: 15px; background: #0f172a;
+      border: 1px dashed #0e6b5e; border-radius: 8px; padding: 10px 12px;
+      margin: 8px 0; word-break: break-all; color: #f8fafc;
+    }
+    .hint { font-size: 12px; color: #94a3b8; line-height: 1.5 }
+    .actions { display: flex; gap: 10px; margin-top: 18px; justify-content: flex-end }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><span class="dot"></span><h1>MediLog NG Host</h1></div>
+    <p class="sub">This PC will serve the EMR to the whole building and keep handoffs safe during internet outages.</p>
+
+    <div class="step">
+      <h2><span class="n">1</span> Import the key file</h2>
+      <p>Select the Firebase service-account JSON file (the one that looks like <code>new-project-service-account.json</code>).</p>
+      <button id="btnKey">Choose key file…</button>
+      <div id="keyMsg"></div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">2</span> Open the firewall</h2>
+      <p>Windows will ask for permission once — click <b>Yes</b>. This lets other PCs in the building reach this one.</p>
+      <button id="btnFw">Open firewall…</button>
+      <div id="fwMsg"></div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">3</span> Finish</h2>
+      <p class="hint">On every other PC: open Chrome, go to the address below, log in, and bookmark it.</p>
+      <div class="addr" id="addr" hidden></div>
+      <div id="finMsg"></div>
+    </div>
+
+    <div class="actions">
+      <button id="btnFinish" disabled>Finish setup</button>
+    </div>
+  </div>
+  <script src="./wizard.js"></script>
+</body>
+</html>

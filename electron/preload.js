@@ -37,4 +37,11 @@ contextBridge.exposeInMainWorld('medilog', {
     ipcRenderer.on('auto-update-status', listener);
     return () => ipcRenderer.removeListener('auto-update-status', listener);
   },
+  // ---- host-mode wizard (used by wizard.js; inert in the normal app) ----
+  hostGetInfo: () => ipcRenderer.invoke('host-get-info'),
+  hostImportKey: () => ipcRenderer.invoke('host-import-key'),
+  hostOpenFirewall: () => ipcRenderer.invoke('host-open-firewall'),
+  hostFinishSetup: () => ipcRenderer.invoke('host-finish-setup'),
+  hostShowDataFolder: () => ipcRenderer.invoke('host-show-data-folder'),
+  hostSetupDone: () => ipcRenderer.send('host-setup-done'),
 });

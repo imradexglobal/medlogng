@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { signIn, seedDocs, docData, allDocs } from './harness.mjs'
 
-const { dispense, receiveBatch, createDrug, updateDrug, correctStock } =
+const { dispense, receiveBatch, createDrug, updateDrug, correctStock, reverseDispenseIssue } =
   await import('../../src/services/pharmacyService.js')
 
 let passed = 0
@@ -239,6 +239,131 @@ await test('correctStock writes a ledger movement and sets stock', async () => {
   const moves = allDocs('stock_movements')
   assert.equal(moves.length, 1)
   assert.equal(moves[0].data.type, 'adjust')
+})
+
+// ---- reverseDispenseIssue ---------------------------------------------------
+// One line issued (20 of 20), one still owed — the shape a partial script is in
+// when the pharmacy wants a single medicine back.
+const seedPartialIssue = (over = {}) => {
+  seedDocs({
+    'stock_lots/lot_1': lot({ stock: 80, batch: 'B1', expiry: '2028-01-01' }),
+    [REQ]: {
+      patient_id: 'pat_1', patient_name: 'Ada Nwosu',
+      items: [
+        { line_id: 'l1', drug_id: 'lot_1', medicine: 'Metformin', quantity: 20, dispensed_qty: 20 },
+        { line_id: 'l2', drug_id: 'lot_1', medicine: 'Metformin', quantity: 10, dispensed_qty: 0 },
+      ],
+      status: 'Partially dispensed', organization_id: 'org_1',
+      ...over,
+    },
+    'stock_movements/mov_out': {
+      type: 'out', organization_id: 'org_1', drug_id: 'lot_1', sku: 'MET-500MG-30',
+      name: 'Metformin', qty: 20, batch: 'B1', expiry: '2028-01-01',
+      medication_request_id: 'req_1', created_at: 1000,
+    },
+  })
+}
+
+const undoMoves = () => allDocs('stock_movements').filter((m) => m.path !== 'stock_movements/mov_out')
+
+await test('reverseDispenseIssue returns the units to stock and unlocks the line', async () => {
+  await signIn('pharmacist')
+  seedPartialIssue()
+  const res = await reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' })
+  assert.equal(docData('stock_lots/lot_1').stock, 100, 'the 20 issued units are back on the shelf')
+  const line = docData('medication_requests/req_1').items.find((i) => i.line_id === 'l1')
+  assert.equal(line.dispensed_qty, 0, 'dispensed_qty is what locks the medicine — it must be zero')
+  assert.equal(docData('medication_requests/req_1').status, 'Requested', 'nothing issued now, so the script reopens')
+  assert.equal(res.status, 'Requested')
+  assert.equal(res.newStock, 100)
+  const moves = undoMoves()
+  assert.equal(moves.length, 1, 'a compensating movement is appended, the original stays')
+  assert.equal(moves[0].data.type, 'in', 'reversed stock counts back in')
+  assert.equal(moves[0].data.qty, 20)
+  assert.equal(moves[0].data.reason, 'Dispense reversed')
+  assert.equal(moves[0].data.medication_request_id, 'req_1')
+  const ticket = allDocs('dispensations')
+  assert.equal(ticket.length, 1, 'dispensations are append-only, so the undo is a second doc')
+  assert.equal(ticket[0].data.status, 'reversed')
+  assert.equal(docData('medication_requests/req_1').dispensed_at, null, 'the script is no longer complete')
+})
+
+await test('reverseDispenseIssue reopens a fully dispensed script to partially dispensed', async () => {
+  await signIn('pharmacist')
+  seedDocs({
+    'stock_lots/lot_1': lot({ stock: 70, batch: 'B1', expiry: '2028-01-01' }),
+    [REQ]: {
+      patient_id: 'pat_1', patient_name: 'Ada Nwosu',
+      items: [
+        { line_id: 'l1', drug_id: 'lot_1', medicine: 'Metformin', quantity: 20, dispensed_qty: 20 },
+        { line_id: 'l2', drug_id: 'lot_1', medicine: 'Ibuprofen', quantity: 10, dispensed_qty: 10 },
+      ],
+      status: 'Dispensed', organization_id: 'org_1', dispensed_at: 123,
+    },
+  })
+  const res = await reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' })
+  assert.equal(docData('stock_lots/lot_1').stock, 90)
+  assert.equal(res.status, 'Partially dispensed', 'the other medicine is still issued')
+  assert.equal(docData('medication_requests/req_1').dispensed_at, null)
+})
+
+await test('reverseDispenseIssue restores the batch a fully exhausted lot lost', async () => {
+  await signIn('pharmacist')
+  seedDocs({
+    'stock_lots/lot_1': lot({ stock: 0, batch: '', expiry: '', status: 'Out' }),
+    [REQ]: {
+      patient_id: 'pat_1', patient_name: 'Ada Nwosu',
+      items: [{ line_id: 'l1', drug_id: 'lot_1', medicine: 'Metformin', quantity: 20, dispensed_qty: 20 }],
+      status: 'Dispensed', organization_id: 'org_1',
+    },
+    'stock_movements/mov_out': {
+      type: 'out', organization_id: 'org_1', drug_id: 'lot_1', qty: 20,
+      batch: 'B1', expiry: '2028-01-01', medication_request_id: 'req_1', created_at: 1000,
+    },
+  })
+  await reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' })
+  const l = docData('stock_lots/lot_1')
+  assert.equal(l.stock, 20)
+  assert.equal(l.batch, 'B1', 'returned units come back with the batch they left in')
+  assert.equal(l.expiry, '2028-01-01')
+  assert.equal(l.status, 'OK', 'status is derived from stock again')
+})
+
+await test('reverseDispenseIssue refuses a medicine that was never dispensed', async () => {
+  await signIn('pharmacist')
+  seedForDispense()
+  await assert.rejects(
+    () => reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' }),
+    /has not been dispensed/,
+  )
+  assert.equal(docData('stock_lots/lot_1').stock, 100, 'stock untouched')
+  assert.equal(allDocs('stock_movements').length, 0, 'no movement written')
+})
+
+await test('reverseDispenseIssue refuses an external line', async () => {
+  await signIn('pharmacist')
+  seedDocs({
+    [REQ]: {
+      patient_id: 'pat_1', patient_name: 'Ada Nwosu',
+      items: [{ line_id: 'l1', medicine: 'Panadol', quantity: 10, dispensed_qty: 0, external: true }],
+      status: 'External', organization_id: 'org_1',
+    },
+  })
+  await assert.rejects(
+    () => reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' }),
+    /external prescription/,
+  )
+})
+
+await test('reverseDispenseIssue is refused without the prescription.dispense capability', async () => {
+  await signIn('doctor')
+  seedPartialIssue()
+  await assert.rejects(
+    () => reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' }),
+    /cannot reverse/,
+  )
+  assert.equal(docData('stock_lots/lot_1').stock, 80, 'stock untouched')
+  assert.equal(docData('medication_requests/req_1').items[0].dispensed_qty, 20, 'line untouched')
 })
 
 console.log('pharmacy service: ' + passed + ' passed')

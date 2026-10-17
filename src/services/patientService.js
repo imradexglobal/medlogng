@@ -166,6 +166,62 @@ export async function getPatient(pid) {
   return toPatientRow(r)
 }
 
+// ---- on-demand registry resolution ------------------------------------------
+// Queues and bed boards join names from a BOUNDED index (one page of
+// organization_patients), so a patient past that page — or an encounter/admission
+// whose snapshot lost `patient_name` — rendered as "Unknown patient". This pulls
+// the canonical registry doc (org link as fallback) straight into the caller's
+// index instead.
+export async function getPatientForOrg(orgId, pid) {
+  if (!pid) return null
+  try {
+    const row = await getPatient(pid)
+    if (row) return row
+  } catch {
+    // Canonical read failed (offline / never written) — try the org link below.
+  }
+  if (!orgId) return null
+  try {
+    const snap = await getDoc(doc(db, ORG_PATIENTS, orgId + '_' + pid))
+    if (!snap.exists()) return null
+    const data = snap.data() || {}
+    const id = data.patient_id ||
+      (snap.id.startsWith(orgId + '_') ? snap.id.slice(orgId.length + 1) : snap.id)
+    return toPatientRow({ ...data, patient_id: id })
+  } catch {
+    return null
+  }
+}
+
+// One filler per view instance. It tracks pids in flight and pids known to be
+// absent so a render storm can never queue duplicate reads, and it only reports
+// `true` when a row actually landed — a failed fetch must not trigger the
+// re-render that would retry it forever. Callers clear `reset()` on reload.
+export function createPatientIndexFiller(orgId) {
+  const pending = new Set()
+  const missing = new Set()
+  return {
+    async fill(index, pids = []) {
+      const need = [...new Set(pids)]
+        .filter((id) => id && !index.has(id) && !pending.has(id) && !missing.has(id))
+      if (!need.length) return false
+      need.forEach((id) => pending.add(id))
+      let added = 0
+      try {
+        await Promise.all(need.map(async (id) => {
+          const row = await getPatientForOrg(orgId, id)
+          if (row) { index.set(id, row); added++ }
+          else missing.add(id)
+        }))
+      } finally {
+        need.forEach((id) => pending.delete(id))
+      }
+      return added > 0
+    },
+    reset() { missing.clear() },
+  }
+}
+
 export async function listPatientEncounters(pid, { limitN = 50 } = {}) {
   const snap = await getDocs(query(collection(db, 'encounters'), where('patient_id', '==', pid), limit(limitN)))
   const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }))

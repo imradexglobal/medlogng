@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const host = require('./host');
 let autoUpdater = null;
 let updateAvailable = false;
 let updateProgress = 0;
@@ -59,7 +60,7 @@ function setZoom(z) {
   return currentZoom;
 }
 
-function createWindow() {
+function createWindow(startUrl) {
   const iconPath = path.join(__dirname, '..', 'public', 'logo.svg');
   const winOpts = {
     width: 1280,
@@ -86,16 +87,83 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  if (START_URL) {
+  if (startUrl) {
+    // Host mode: load the EMR from the local hub server (same code path a
+    // ward PC uses) so the host exercises exactly what the building sees.
+    mainWindow.loadURL(startUrl);
+  } else if (START_URL) {
     mainWindow.loadURL(START_URL);
   } else {
     mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
 }
 
-app.whenReady().then(() => {
+// ---- host mode (MediLogHost-Setup.exe only) --------------------------------
+let wizardWindow = null;
+
+function createWizardWindow() {
+  wizardWindow = new BrowserWindow({
+    width: 560,
+    height: 700,
+    resizable: false,
+    title: 'MediLog NG Host — Setup',
+    backgroundColor: '#0f172a',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  try { wizardWindow.setMenuBarVisibility(false); } catch (e) {}
+  wizardWindow.loadFile(path.join(__dirname, 'wizard.html'));
+  wizardWindow.on('closed', () => {
+    wizardWindow = null;
+    // Abandoned setup (no config written yet): nothing to run — exit instead
+    // of idling invisibly.
+    try { if (host.needsSetup()) app.quit(); } catch (e) {}
+  });
+}
+
+async function startHostExperience() {
+  host.registerHostIpc();
+
+  ipcMain.on('host-setup-done', () => {
+    try { if (wizardWindow && !wizardWindow.isDestroyed()) wizardWindow.close(); } catch (e) {}
+    const cfg = host.loadHostConfig();
+    const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
+    createWindow(host.localUrl(port));
+    host.createTray(() => mainWindow, port);
+    host.startStatusPoll(port);
+  });
+
+  if (host.needsSetup()) {
+    createWizardWindow();
+    return;
+  }
+  try {
+    await host.startHubRuntime();
+  } catch (e) {
+    dialog.showErrorBox(
+      'MediLog NG Host',
+      'Could not start the host server:\n' + ((e && e.message) || e) + '\n\nSetup will open so the key can be re-imported.'
+    );
+    createWizardWindow();
+    return;
+  }
+  const cfg = host.loadHostConfig();
+  const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
+  createWindow(host.localUrl(port));
+  host.createTray(() => mainWindow, port);
+  host.startStatusPoll(port);
+}
+
+app.whenReady().then(async () => {
   loadZoom();
-  createWindow();
+  if (host.isHostMode()) {
+    await startHostExperience();
+  } else {
+    createWindow();
+  }
 
   ipcMain.handle('app-version', () => app.getVersion());
   ipcMain.handle('zoom-in', () => setZoom(currentZoom + ZOOM_STEP));
@@ -154,7 +222,10 @@ app.whenReady().then(() => {
 // show progress + an "Update now" button. Listeners are registered BEFORE
 // the first check so no event is missed.
   try {
-    if (autoUpdater && !START_URL) {
+    // Host builds are updated by re-running their installer (separate channel
+    // from the normal desktop app) — never auto-update a server out from
+    // under the whole building.
+    if (autoUpdater && !START_URL && !host.isHostMode()) {
       autoUpdater.autoDownload = false;
       autoUpdater.autoInstallOnAppQuit = true;
 
@@ -239,8 +310,16 @@ app.whenReady().then(() => {
       }, 3000);
     }
   } catch (e) {}
-);
+});
 
 app.on('window-all-closed', () => {
+  // Host mode lives in the tray: closing the window must NOT stop the server
+  // the rest of the building depends on. Quit from the tray menu.
+  if (host.isHostMode()) return;
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  host.stopStatusPoll();
+  host.stopHubRuntime().catch(() => {});
 });

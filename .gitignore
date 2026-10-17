@@ -8,6 +8,10 @@ ios/
 *service-account.json
 *service-account*.json
 hub/keys/
+hub/queue.json
+hub/queue.json.tmp
+hub/queue.json.corrupt-*
+electron/host.flag
 *.log
 *.err
 new 1.txt

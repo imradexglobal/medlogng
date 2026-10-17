@@ -3,7 +3,8 @@ import { shell, statusBadge, formModal, toast, closeModal, openModal, wireToast 
 import { authStore } from '../store/authStore.js'
 import {
   listOrgDrugs, createDrug, updateDrug, listOrgDispense, myPharmacyCaps,
-  findDrugNameMatches, receiveBatch, dispense, listOrgRequests, subscribeOrgRequests,
+  findDrugNameMatches, receiveBatch, dispense, reverseDispenseIssue,
+  listOrgRequests, subscribeOrgRequests,
 } from '../services/pharmacyService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import * as R from '../features/pharmacy/requests.js'
@@ -136,6 +137,29 @@ shell(app, {
     else renderBatches()
   }
 
+  // Scripts the pharmacy has finished issuing. They are not part of the working
+  // queue above, but they are the only place a reversal can start.
+  function historyHtml() {
+    const done = requestBase
+      .filter((r) => r.status === R.REQUEST_STATUS.DISPENSED)
+      .slice(0, 10)
+    if (!done.length) return ''
+    const rows = done.map((r) =>
+      '<tr><td><strong>' + esc(r.patientName || '—') + '</strong>' +
+        (r.encounterId ? '<div class="mut">' + esc(r.encounterId.slice(0, 10)) + '</div>' : '') + '</td>' +
+      '<td>' + esc(r.items.map((l) => l.medicine || 'item').slice(0, 2).join(', ')) +
+        (r.lineCount > 2 ? ' +' + (r.lineCount - 2) + ' more' : '') + '</td>' +
+      '<td>' + esc(r.dispensed) + ' / ' + esc(r.total) + '</td>' +
+      '<td style="white-space:nowrap">' + statusBadge(r.status) +
+        (caps.canDispense ? ' <button class="btn ghost sm" data-open-request="' + esc(r.id) + '">Open →</button>' : '') +
+      '</td></tr>'
+    ).join('')
+    return '<p class="eyebrow" style="margin:18px 0 8px">Recently dispensed</p>' +
+      '<div class="tblwrap"><table class="tbl"><tr><th>Patient</th><th>Medicines</th><th>Issued</th><th>Status</th></tr>' +
+      rows + '</table></div>' +
+      '<p class="sub" style="margin-top:8px">Open one to reverse an issued medicine — its units go back on the shelf and the prescriber can edit it again.</p>'
+  }
+
   // The prescription queue, one row per prescription SCRIPT. Each row opens to
   // show every line the prescriber wrote, so the pharmacist works an order the
   // way the prescriber wrote it rather than row-by-row per medicine.
@@ -170,7 +194,12 @@ shell(app, {
       '<div class="tblwrap"><table class="tbl"><tr><th>Patient</th><th>Medicines</th><th>Lines</th><th>Issued</th><th>Status</th><th></th></tr>' +
       (rows || '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No prescriptions waiting</td></tr>') +
       '</table></div>' +
-      '<p class="sub" style="margin-top:10px">One row per prescription. Open it to see every medicine and issue them one line at a time.</p>'
+      '<p class="sub" style="margin-top:10px">One row per prescription. Open it to see every medicine and issue them one line at a time.</p>' +
+      // A dispensed script leaves the working queue above, but the pharmacy
+      // still needs a way back into one: opening it here is how an issued
+      // medicine gets reversed (units returned, line unlocked for the
+      // prescriber).
+      historyHtml()
     const nb = pane.querySelector('[data-receive-new]')
     if (nb) nb.onclick = () => openReceiveForm()
     pane.querySelectorAll('[data-open-request]').forEach((b) => {
@@ -178,12 +207,16 @@ shell(app, {
     })
   }
 
-  // A whole prescription script, opened for dispensing. Lines the pharmacist has
-  // already issued are shown but locked; the rest carry a quantity box seeded
-  // with what is still owed. Stock is checked live so a line that cannot be
+  // A whole prescription script, opened for dispensing. Lines still owed carry
+  // a quantity box seeded with what is outstanding; lines already issued show a
+  // Reverse button, which puts the units back on the shelf and unlocks the
+  // medicine for the prescriber. Stock is checked live so a line that cannot be
   // filled is called out before anything is committed.
   function openRequestDetail(reqId) {
-    const req = medicationRequests.find((r) => r.id === reqId)
+    // requestBase holds every script (queue + recently dispensed); the queue
+    // view above is only the open ones, and a reversal starts from the closed
+    // ones, so the lookup must not be limited to the queue.
+    const req = requestBase.find((r) => r.id === reqId) || medicationRequests.find((r) => r.id === reqId)
     if (!req) return
     if (!caps.canDispense) { toast('Your role cannot dispense medication.'); return }
 
@@ -205,6 +238,16 @@ shell(app, {
           '<td>—</td><td>—</td>' +
           '<td><span class="mut">External pharmacy</span></td></tr>'
       }
+      // An issued line can be reversed: units back on the shelf, dispensed_qty
+      // back to zero, so the medicine unlocks for the prescriber again.
+      const reverseBtn = '<button type="button" class="btn ghost sm" data-reverse-line="' + esc(l.line_id) + '">↩ Reverse</button>'
+      const issueCell = settled
+        ? reverseBtn
+        : (short
+          ? '<span class="pill bad">only ' + esc(onHand) + ' on hand</span>'
+          : '<input class="input" type="number" min="1" max="' + esc(owed) + '" value="' + esc(owed) +
+            '" data-qty-for="' + esc(l.line_id) + '" style="width:96px" />') +
+          (R.toQty(l.dispensed_qty, 0) > 0 ? ' ' + reverseBtn : '')
       return '<tr' + (settled ? ' style="opacity:.55"' : '') + '>' +
         '<td><strong>' + esc(l.medicine || 'Unnamed item') + '</strong>' +
         (l.sku ? '<div class="mut">' + esc(l.sku) + '</div>' : '') + '</td>' +
@@ -212,22 +255,42 @@ shell(app, {
         '<td>' + esc(R.toQty(l.quantity, 0)) + ' ' + esc(l.unit || '') + '</td>' +
         '<td>' + esc(R.toQty(l.dispensed_qty, 0)) + '</td>' +
         '<td>' + esc(owed) + '</td>' +
-        '<td>' + (settled
-          ? '<span class="mut">Issued</span>'
-          : short
-            ? '<span class="pill bad">only ' + esc(onHand) + ' on hand</span>'
-            : '<input class="input" type="number" min="1" max="' + esc(owed) + '" value="' + esc(owed) +
-              '" data-qty-for="' + esc(l.line_id) + '" style="width:96px" />') + '</td></tr>'
+        '<td style="white-space:nowrap">' + issueCell + '</td></tr>'
     }
 
+    const anyOwed = req.items.some((l) => !l.external && R.lineOutstanding(l) > 0)
     openModal('Prescription — ' + (req.patientName || 'patient'),
       '<div class="tblwrap"><table class="tbl"><tr><th>Medicine</th><th>Dose</th><th>Prescribed</th><th>Issued</th><th>Owed</th><th>Issue now</th></tr>' +
       req.items.map(lineRow).join('') + '</table></div>' +
-      '<p class="modal-hint">Issued quantities go straight to stock. Lines already issued are locked.</p>' +
+      '<p class="modal-hint">Issued quantities go straight to stock. An issued medicine can be reversed — the units return to the shelf and the line unlocks for the prescriber.</p>' +
       '<div class="mrow"><button class="btn ghost" data-close>Close</button>' +
-      '<button class="btn" id="reqDispense">Dispense selected lines →</button></div>')
+      (anyOwed ? '<button class="btn" id="reqDispense">Dispense selected lines →</button>' : '') + '</div>')
 
-    document.getElementById('reqDispense').onclick = async (e) => {
+    document.querySelectorAll('#modalBody [data-reverse-line]').forEach((b) => {
+      b.onclick = async () => {
+        const lineId = b.getAttribute('data-reverse-line')
+        const line = req.items.find((l) => l.line_id === lineId)
+        const issued = R.toQty(line?.dispensed_qty, 0)
+        const ok = window.confirm(
+          'Reverse ' + issued + ' × ' + (line?.medicine || 'this medicine') + '?\n\n' +
+          'The units go back on the shelf and this medicine becomes editable again.')
+        if (!ok) return
+        b.disabled = true
+        try {
+          const res = await reverseDispenseIssue({ requestId: req.id, lineId })
+          closeModal()
+          toast('Reversed ' + res.qty + ' × ' + res.medicine + ' — ' + res.newStock +
+            ' now on the shelf · prescription is ' + res.status)
+          await load()
+        } catch (err) {
+          b.disabled = false
+          toast('Could not reverse: ' + friendlyWriteError(err))
+        }
+      }
+    })
+
+    const dispenseBtn = document.getElementById('reqDispense')
+    if (dispenseBtn) dispenseBtn.onclick = async (e) => {
       const btn = e.currentTarget
       const issued = []
       for (const l of req.items) {

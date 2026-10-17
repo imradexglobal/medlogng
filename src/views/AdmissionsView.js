@@ -15,7 +15,7 @@ import {
 } from '../services/admissionService.js'
 import { getEncounter } from '../services/consultationService.js'
 import { getClinicalStaff } from '../services/authService.js'
-import { listOrgPatientsPage, formatPhone, matchesPatient } from '../services/patientService.js'
+import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
@@ -49,6 +49,11 @@ export async function AdmissionsView(app, params = {}) {
   let admissions = []
   let patients = []
   let patientIndex = new Map()
+  // The registry join only loads one bounded page of organization_patients, so
+  // an admission whose patient sits past that page (or whose snapshot lost
+  // patient_name) read as "Unknown patient" / a blank cell. fillIndex() names
+  // those on demand — see ensureVisibleMeta().
+  let fillIndex = createPatientIndexFiller(activeOrg)
   let wards = []
   let clinicalStaff = []
   let linkedEncounter = null
@@ -143,6 +148,7 @@ export async function AdmissionsView(app, params = {}) {
     admissions = []
     cursor = null
     hasMore = false
+    fillIndex.reset()
     more.reset()
     teardownListeners()
     loadMore().then(subscribeLive)
@@ -150,6 +156,25 @@ export async function AdmissionsView(app, params = {}) {
 
   function occupiedIn(wardName) {
     return admissions.filter((a) => a.status === 'active' && a.wardName === wardName).length
+  }
+
+  // The admission carries its own patient_name snapshot, but that can be empty
+  // (legacy rows) or stale. The registry index is joined in as the source of
+  // truth; the snapshot is only what shows before it resolves.
+  function admissionName(a) {
+    return a.patientName || patientIndex.get(a.patientId)?.name || 'Unknown patient'
+  }
+
+  // Name the patients this screen is showing but the bounded index missed.
+  // Filled rows land in patientIndex and repaint exactly once — a render that
+  // finds nothing new stops the cycle, so this can never loop.
+  async function ensureVisibleMeta() {
+    if (!document.getElementById('adm-tbl')) return
+    const ids = visibleAdmissions().map((a) => a.patientId)
+    if (linkedEncounter) ids.push(linkedEncounter.patientId)
+    const changed = await fillIndex.fill(patientIndex, ids)
+    if (!changed || !document.getElementById('adm-tbl')) return
+    render()
   }
 
   // Rows the table shows, after the search box and the active/discharged filter.
@@ -164,7 +189,7 @@ export async function AdmissionsView(app, params = {}) {
         // Bed, ward and doctor stay searchable; the patient's own record is
         // joined in so a mobile number finds the occupied bed, which the
         // admission row alone cannot answer.
-        const bedHay = [a.patientName, a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
+        const bedHay = [admissionName(a), a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
           .join(' ').toLowerCase()
         if (!bedHay.includes(q) && !(p && matchesPatient(p, q))) return false
       }
@@ -187,10 +212,15 @@ export async function AdmissionsView(app, params = {}) {
     // encounter and the bed is explicit rather than implied.
     const ctx = document.getElementById('adm-context')
     if (ctx) {
-      if (linkedEncounter && linkedEncounter.patientName) {
+      // Prefer the joined registry name — the encounter snapshot can predate
+      // the patient_name field and come back empty.
+      const encName = linkedEncounter
+        ? (linkedEncounter.patientName || patientIndex.get(linkedEncounter.patientId)?.name || '')
+        : ''
+      if (encName) {
         ctx.innerHTML = '<div class="card" style="margin-bottom:14px"><div class="card-head"><h3>Admitting from encounter</h3>' +
           '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(linkedEncounter.id) + '">Back to encounter →</a></div>' +
-          '<p class="sub"><strong>' + esc(linkedEncounter.patientName) + '</strong> · encounter ' +
+          '<p class="sub"><strong>' + esc(encName) + '</strong> · encounter ' +
           esc(String(linkedEncounter.id).slice(0, 8)) + '… · ' + esc(linkedEncounter.status || 'open') +
           '. The new admission is linked to this encounter; the encounter stays open for documentation.</p></div>'
       } else if (linkedEncounterId) {
@@ -221,8 +251,8 @@ export async function AdmissionsView(app, params = {}) {
     const rows = visibleAdmissions().map((a) => {
       const when = a.admissionDate || a.createdAt
       const patientCell = a.patientId
-        ? '<a href="#/patients/' + encodeURIComponent(a.patientId) + '"><strong>' + esc(a.patientName) + '</strong></a>'
-        : '<strong>' + esc(a.patientName || 'Unknown patient') + '</strong>'
+        ? '<a href="#/patients/' + encodeURIComponent(a.patientId) + '"><strong>' + esc(admissionName(a)) + '</strong></a>'
+        : '<strong>' + esc(admissionName(a)) + '</strong>'
       const encCell = a.encounterId
         ? '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(a.encounterId) + '">View encounter</a>'
         : '<span class="mut">—</span>'
@@ -248,6 +278,7 @@ export async function AdmissionsView(app, params = {}) {
         b.onclick = () => openDischargeForm(b.getAttribute('data-discharge'))
       })
     }
+    ensureVisibleMeta()
   }
 
   function openAdmitForm() {
@@ -256,7 +287,9 @@ export async function AdmissionsView(app, params = {}) {
     // When arriving from an encounter the patient is fixed: the bed must belong
     // to the patient in that encounter, not to whoever is picked in a dropdown.
     const fixedPatient = enc && enc.patientId
-      ? patients.find((p) => p.pid === enc.patientId) || { pid: enc.patientId, name: enc.patientName || enc.patientId }
+      ? patients.find((p) => p.pid === enc.patientId) ||
+        patientIndex.get(enc.patientId) ||
+        { pid: enc.patientId, name: enc.patientName || enc.patientId }
       : null
     // Labels carry the mobile number so the picker's filter box can find a
     // patient by phone, not just by name.
@@ -314,7 +347,7 @@ export async function AdmissionsView(app, params = {}) {
     const adm = admissions.find((a) => a.id === id)
     if (!adm) return
     formModal({
-      title: 'Discharge — ' + (adm.patientName || 'patient'),
+      title: 'Discharge — ' + admissionName(adm),
       submitLabel: 'Discharge',
       fields: [
         { name: 'reason', label: 'Discharge reason', required: true, full: true, placeholder: 'e.g. Recovered' },
@@ -465,6 +498,9 @@ export async function AdmissionsView(app, params = {}) {
   const unsubAuth = authStore.subscribe((s) => {
     if (s.activeOrg === watchedOrg) return
     watchedOrg = s.activeOrg
+    // The filler is scoped to one hospital; a switch must not keep resolving
+    // against the old org's registry.
+    fillIndex = createPatientIndexFiller(watchedOrg)
     subscribeLive()
   })
 

@@ -14,9 +14,15 @@
 //
 // Ops store { kind, args }, not raw payloads: drain() re-runs the existing
 // service function, which is already idempotent (prescribing twice for one
-// encounter merges into ONE request — see scripts/test/requests.test.mjs).
-// That is also what makes a replay safe once the LAN hub (Phase 2) starts
-// re-delivering these ops.
+// encounter merges into ONE request — see scripts/test/requests.test.mjs),
+// AND every row carries a stable sync key that is recorded on the written
+// doc, so a replay can never double quantities even across transports.
+//
+// Two transports, one queue (Phase 2): drain() tries the cloud first; when
+// the internet is gone (or dies mid-batch) the same rows are POSTed to the
+// hospital LAN hub instead — a small on-premise service that stores them
+// durably and relays to Firestore when connectivity returns. The hub is
+// optional: without a configured URL nothing changes.
 //
 // Handlers are loaded with dynamic import() so consultationService.js can
 // import this module without an import cycle.
@@ -27,10 +33,12 @@ const DRAIN_INTERVAL_MS = 30000
 const BATCH_LIMIT = 50
 
 const HANDLERS = {
-  // consultation -> pharmacy: append lines to the open script / open a new one
-  rx_mirror: async (args) => {
+  // consultation -> pharmacy: append lines to the open script / open a new one.
+  // syncKey is the row's stable id — stamped on the request doc so replays
+  // (cloud retry, hub relay, or both racing) apply exactly once.
+  rx_mirror: async (args, syncKey) => {
     const { requestMedicationLines } = await import('./pharmacyService.js')
-    return requestMedicationLines(args)
+    return requestMedicationLines({ ...args, syncKey })
   },
   // consultation -> encounter snapshot: the lab doc is primary, this is the
   // clinician-facing copy that could not be written at order time
@@ -41,6 +49,115 @@ const HANDLERS = {
 }
 
 export const OUTBOX_KINDS = Object.keys(HANDLERS)
+
+// ---- hospital hub (Phase 2/3) -------------------------------------------------
+// Endpoint + secret, resolved at call time. Three sources, in order:
+//   1. localStorage override (testing: set 'medilogng.hubUrl' from the console)
+//   2. build-time VITE_HUB_URL / VITE_HUB_TOKEN
+//   3. AUTO-DETECT: when the app itself is being served from a host PC
+//      (http://<host-ip>:8787), handoffs post back to the SAME address —
+//      no configuration exists on ward PCs at all, and the hub injects the
+//      sync token into the HTML it serves (see hub/server.js).
+
+let sameOriginHub = null // null = not probed yet
+
+async function detectSameOriginHub() {
+  if (sameOriginHub !== null) return sameOriginHub
+  if (typeof window === 'undefined' || !window.location
+      || (window.location.protocol !== 'http:' && window.location.protocol !== 'https:')) {
+    sameOriginHub = false
+    return false
+  }
+  try {
+    const res = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(2500) })
+    if (!res.ok) { sameOriginHub = false; return false }
+    const h = await res.json()
+    sameOriginHub = !!(h && h.ok && String(h.version || '').startsWith('hub-'))
+  } catch {
+    sameOriginHub = false // any non-hub server (Vite dev, hosting SPA fallback) lands here
+  }
+  return sameOriginHub
+}
+
+async function hubConfig() {
+  let url = ''
+  let token = ''
+  try {
+    url = localStorage.getItem('medilogng.hubUrl') || ''
+    token = localStorage.getItem('medilogng.hubToken') || ''
+  } catch { /* storage disabled */ }
+  if (!url && import.meta.env?.VITE_HUB_URL) url = String(import.meta.env.VITE_HUB_URL)
+  if (!token && import.meta.env?.VITE_HUB_TOKEN) token = String(import.meta.env.VITE_HUB_TOKEN)
+  if (!token && typeof window !== 'undefined' && window.__MEDILOG_HUB_TOKEN__) {
+    token = String(window.__MEDILOG_HUB_TOKEN__) // injected by the serving hub
+  }
+  if (!url && await detectSameOriginHub()) url = window.location.origin
+  return { url: url.replace(/\/+$/, ''), token }
+}
+
+// What most recently delivered an op — the shell badge shows the difference
+// between "synced to cloud" and "sent via hospital hub".
+let lastMode = ''
+let lastModeAt = 0
+
+export function getSyncMode() {
+  return { mode: lastMode, at: lastModeAt }
+}
+
+// Stable identity for one row, shared by BOTH transports: the cloud path
+// stamps it as medication_requests.sync_keys, the hub path sends it as
+// clientOpKey. A row that somehow goes out twice applies exactly once.
+function opKeyFor(row) {
+  return 'v1:' + row.kind + ':' + row.key
+}
+
+const HUB_TIMEOUT_MS = 6000
+
+// POST claimed rows to the LAN hub. Claim already removed them from
+// IndexedDB, so: 2xx -> done (hub owns them now); anything else -> requeue.
+async function pushToHub(rows) {
+  const { url, token } = await hubConfig()
+  if (!url || !rows.length) return false
+  let orgId = ''
+  let actor = null
+  try {
+    const { authStore } = await import('../store/authStore.js')
+    const st = authStore.getState()
+    orgId = st.activeOrg || ''
+    actor = st.user ? { uid: st.user.uid || null, email: st.user.email || '' } : null
+  } catch { /* no auth context — the hub will reject a missing orgId */ }
+  const ops = rows.map((r) => ({
+    clientOpKey: opKeyFor(r),
+    kind: r.kind,
+    args: r.args,
+    orgId,
+    actor,
+    createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : '',
+  }))
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), HUB_TIMEOUT_MS)
+  try {
+    const res = await fetch(url + '/outbox', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-hub-token': token },
+      body: JSON.stringify({ ops }),
+      signal: ctrl.signal,
+    })
+    if (!res.ok) {
+      console.warn('[handoff] hospital hub rejected batch:', res.status)
+      return false
+    }
+    lastMode = 'hub'
+    lastModeAt = Date.now()
+    console.info('[handoff] delivered via hospital hub:', rows.length)
+    return true
+  } catch (e) {
+    console.warn('[handoff] hospital hub unreachable:', e?.message || e)
+    return false
+  } finally {
+    clearTimeout(t)
+  }
+}
 
 // Offline problems retry forever; rule/validation problems never fix
 // themselves, so they surface as 'error' immediately instead of burning
@@ -129,7 +246,10 @@ export async function enqueue(kind, args) {
   })
   console.info('[handoff] queued', kind)
   notify()
-  if (typeof navigator === 'undefined' || navigator.onLine !== false) drain().catch(() => {})
+  // Drain even when the browser says offline: drain() itself picks the
+  // transport (hub if configured, cloud otherwise) and costs nothing when
+  // neither is reachable.
+  drain().catch(() => {})
   return true
 }
 
@@ -226,11 +346,18 @@ export async function pendingCount() {
 
 let running = false
 
+// Transport order: cloud first (fastest path when the internet works), hub
+// as the fallback — used when the browser is offline at drain start, or when
+// the cloud dies mid-batch. Once the cloud fails once in a pass, everything
+// left in this drain goes to the hub rather than timing out row by row.
+// Rows the cloud already delivered are never re-sent; rows that fail with an
+// unknown ack state may go out on both transports, which sync_keys makes a
+// no-op.
 export async function drain() {
   if (running) return 0
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0
   running = true
   let delivered = 0
+  let preferHub = false // set once the cloud has failed this drain
   try {
     await resendSending()
     for (let pass = 0; pass < 10; pass++) {
@@ -238,30 +365,59 @@ export async function drain() {
       if (!batch.length) break
       const take = batch.slice(0, BATCH_LIMIT)
       const back = batch.slice(BATCH_LIMIT)
-      let stopPass = false
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+
+      if (offline || preferHub) {
+        // Tail first: it was claimed out of IndexedDB, so it must go back
+        // before anything else can re-claim it (crash-safety).
+        for (const r of back) await putRow({ ...r, status: 'queued' })
+        if (await pushToHub(take)) {
+          delivered += take.length
+          continue // next pass picks up the re-queued tail
+        }
+        for (const r of take) await putRow({ ...r, status: 'queued' })
+        break // no transport is answering — stop hammering
+      }
+
+      let stopCloud = false
+      const forHub = []
 
       for (const row of take) {
+        if (stopCloud) { forHub.push(row); continue }
         const handler = HANDLERS[row.kind]
-        if (!handler) {
-          await deleteRows([row.key]) // unknown kind — never retryable
-          continue
-        }
+        if (!handler) continue // claimed + dropped: unknown kind is never retryable
         try {
-          await handler(row.args)
-          await deleteRows([row.key])
+          await handler(row.args, opKeyFor(row))
+          await deleteRows([row.key]) // no-op when the claim already removed it
           delivered += 1
+          lastMode = 'cloud'
+          lastModeAt = Date.now()
           console.info('[handoff] delivered', row.kind, '#' + row.key)
         } catch (e) {
           const next = nextStateAfterFailure(e)
-          await putRow({ ...row, status: next, attempts: (row.attempts || 0) + 1, lastError: String(e?.message || e) })
-          console.warn('[handoff] ' + (next === 'error' ? 'failed' : 'will retry'), row.kind, e?.message || e)
-          if (next === 'queued') stopPass = true // network is gone — stop hammering
+          if (next === 'queued') {
+            stopCloud = true
+            preferHub = true
+            forHub.push(row)
+          } else {
+            await putRow({ ...row, status: 'error', attempts: (row.attempts || 0) + 1, lastError: String(e?.message || e) })
+            console.warn('[handoff] failed', row.kind, e?.message || e)
+          }
         }
+      }
+
+      // Cloud stopped mid-batch: everything undelivered tries the hospital
+      // hub before it goes back to waiting.
+      let hubOk = true
+      if (forHub.length) {
+        hubOk = await pushToHub(forHub)
+        if (hubOk) delivered += forHub.length
+        else for (const r of forHub) await putRow({ ...r, status: 'queued' })
       }
 
       // Put the un-tried tail back before deciding whether to continue.
       for (const r of back) await putRow({ ...r, status: 'queued' })
-      if (stopPass || back.length) break
+      if (!hubOk || forHub.length || back.length) break
     }
   } finally {
     running = false
