@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 register('./fake-firebase-loader.mjs', import.meta.url)
 
 const { authStore } = await import('../../src/store/authStore.js')
-const { resetFake, __fake } = await import('./fake-firebase.js')
+const { resetFake, __fake, auth } = await import('./fake-firebase.js')
 const { ROLE_CAPS } = await import('../../src/features/admin/roles.js')
 
 // Signs in as a member with the given role, and selects an org.
@@ -20,8 +20,13 @@ const { ROLE_CAPS } = await import('../../src/features/admin/roles.js')
 // resolved at creation time, so a test membership that omits it would fail
 // every capability gate and prove nothing.
 export async function signIn(role = 'pharmacist', orgId = 'org_1') {
+  const user = { uid: 'u1', email: 'user@hospital.ng', displayName: 'Test User' }
+  // logAudit() reads auth.currentUser off the Firebase module directly; the
+  // fake must mirror it or every audit assertion would silently pass on an
+  // empty trail.
+  auth.currentUser = user
   authStore.setState({
-    user: { uid: 'u1', email: 'user@hospital.ng', displayName: 'Test User' },
+    user,
     memberships: [{
       organization_id: orgId,
       user_id: 'u1',

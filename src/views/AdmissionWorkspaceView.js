@@ -9,7 +9,7 @@ import {
   buildSessionTimelineFn, nextRoundFn, myAdmissionSessionCaps,
 } from '../services/admissionSessionService.js'
 import {
-  listSessionLabs, createLabOrder, updateLabStatus, myLabCaps, LAB_TEST_OPTIONS, normalizeTests, formatTestResult,
+  listSessionLabs, updateLabStatus, myLabCaps, normalizeTests, formatTestResult,
 } from '../services/laboratoryService.js'
 import {
   listSessionImaging, createImagingOrder, updateImagingOrderStatus, myImagingCaps,
@@ -32,8 +32,6 @@ import { mountResultImages } from '../components/resultImages.js'
 import { enqueue } from '../services/clinicalOutbox.js'
 import { printDocument } from '../lib/print.js'
 import { labRequestHtml, labResultHtml, imagingRequestHtml, imagingResultHtml } from '../lib/labPrintTemplates.js'
-
-const LAB_PANELS = LAB_TEST_OPTIONS
 
 export async function AdmissionWorkspaceView(app, params = {}) {
   const { activeOrg } = authStore.getState()
@@ -496,40 +494,10 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   //  CRUD: Lab orders
   // ---------------------------------------------------------------
   function openAddLabForm() {
-    formModal({
-      title: 'Order lab test',
-      submitLabel: 'Place order',
-      fields: [
-        { name: 'tests', label: 'Tests (select one or more)', type: 'checks', options: LAB_PANELS, full: true },
-        { name: 'extra_tests', label: 'Other tests (comma separated)', full: true, placeholder: 'e.g. Ferritin, Vitamin D' },
-        {
-          name: 'facility', label: 'Lab facility', type: 'select',
-          options: [
-            { value: 'internal', label: 'Internal (in-house laboratory)' },
-            { value: 'external', label: 'External (print order for the patient)' },
-          ],
-        },
-        { name: 'priority', label: 'Priority', type: 'select', options: ['Routine', 'Urgent', 'STAT'] },
-      ],
-      onSubmit: async (v) => {
-        const extra = String(v.extra_tests || '').split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
-        const tests = [...(Array.isArray(v.tests) ? v.tests : []), ...extra]
-        if (!tests.length) throw new Error('Select at least one test.')
-        try {
-          await createLabOrder({
-            patient_id: admission.patientId,
-            patient_name: admission.patientName,
-            admission_session_id: sid,
-            tests,
-            facility: v.facility,
-            priority: v.priority || 'Routine',
-          })
-        } catch (e) { throw new Error(friendlyWriteError(e)) }
-        closeModal()
-        toast(v.facility === 'external' ? 'External lab order placed — print the request for the patient' : 'Lab order placed')
-        reload()
-      },
-    })
+    // Order entry moved to the full-page LIMS form, which also attaches the
+    // order to this ward session once placed.
+    window.location.hash = '#/laboratory/new?patient=' + encodeURIComponent(admission.patientId) +
+      '&session=' + encodeURIComponent(sid)
   }
 
   async function updateLab(labId, status) {

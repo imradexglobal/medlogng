@@ -319,6 +319,20 @@
       ]
     },
     {
+      "collectionGroup": "lab_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "organization_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "ordered_at",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "admissions",
       "queryScope": "COLLECTION",
       "fields": [

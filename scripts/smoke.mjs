@@ -581,8 +581,8 @@ import {
 const patients = TABLE_BY_TABLE.patients
 const orgPats = TABLE_BY_TABLE.organization_patients
 
-assert.equal(IMPORT_ORDER_TABLES.length, 19, 'registry covers clinical + operational + org config')
-assert.equal(Object.keys(TABLE_BY_TABLE).length, 19, 'every table is indexable by name')
+assert.equal(IMPORT_ORDER_TABLES.length, 21, 'registry covers clinical + operational + org config')
+assert.equal(Object.keys(TABLE_BY_TABLE).length, 21, 'every table is indexable by name')
 assert.equal(TABLE_BY_COLLECTION.encounters.collection, 'encounters', 'collection index round-trips')
 assert.ok(orgPats.orgKeyed, 'organization_patients is org-keyed')
 assert.ok(orgPats.derived, 'organization_patients is derived from patients')

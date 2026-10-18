@@ -163,3 +163,157 @@ export function imagingResultHtml(o) {
       '<h4 class="p-h4">Findings / report</h4><p>' + esc(report) + '</p>',
   })
 }
+
+// ---- structured multi-test LIMS report (A4) ---------------------------------
+// Renders every ordered test from its FROZEN configuration snapshot: one
+// analyte table per test with result / unit / reference range / L-H flag, a
+// specimen + accession block, and the laboratory's configured signatory.
+// `labSettings` and `patient` are optional; nothing clinical is invented —
+// empty reference cells stay empty.
+
+function flagCell(flag) {
+  if (flag === 'L') return '<td class="p-flag">L</td>'
+  if (flag === 'H') return '<td class="p-flag">H</td>'
+  return '<td class="p-flag"></td>'
+}
+
+function refText(comp, ref) {
+  if (!comp) return ''
+  const r = ref || {}
+  if (r.text) return String(r.text)
+  if (r.low != null && r.high != null) return r.low + ' – ' + r.high
+  if (r.low != null) return '≥ ' + r.low
+  if (r.high != null) return '≤ ' + r.high
+  if (comp.ref_text) return String(comp.ref_text)
+  return ''
+}
+
+function itemResultTable(item) {
+  const snap = item.snapshot
+  const comps = (snap && snap.components) || []
+  const values = (item.result && item.result.values) || {}
+  // Legacy / free-text results have no component grid — one Results line.
+  if (!comps.length || item.result?.legacy_text) {
+    const text = item.result?.legacy_text || ''
+    return '<p class="p-res">' + esc(text || '—') + '</p>'
+  }
+  return '<table class="p-tbl p-res-tbl">' +
+    '<tr><th>Investigation</th><th>Result</th><th>Unit</th><th>Reference</th><th></th></tr>' +
+    comps.map((c) => {
+      const v = values[c.id] || {}
+      const val = v.value == null || v.value === '' ? '—' : String(v.value)
+      const remark = v.remark ? '<div class="p-remark">' + esc(v.remark) + '</div>' : ''
+      const ref = refText(c, v.ref)
+      return '<tr>' +
+        '<td>' + esc(c.display_name || c.name) + remark + '</td>' +
+        '<td><strong>' + esc(val) + '</strong></td>' +
+        '<td>' + esc(c.unit || '') + '</td>' +
+        '<td>' + esc(ref) + '</td>' +
+        flagCell(v.flag || '') +
+        '</tr>'
+    }).join('') + '</table>'
+}
+
+function statusLabelFor(status) {
+  const map = {
+    ordered: 'not yet collected', sample_collected: 'awaiting receipt', received: 'processing',
+    result_entered: 'awaiting validation', validated: 'validated', rejected: 'rejected', cancelled: 'cancelled',
+  }
+  return map[status] || status || 'pending'
+}
+
+function itemBlock(item) {
+  const snap = item.snapshot || {}
+  const status = item.status || ''
+  const released = status === 'released'
+  const header = '<div class="p-item-head">' +
+    '<strong>' + esc(snap.name || item.test_name || 'Test') + '</strong>' +
+    (snap.code ? ' <span class="p-code">' + esc(snap.code) + '</span>' : '') +
+    (item.accession_no ? '<span class="p-acc">Accession ' + esc(item.accession_no) + '</span>' : '') +
+    (snap.specimen_type ? '<span class="p-spec">Specimen: ' + esc(snap.specimen_type) + '</span>' : '') +
+    '</div>'
+  if (!released) {
+    return header + '<p class="p-pending">Result ' + esc(statusLabelFor(status)) + ' — not released.</p>'
+  }
+  return header + itemResultTable(item)
+}
+
+export function labReportHtml(order, opts = {}) {
+  if (!order) return ''
+  const lab = opts.labSettings || {}
+  const report = lab.report || {}
+  const patient = opts.patient || {}
+  const items = Array.isArray(order.items) ? order.items : []
+  const released = items.filter((it) => it.status === 'released')
+
+  const meta = [
+    ['Patient', order.patientName || patient.name || '—'],
+    ['MRN', patient.mrn || ''],
+    ['Order no.', order.orderNo || String(order.id || '').slice(0, 8).toUpperCase()],
+    ['Accession(s)', items.map((it) => it.accession_no).filter(Boolean).join(', ')],
+    ['Priority', order.priority || 'Routine'],
+    ['Ordered by', order.orderedByName],
+    ['Ordered', fmtDate(order.orderedAt)],
+    (released.length && order.verifiedAt) ? ['Released', fmtDate(order.verifiedAt)] : null,
+  ]
+
+  // Every ordered test appears; unreleased ones are explicitly marked pending
+  // so a partial print can never be mistaken for a complete report.
+  const bodyHtml = items.map((it) => itemBlock(it)).join('')
+
+  const signName = report.signatory_name || order.verifiedByName || order.verifiedBy || ''
+  const signTitle = report.signatory_title || 'Verified by'
+  const signatures = '<div class="p-sign">' +
+    '<div><div class="p-line"></div><div class="p-cap">Requested by: ' + esc(order.orderedByName || '') + '</div></div>' +
+    '<div><div class="p-line"></div><div class="p-cap">' + esc(signTitle) + ': ' + esc(signName) + '</div></div>' +
+    '</div>'
+
+  return shell({
+    hospitalName: report.lab_name || opts.hospitalName || 'Hospital',
+    docTitle: 'Laboratory report',
+    subtitle: [report.address, report.contact].filter(Boolean).join(' · '),
+    metaRows: meta.filter(Boolean),
+    bodyHtml: bodyHtml || '<p>No results on this order.</p>',
+    signatures,
+  }) + (report.footer ? '<div class="p-note">' + esc(report.footer) + '</div>' : '')
+}
+
+// Structured request slip for the new order flow: lists each test with its
+// frozen code + specimen so the bench knows what to collect.
+export function labRequestStructuredHtml(order, opts = {}) {
+  if (!order) return ''
+  const lab = opts.labSettings || {}
+  const report = lab.report || {}
+  const patient = opts.patient || {}
+  const items = Array.isArray(order.items) ? order.items : []
+  const meta = [
+    ['Patient', order.patientName || patient.name || '—'],
+    ['MRN', patient.mrn || ''],
+    ['Order no.', order.orderNo || String(order.id || '').slice(0, 8).toUpperCase()],
+    ['Priority', order.priority || 'Routine'],
+    ['Ordered by', order.orderedByName],
+    ['Date', fmtDate(order.orderedAt)],
+    order.facility === 'external' ? ['Facility', 'External facility'] : null,
+  ]
+  const bodyHtml =
+    '<table class="p-tbl">' +
+    '<tr><th>Accession</th><th>Test</th><th>Code</th><th>Specimen</th></tr>' +
+    items.map((it) => '<tr>' +
+      '<td>' + esc(it.accession_no || '—') + '</td>' +
+      '<td>' + esc(it.test_name || '—') + '</td>' +
+      '<td>' + esc(it.test_code || '') + '</td>' +
+      '<td>' + esc(it.specimen_type || (it.snapshot && it.snapshot.specimen_type) || '—') + '</td>' +
+      '</tr>').join('') +
+    '</table>' +
+    (order.facility === 'external' ? '<p class="p-note">' + esc(EXTERNAL_NOTE) + '</p>' : '') +
+    (order.note ? '<h4 class="p-h4">Clinical note</h4><p>' + esc(order.note) + '</p>' : '')
+
+  return shell({
+    hospitalName: report.lab_name || opts.hospitalName || 'Hospital',
+    docTitle: 'Laboratory request',
+    subtitle: 'Request & specimen collection slip',
+    metaRows: meta.filter(Boolean),
+    bodyHtml,
+    signatures: signatures('Requesting clinician'),
+  })
+}

@@ -104,7 +104,8 @@ export async function updateDoc(ref, data) {
 }
 
 export async function addDoc(ref, data) {
-  const p = key(ref.__path)
+  // Real addDoc takes a COLLECTION reference and generates the id itself.
+  const p = ref && ref.__collection ? ref.__collection + '/' + genId() : key(ref.__path)
   __fake.docs.set(p, { ...data })
   return { id: p.split('/')[1] }
 }

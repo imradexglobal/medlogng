@@ -6,6 +6,7 @@ import { esc } from '../utils/sanitize.js'
 import { ORG } from '../data/mockData.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { onUpdate, getSyncMode } from '../services/clinicalOutbox.js'
+import { createAllergyTagInput } from './AllergyTagInput.js'
 
 export const NAV = [
   { path: '/', label: 'Dashboard', icon: '▦' },
@@ -275,12 +276,16 @@ export function toast(msg) {
 // does not stay hidden). `lastFocus` restores focus to whatever opened it.
 let lastFocus = null
 
-export function openModal(title, html) {
+export function openModal(title, html, opts = {}) {
   ensureOverlays()
   const modal = document.getElementById('modal')
   const body = document.getElementById('modalBody')
+  const card = modal.querySelector('.modal-card')
   lastFocus = document.activeElement
   document.getElementById('modalTitle').textContent = title
+  // `wide` gives dense clinical summaries (the full A-Z of an encounter) the
+  // room to stay readable without the caller patching styles after the fact.
+  if (card) card.style.maxWidth = opts.wide ? '780px' : ''
   body.innerHTML = html
   modal.hidden = false
   document.body.classList.add('modal-open')
@@ -339,6 +344,11 @@ export function demoFormModal(title, fieldsHtml, saveLabel = 'Save (UI preview)'
 //   preview: function(values) => string   — read-only field, auto-computed
 //            from other field values on every input event.
 //   options / searchable / list / listOptions — as before.
+//   tags: searchable multi-select pill input (the patient-allergy UX).
+//            `options` seeds the suggestion list, `value` the initial pills,
+//            and the collected value is the tags joined with ', '. Free text
+//            is still allowed — anything typed and confirmed with Enter is
+//            kept even when it is not on the suggestion list.
 //   hint: true — reserve an inline hint line right under the input
 //            (element: #fmFields [data-hint="name"]); views fill it with
 //            live validation info close to the box.
@@ -377,6 +387,13 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
             (checked ? ' checked' : '') + '> <span>' + esc(opt.label) + '</span></label>'
         }).join('') +
         '</div>'
+    } else if (f.type === 'tags') {
+      // Searchable multi-select pill input — same UX as the patient-allergy
+      // field: type to filter the common list, Enter or click adds a pill,
+      // free text still allowed for anything not on the list. Mounted after
+      // openModal() (see below); wrapped in a <div> rather than a <label> so
+      // clicks on suggestion rows are not forwarded to the text input.
+      inner = '<div class="allergy-tag-container fm-tags" data-tags-field="' + esc(f.name) + '"></div>'
     } else if (f.preview !== undefined) {
       // Read-only preview field: value is computed from other fields via
       // f.preview(values). The .ro class gives it a tinted, monospace,
@@ -389,9 +406,17 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
         ' placeholder="' + esc(f.placeholder || '') + '" value="' + esc(f.value ?? '') + '" />' +
         (f.list && f.listOptions ? '<datalist id="' + esc(f.list) + '">' + f.listOptions.map((o) => '<option value="' + esc(typeof o === 'string' ? o : o.value) + '">').join('') + '</datalist>' : '')
     }
-    return '<label class="fld' + (f.full ? ' full' : '') + '"><span>' + esc(f.label) + (f.required ? ' *' : '') + '</span>' + inner +
-      (f.hint ? '<small class="fldhint" data-hint="' + esc(f.name) + '" hidden></small>' : '') + '</label>'
+    const wrap = f.type === 'tags' ? 'div' : 'label'
+    return '<' + wrap + ' class="fld' + (f.full ? ' full' : '') + '"><span>' + esc(f.label) + (f.required ? ' *' : '') + '</span>' + inner +
+      (f.hint ? '<small class="fldhint" data-hint="' + esc(f.name) + '" hidden></small>' : '') + '</' + wrap + '>'
   }).join('')
+
+  // Live instances of the pill inputs, keyed by field name. `collectValues`
+  // reads the tags from here rather than from the DOM, because the visible
+  // text box only holds whatever is half-typed — the actual list lives in
+  // the component. Declared before openModal() so the mount loop below can
+  // populate it synchronously.
+  const tagInputs = {}
 
   openModal(title,
     // `body` is the escape hatch for a confirm-style modal that shows a summary
@@ -403,12 +428,30 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
     '<div class="mrow"><button class="btn ghost" data-close>Cancel</button>' +
     '<button class="btn" id="fmSave">' + esc(submitLabel) + '</button></div>')
 
+  // Mount the pill inputs into their placeholder containers. The markup alone
+  // cannot carry them — the suggestion box, keyboard handling and hidden JSON
+  // state are all wired by createAllergyTagInput (the same component the
+  // patient-allergy field uses, so both inputs behave identically).
+  document.querySelectorAll('#fmFields [data-tags-field]').forEach((c) => {
+    const name = c.getAttribute('data-tags-field')
+    const f = fields.find((x) => x.name === name) || {}
+    tagInputs[name] = createAllergyTagInput(c, {
+      value: Array.isArray(f.value) ? f.value : [],
+      suggestions: Array.isArray(f.options) ? f.options : [],
+      placeholder: f.placeholder || 'Type and press Enter to add',
+      name,
+      onChange: () => refreshPreviews(),
+    })
+  })
+
   // Collect every named control. Checkbox groups collapse to an array of the
-  // ticked values; everything else is a trimmed string. Shared by the live
-  // preview pass and the final submit so both agree on the shape.
+  // ticked values; pill inputs collapse to their tags joined with ', ';
+  // everything else is a trimmed string. Shared by the live preview pass and
+  // the final submit so both agree on the shape.
   function collectValues() {
     const values = {}
     document.querySelectorAll('#fmFields [name]').forEach((el) => {
+      if (el.closest('.fm-tags')) return
       if (el.type === 'checkbox') {
         if (!Array.isArray(values[el.name])) values[el.name] = []
         if (el.checked) values[el.name].push(String(el.value || '').trim())
@@ -416,6 +459,9 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
         values[el.name] = String(el.value || '').trim()
       }
     })
+    for (const name of Object.keys(tagInputs)) {
+      values[name] = tagInputs[name].getValue().join(', ')
+    }
     return values
   }
 

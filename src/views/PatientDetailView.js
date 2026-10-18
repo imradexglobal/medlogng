@@ -20,10 +20,36 @@ import * as R from '../features/pharmacy/requests.js'
 import { printDocument } from '../lib/print.js'
 import { prescriptionHtml } from '../lib/prescriptionPrint.js'
 import { enqueue } from '../services/clinicalOutbox.js'
+import { ENCOUNTER_STATUS_FLOW_META } from '../features/encounters/domain.js'
 
 const TABS = ['Dashboard', 'Personal Data', 'Blood & Allergies', 'Next of Kin', 'Timeline', 'Encounters', 'Vitals', 'Diagnoses', 'Medications', 'Labs', 'Admissions', 'Documents']
 const SEXES = [{ value: '', label: 'Not set' }, 'Female', 'Male']
 const BLOOD_GROUPS = [{ value: '', label: 'Not set' }, 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
+
+// Common presenting complaints offered in the Start-encounter Reason field.
+// Same UX as the allergy picker on patient registration: search, click or
+// Enter to add a pill, free text still allowed for anything not on the list.
+// Merged at runtime with reasons this patient's past encounters actually
+// carried, so a returning patient's usual complaints sit at the front.
+const COMMON_COMPLAINTS = [
+  'Fever', 'Headache', 'Cough', 'Cough with blood', 'Catarrh', 'Sore throat',
+  'Chest pain', 'Shortness of breath', 'Difficulty breathing', 'Palpitations',
+  'Abdominal pain', 'Stomach upset', 'Heartburn', 'Nausea', 'Vomiting',
+  'Diarrhea', 'Constipation', 'Poor appetite', 'Weight loss', 'Weight gain',
+  'Fatigue', 'Weakness', 'Dizziness', 'Fainting', 'Seizure', 'Insomnia',
+  'Back pain', 'Joint pain', 'Neck pain', 'Shoulder pain', 'Knee pain',
+  'Numbness', 'Tingling', 'Swelling of legs', 'Swelling of face', 'Swelling',
+  'Urinary frequency', 'Burning urination', 'Dark urine', 'Yellow eyes',
+  'Rash', 'Itching', 'Hives', 'Bleeding', 'Night sweats',
+  'Ear pain', 'Ear discharge', 'Eye pain', 'Red eye', 'Blurred vision',
+  'Tooth pain', 'Missed period', 'Vaginal discharge', 'Pelvic pain',
+  'Painful menstruation', 'Heavy menstruation', 'Infertility concern',
+  'Hypertension review', 'Diabetes review', 'Asthma review', 'Malaria symptoms',
+  'Typhoid symptoms', 'COVID-19 symptoms', 'Anaemia symptoms',
+  'Antenatal follow-up', 'Postnatal review', 'Family planning',
+  'Immunization', 'Medication refill', 'Lab results review',
+  'Injury', 'Road traffic accident', 'Follow-up review',
+]
 
 function ms(t) {
   return t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : 0)
@@ -610,9 +636,12 @@ function paneHtml(t) {
     const rows = res.rows
     switch (t) {
       case 'Encounters':
-        return table(['When', 'Type', 'Clinician', 'Status'], rows, (e) =>
-          '<tr><td>' + esc(when(e.created_at)) + '</td><td><strong>' + esc(s(e.encounter_type || e.type || e.reason)) + '</strong></td>' +
-          '<td>' + esc(s(e.clinician_name || e.clinician || e.created_by)) + '</td><td>' + encBadge(e.status) + '</td></tr>')
+        return table(['When', 'Type', 'Clinician', 'Status', ''], rows, (e) =>
+          '<tr class="clickable" data-enc-row="' + esc(e.id) + '" title="View everything recorded on this encounter">' +
+          '<td>' + esc(when(e.created_at)) + '</td><td><strong>' + esc(s(e.encounter_type || e.type || e.reason)) + '</strong>' +
+          (e.reason && (e.encounter_type || e.type) ? '<div class="mut">' + esc(s(e.reason)) + '</div>' : '') + '</td>' +
+          '<td>' + esc(s(e.clinician_name || e.clinician || e.created_by)) + '</td><td>' + encBadge(e.status) + '</td>' +
+          '<td class="mut">View →</td></tr>')
       case 'Vitals':
         return table(['When', 'BP', 'Pulse', 'Temp', 'SpO₂', 'By'], rows, (v) =>
           '<tr><td>' + esc(when(v.created_at)) + '</td>' +
@@ -976,6 +1005,187 @@ function paneHtml(t) {
     })
   }
 
+  // ---- view-only encounter summary (Encounters tab) -------------------------
+  // Clicking an encounter row opens EVERYTHING recorded against it —
+  // demographics, workflow stage, vitals, SOAP note, diagnoses, plan,
+  // prescriptions, labs and any admission it triggered — organised section
+  // by section and strictly read-only. Editing stays in the Consultations
+  // workspace; this is the chart-side record of the whole visit.
+  async function openEncounterDetail(e) {
+    const eid = e.id
+    const encType = s(e.encounter_type || e.type || e.reason || 'Encounter')
+    const clinician = s(e.clinician_name || e.clinician || e.created_by_name || e.created_by)
+    const vitals = e.vitals && typeof e.vitals === 'object' ? e.vitals : {}
+    const dxList = (Array.isArray(e.diagnoses) && e.diagnoses.length)
+      ? e.diagnoses
+      : (e.diagnosis ? [{ condition: e.diagnosis, added_at: e.updated_at || e.created_at }] : [])
+    const rxItems = (e.prescription && Array.isArray(e.prescription.items)) ? e.prescription.items : []
+    const labSnap = Array.isArray(e.lab_orders) ? e.lab_orders : []
+    const flowIdx = ENCOUNTER_STATUS_FLOW_META.findIndex((m) => m.key === String(e.status || '').toLowerCase())
+
+    const section = (title, inner) =>
+      '<section style="margin-top:16px">' +
+      '<h4 style="margin:0 0 8px;font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--emr-muted)">' + esc(title) + '</h4>' +
+      inner + '</section>'
+    const kvRow = (label, value) =>
+      '<div><em>' + esc(label) + '</em><strong style="font-size:.88rem">' + esc(s(value)) + '</strong></div>'
+    const pre = (text) => text
+      ? '<div class="input" style="white-space:pre-wrap">' + esc(text) + '</div>'
+      : '<p class="sub" style="margin:0">Nothing recorded.</p>'
+
+    const html =
+      section('Overview',
+        '<div class="kv" style="grid-template-columns:1fr 1fr 1fr">' +
+        kvRow('Type', encType) + kvRow('Clinician', clinician) + kvRow('Status', encLabel(e.status)) +
+        kvRow('Opened', when(e.created_at)) + kvRow('Last updated', when(e.updated_at)) +
+        kvRow('Recorded by', s(e.created_by_name || e.created_by)) +
+        '</div>' +
+        (e.reason && (e.encounter_type || e.type)
+          ? '<div style="margin-top:10px"><em style="font-style:normal;font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--emr-muted)">Reason</em>' +
+            '<div class="input" style="margin-top:4px">' + esc(s(e.reason)) + '</div></div>'
+          : '') +
+        '<p class="sub" style="margin:8px 0 0">Encounter ' + esc(String(eid)) + '</p>')
+      + section('Workflow',
+        '<div class="flow">' + ENCOUNTER_STATUS_FLOW_META.map((m, i) =>
+          '<span class="fstep' + (flowIdx > i ? ' done' : flowIdx === i ? ' now' : '') + '">' + esc(m.step) + '</span>' +
+          (i < ENCOUNTER_STATUS_FLOW_META.length - 1 ? '<span class="farrow">→</span>' : '')).join('') +
+        '</div>')
+      + section('Vitals',
+        (Object.values(vitals).some((v) => v !== '' && v != null)
+          ? '<div class="kv" style="grid-template-columns:repeat(4,1fr)">' +
+            kvRow('BP', vitals.BP) + kvRow('Pulse', vitals.Pulse) + kvRow('Temp °C', vitals.Temp) + kvRow('SpO₂', vitals.SpO2) +
+            '</div>'
+          : '<p class="sub" style="margin:0">No vitals snapshot on the encounter.</p>') +
+        '<div id="encd-vitals"><p class="sub" style="margin:8px 0 0">Loading linked vitals…</p></div>')
+      + section('Clinical note (SOAP)', pre(s(e.chief_complaint, '')))
+      + section('Diagnoses',
+        (dxList.length
+          ? dxList.map((d) =>
+            '<div class="summary-item"><div class="summary-item-main">' +
+            '<span class="summary-item-label">' + esc(s(d.condition)) + '</span>' +
+            (d.added_at ? '<span class="summary-item-detail">' + esc(when(d.added_at)) + '</span>' : '') +
+            '</div></div>').join('')
+          : '<p class="sub" style="margin:0">No diagnosis recorded on this encounter.</p>') +
+        '<div id="encd-dx"></div>')
+      + section('Treatment plan', pre(e.treatment_plan))
+      + section('Prescriptions',
+        (rxItems.length
+          ? '<div class="tblwrap"><table class="tbl">' +
+            '<tr><th>Medicine</th><th>Dosage</th><th>Qty</th><th>Instructions</th></tr>' +
+            rxItems.map((l) =>
+              '<tr><td><strong>' + esc(s(l.medicine)) + '</strong>' +
+              (l.external ? ' <span class="pill info">external</span>' : '') +
+              (l.sku ? '<div class="mut">' + esc(l.sku) + '</div>' : '') + '</td>' +
+              '<td>' + esc(s(l.dosage)) + '</td>' +
+              '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
+              '<td class="mut">' + esc(s(l.instructions)) + '</td></tr>').join('') +
+            '</table></div>'
+          : '<p class="sub" style="margin:0">No medicines snapshotted on the encounter.</p>') +
+        '<div id="encd-rx"><p class="sub" style="margin:8px 0 0">Loading pharmacy scripts…</p></div>')
+      + section('Lab orders',
+        (labSnap.length
+          ? '<div class="tblwrap"><table class="tbl">' +
+            '<tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr>' +
+            labSnap.map((o) =>
+              '<tr><td><strong>' + esc(s(o.lab_order_id || o.id)) + '</strong></td>' +
+              '<td>' + esc(s(o.test_panel || (Array.isArray(o.tests) ? o.tests.join(', ') : ''))) + '</td>' +
+              '<td>' + esc(s(o.priority, 'Routine')) + '</td>' +
+              '<td class="mut">' + esc(when(o.ordered_at)) + '</td></tr>').join('') +
+            '</table></div>'
+          : '<p class="sub" style="margin:0">No lab orders snapshotted on the encounter.</p>') +
+        '<div id="encd-labs"><p class="sub" style="margin:8px 0 0">Loading lab orders…</p></div>')
+      + section('Admissions', '<div id="encd-adm"><p class="sub" style="margin:0">Loading admissions…</p></div>')
+      + '<div class="mrow" style="margin-top:16px">' +
+        '<button class="btn ghost" data-close>Close</button>' +
+        '<a class="btn" href="#/consultations?enc=' + encodeURIComponent(eid) + '" data-close>Open in Consultations →</a>' +
+        '</div>'
+
+    openModal('Encounter · ' + encType, html, { wide: true })
+
+    // Linked patient records — every clinical collection carries encounter_id,
+    // so the same per-collection reads the tabs already use join the full
+    // picture without a new service. Fills land in the placeholders above and
+    // never touch the read-only snapshot sections; a closed modal makes the
+    // fill() lookups miss harmlessly.
+    const [vitalsRes, dxRes, medsRes, labsRes, admsRes] = await Promise.all([
+      listPatientDocs('vitals', pid).catch(() => ({ rows: [] })),
+      listPatientDocs('diagnoses', pid).catch(() => ({ rows: [] })),
+      listPatientDocs('medication_requests', pid).catch(() => ({ rows: [] })),
+      listPatientDocs('lab_orders', pid).catch(() => ({ rows: [] })),
+      listPatientDocs('admissions', pid).catch(() => ({ rows: [] })),
+    ])
+    const linked = (rows) => (rows || []).filter((r) => r.encounter_id === eid)
+    const fill = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html }
+    const none = '<p class="sub" style="margin:8px 0 0">None linked to this encounter.</p>'
+
+    const lv = linked(vitalsRes.rows)
+    fill('encd-vitals', lv.length
+      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl">' +
+        '<tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>SpO₂</th><th>By</th></tr>' +
+        lv.map((v) => '<tr><td>' + esc(when(v.created_at)) + '</td>' +
+          '<td><strong>' + esc((v.bp_systolic || '—') + '/' + (v.bp_diastolic || '—')) + '</strong></td>' +
+          '<td>' + esc(s(v.pulse)) + '</td><td>' + esc(s(v.temp_c)) + '</td><td>' + esc(s(v.spo2)) + '</td>' +
+          '<td class="mut">' + esc(s(v.created_by_name || v.created_by)) + '</td></tr>').join('') +
+        '</table></div>'
+      : none)
+
+    const ldx = linked(dxRes.rows)
+    fill('encd-dx', ldx.length
+      ? '<div style="margin-top:8px">' + ldx.map((d) =>
+        '<div class="summary-item"><div class="summary-item-main">' +
+        '<span class="summary-item-label">' + esc(s(d.condition || d.name || d.icd_code)) + '</span>' +
+        '<span class="summary-item-detail">' + esc(when(d.created_at)) + ' · ' + esc(s(d.created_by_name || d.created_by)) + '</span>' +
+        '</div><span class="pill ok">' + esc(s(d.status, 'Active')) + '</span></div>').join('') + '</div>'
+      : '')
+
+    const lrx = linked(medsRes.rows)
+    fill('encd-rx', lrx.length
+      ? lrx.map((raw) => {
+        const script = R.normalizeRequest(raw)
+        const lines = script.items.map((l) =>
+          '<tr><td><strong>' + esc(s(l.medicine)) + '</strong></td><td>' + esc(s(l.dosage)) + '</td>' +
+          '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
+          '<td>' + (R.toQty(l.dispensed_qty, 0) ? esc(R.toQty(l.dispensed_qty, 0)) : '<span class="mut">—</span>') + '</td>' +
+          '<td class="mut">' + esc(s(l.instructions)) + '</td></tr>').join('')
+        return '<div style="margin-top:10px"><div class="toolbar" style="margin-bottom:4px">' +
+          statusBadge(script.status) +
+          '<span class="mut">Script ' + esc(String(script.id).slice(0, 8)) + ' · ' + esc(when(raw.created_at)) +
+          (script.prescribedBy ? ' · ' + esc(script.prescribedBy) : '') + '</span></div>' +
+          (lines
+            ? '<div class="tblwrap"><table class="tbl">' +
+              '<tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Instructions</th></tr>' +
+              lines + '</table></div>'
+            : '<p class="sub" style="margin:0">No lines on this script.</p>') +
+          '</div>'
+      }).join('')
+      : '')
+
+    const llabs = linked(labsRes.rows)
+    fill('encd-labs', llabs.length
+      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl">' +
+        '<tr><th>Order</th><th>Test</th><th>Stage</th><th>Ordered</th></tr>' +
+        llabs.map((l) => '<tr><td><strong>' + esc(s(l.id)) + '</strong></td>' +
+          '<td>' + esc(s(l.test || l.test_panel || l.panel)) + '</td>' +
+          '<td>' + statusBadge(s(l.stage || l.status, 'Ordered')) + '</td>' +
+          '<td class="mut">' + esc(when(l.created_at)) + '</td></tr>').join('') +
+        '</table></div>'
+      : '')
+
+    const ladm = linked(admsRes.rows)
+    fill('encd-adm', ladm.length
+      ? '<div class="tblwrap"><table class="tbl">' +
+        '<tr><th>Ward · Bed</th><th>Since</th><th>Doctor</th><th>Status</th></tr>' +
+        ladm.map((raw) => {
+          const a = normalizeAdmission(raw)
+          return '<tr><td><strong>' + esc(s(a.wardName) + ' · ' + s(a.bedNumber)) + '</strong></td>' +
+            '<td>' + esc(when(a.admissionDate || a.createdAt)) + '</td>' +
+            '<td>' + esc(s(a.attendingProvider)) + '</td>' +
+            '<td>' + statusBadge(a.status === 'discharged' ? 'Discharged' : 'Admitted') + '</td></tr>'
+        }).join('') +
+        '</table></div>'
+      : none)
+  }
+
   function openEncounterBlockedModal(existing) {
     const ref = existing?.id ? String(existing.id).slice(0, 8) + '…' : ''
     const status = s(existing?.status || 'Open')
@@ -1012,35 +1222,61 @@ function paneHtml(t) {
     } catch (e) {
       console.warn('[patient] open-encounter pre-check failed:', e?.message)
     }
-    // Fetch clinical staff for dropdown
-    getClinicalStaff(activeOrg).then((staff) => {
-      const clinicianOptions = staff.length > 0 ? staff : [{ value: '', label: 'No clinical staff found — add staff in Administration' }]
-      formModal({
-        title: 'Start encounter',
-        submitLabel: 'Open encounter',
-        fields: [
-          { name: 'encounter_type', label: 'Type', type: 'select', options: ['General Outpatient Department (GOPD) review', 'Follow-up', 'Antenatal', 'Emergency', 'Consultation'] },
-          { name: 'clinician', label: 'Clinician', type: 'select', options: clinicianOptions, required: true },
-          { name: 'reason', label: 'Reason', full: true, required: true, placeholder: 'e.g. Hypertension review' },
-        ],
-        onSubmit: async (v) => {
-          await createPatientDoc('encounters', pid, {
-            encounter_type: v.encounter_type, clinician_name: v.clinician || '',
-            reason: v.reason,
-            // Canonical status, matching what the Consultations queue walks.
-            // `Open` was rejected by updateEncounterStatus's whitelist, so an
-            // encounter opened here could never be advanced or closed.
-            status: 'arrived',
-          }, 'encounter.create')
-          closeModal()
-          toast('Encounter opened and saved to Firestore')
-          loadCache.Encounters = null
-          loadCache.Timeline = null
-          await render('Encounters')
-        },
-      })
-    }).catch((e) => {
+    // Clinical staff for the dropdown, plus the reasons this patient's past
+    // encounters actually carried — a returning patient's usual complaints
+    // should be one click away, ahead of the generic common list.
+    let staff = []
+    let pastReasons = []
+    try {
+      staff = await getClinicalStaff(activeOrg)
+    } catch (e) {
       toast('Failed to load clinical staff: ' + friendlyPatientError(e))
+      return
+    }
+    try {
+      const past = await listPatientDocs('encounters', pid)
+      pastReasons = (past.rows || []).flatMap((en) =>
+        String(en.reason || en.chief_complaint || '').split(/[,;]+/))
+    } catch {
+      // The common list alone is a perfectly good fallback.
+    }
+    const reasonSuggestions = [...new Set(
+      [...pastReasons.map((r) => r.trim()).filter(Boolean), ...COMMON_COMPLAINTS],
+    )]
+    const clinicianOptions = staff.length > 0 ? staff : [{ value: '', label: 'No clinical staff found — add staff in Administration' }]
+    formModal({
+      title: 'Start encounter',
+      submitLabel: 'Open encounter',
+      fields: [
+        { name: 'encounter_type', label: 'Type', type: 'select', options: ['General Outpatient Department (GOPD) review', 'Follow-up', 'Antenatal', 'Emergency', 'Consultation'] },
+        { name: 'clinician', label: 'Clinician', type: 'select', options: clinicianOptions, required: true },
+        {
+          // Same searchable pill input as the patient-allergy field: type to
+          // filter common complaints, Enter/click adds them, free text still
+          // allowed. Saved joined with ', ' so every existing reader of
+          // `reason` (queue, chart tables, timeline) keeps working.
+          name: 'reason', label: 'Reason / chief complaint', type: 'tags', full: true, required: true,
+          options: reasonSuggestions,
+          placeholder: 'Search common complaints, or type your own — Enter adds',
+        },
+      ],
+      onSubmit: async (v) => {
+        const reason = String(v.reason || '').trim()
+        if (!reason) throw new Error('Add at least one reason for this encounter.')
+        await createPatientDoc('encounters', pid, {
+          encounter_type: v.encounter_type, clinician_name: v.clinician || '',
+          reason,
+          // Canonical status, matching what the Consultations queue walks.
+          // `Open` was rejected by updateEncounterStatus's whitelist, so an
+          // encounter opened here could never be advanced or closed.
+          status: 'arrived',
+        }, 'encounter.create')
+        closeModal()
+        toast('Encounter opened and saved to Firestore')
+        loadCache.Encounters = null
+        loadCache.Timeline = null
+        await render('Encounters')
+      },
     })
   }
 
@@ -1097,6 +1333,13 @@ function paneHtml(t) {
     // Discharge buttons rendered inside the Admissions tab rows.
     pane.querySelectorAll('[data-discharge-adm]').forEach((b) => {
       b.onclick = () => openDischarge(b.getAttribute('data-discharge-adm'))
+    })
+    // Encounter rows open the full view-only record of that visit.
+    pane.querySelectorAll('[data-enc-row]').forEach((row) => {
+      row.onclick = () => {
+        const raw = (loadCache.Encounters?.rows || []).find((x) => x.id === row.getAttribute('data-enc-row'))
+        if (raw) openEncounterDetail(raw)
+      }
     })
 
     // Dashboard-specific handlers

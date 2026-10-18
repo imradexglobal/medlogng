@@ -1,39 +1,46 @@
-// Laboratory with Firestore persistence (offline-first, cached).
-import { shell, formModal, toast, closeModal, wireToast, openModal } from '../components/shell.js'
+// Laboratory dashboard + worklist (LIMS).
+// Orders are opened on full pages (#/laboratory/orders/:id) where the
+// per-test workflow (collect → receive → result → validate → release) lives;
+// this screen is the queue: stats, stage chips, search, live updates.
+import { shell, toast, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
-  listOrgLabsPage, subscribeOrgLabs, createLabOrder, updateLabStatus, addLabResult, addLabVerification, myLabCaps,
-  LAB_TEST_OPTIONS, formatTestResult,
+  listOrgLabsPage, subscribeOrgLabs, updateLabStatus, myLabCaps,
 } from '../services/laboratoryService.js'
-import { listOrgPatientsPage, formatPhone, matchesPatient } from '../services/patientService.js'
+import { listOrgPatientsPage, matchesPatient } from '../services/patientService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
-import { mountResultImages } from '../components/resultImages.js'
-import { printDocument } from '../lib/print.js'
-import { labRequestHtml, labResultHtml } from '../lib/labPrintTemplates.js'
+import { ITEM_STATUS } from '../features/labs/domain.js'
 
-const TEST_PANELS = LAB_TEST_OPTIONS
-const PRIORITIES = ['Routine', 'Urgent', 'STAT']
-const STAGES = ['All', 'order', 'accepted', 'specimen-collected', 'processing', 'completed', 'verified', 'cancelled']
+const STAGES = [
+  { value: 'All', label: 'All' },
+  { value: 'order', label: 'Awaiting collection' },
+  { value: 'specimen-collected', label: 'In transit / lab' },
+  { value: 'processing', label: 'In lab' },
+  { value: 'completed', label: 'Awaiting validation' },
+  { value: 'verified', label: 'Released' },
+  { value: 'cancelled', label: 'Cancelled' },
+]
 
 function priorityPill(p) {
   const cls = p === 'STAT' ? 'bad' : p === 'Urgent' ? 'warn' : ''
-  return '<span class="pill ' + cls + '">' + esc(p) + '</span>'
+  return '<span class="pill ' + cls + '">' + esc(p || 'Routine') + '</span>'
 }
 
-function labStatusBadge(s) {
-  const map = {
-    order: ['Placed', 'warn'],
-    accepted: ['Accepted', 'info'],
-    'specimen-collected': ['Specimen collected', 'info'],
-    processing: ['Processing', 'info'],
-    completed: ['Completed', 'ok'],
-    verified: ['Verified', 'ok'],
-    cancelled: ['Cancelled', 'bad'],
-  }
-  const m = map[s] || [s, '']
+const ORDER_STATUS_META = {
+  order: ['Placed', 'warn'],
+  accepted: ['Accepted', 'info'],
+  'specimen-collected': ['Specimen collected', 'info'],
+  processing: ['Processing', 'info'],
+  completed: ['Completed', 'ok'],
+  verified: ['Verified / released', 'ok'],
+  cancelled: ['Cancelled', 'bad'],
+}
+
+function orderBadge(s) {
+  const m = ORDER_STATUS_META[s] || [s, '']
   return '<span class="pill ' + m[1] + '">' + esc(m[0]) + '</span>'
 }
 
@@ -55,6 +62,7 @@ export async function LaboratoryView(app) {
       subtitle: 'No hospital selected',
       body: '<div class="card"><p class="sub">Your account is not linked to a hospital yet. Ask an administrator for an invite, or register your hospital first.</p><a class="btn" href="#/admin">Open Administration →</a></div>',
     })
+    wireToast(app)
     return
   }
 
@@ -64,7 +72,6 @@ export async function LaboratoryView(app) {
   let patientLoadError = null
   let stageFilter = 'All'
   let searchQuery = ''
-  // Infinite scroll: rows accumulate and `cursor` marks the end of what we hold.
   let cursor = null
   let hasMore = false
   let loading = false
@@ -75,31 +82,33 @@ export async function LaboratoryView(app) {
   shell(app, {
     active: '/laboratory',
     title: 'Laboratory',
-    subtitle: 'Order → Accepted → Collected → Processing → Completed → Verified · entry ≠ verification',
+    subtitle: 'Order → Collect → Receive → Result → Validate → Release · each test tracks independently',
     actions:
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>' +
-      (caps.canOrder ? '<button class="btn" id="orderBtn">+ New lab order</button>' : ''),
+      (caps.canOrder ? '<a class="btn" href="#/laboratory/new">+ New lab order</a>' : ''),
     body:
-      '<div class="grid4"><div class="stat"><em>Pending</em><strong id="lab-pending">0</strong><span>orders placed</span></div>' +
-      '<div class="stat"><em>Processing</em><strong id="lab-processing">0</strong><span>analysers online</span></div>' +
-      '<div class="stat"><em>Awaiting verification</em><strong id="lab-awaiting">0</strong><span>needs scientist sign-off</span></div>' +
-      '<div class="stat"><em>Verified</em><strong id="lab-verified">0</strong><span>verified results</span></div></div>' +
-      '<div class="card"><div class="flow"><span class="fstep done">Order</span><span class="farrow">→</span><span class="fstep">Accepted</span><span class="farrow">→</span><span class="fstep">Specimen collected</span><span class="farrow">→</span><span class="fstep">Processing</span><span class="farrow">→</span><span class="fstep">Completed</span><span class="farrow">→</span><span class="fstep">Verified</span></div>' +
-      '<div class="toolbar"><div class="search" style="flex:1;max-width:340px"><input class="input" id="searchInput" placeholder="Search patient, mobile, test, or ID…" value="' + esc(searchQuery) + '"></div><div class="chips" id="stages">' + STAGES.map((s, i) => '<button class="chip' + (i === 0 ? ' on' : '') + '" data-stage="' + esc(s) + '">' + esc(s) + '</button>').join('') + '</div></div>' +
+      '<div class="grid4">' +
+      '<div class="stat"><em>Ordered</em><strong id="lab-ordered">0</strong><span>awaiting collection</span></div>' +
+      '<div class="stat"><em>In lab</em><strong id="lab-inlab">0</strong><span>collected / processing</span></div>' +
+      '<div class="stat"><em>Needs sign-off</em><strong id="lab-awaiting">0</strong><span>validation or release</span></div>' +
+      '<div class="stat"><em>Released</em><strong id="lab-released">0</strong><span>verified results</span></div></div>' +
+      '<div class="card"><div class="flow">' +
+      '<span class="fstep done">Order</span><span class="farrow">→</span>' +
+      '<span class="fstep">Collect</span><span class="farrow">→</span>' +
+      '<span class="fstep">Receive</span><span class="farrow">→</span>' +
+      '<span class="fstep">Result</span><span class="farrow">→</span>' +
+      '<span class="fstep">Validate</span><span class="farrow">→</span>' +
+      '<span class="fstep">Release</span></div>' +
+      '<div class="toolbar"><div class="search" style="flex:1;max-width:340px"><input class="input" id="searchInput" placeholder="Search patient, mobile, test, or ID…" value="' + esc(searchQuery) + '"></div>' +
+      '<div class="chips" id="stages">' + STAGES.map((s, i) => '<button class="chip' + (i === 0 ? ' on' : '') + '" data-stage="' + esc(s.value) + '">' + esc(s.label) + '</button>').join('') + '</div></div>' +
       '<div id="loadError" class="card" style="display:none;text-align:center;padding:24px"><p class="sub">Failed to load lab orders.</p><button class="btn ghost" id="retryBtn">Retry</button></div>' +
-      '<div class="tblwrap"><table class="tbl" id="lab-tbl"><tr><th>Order</th><th>Patient</th><th>Test</th><th>Stage</th><th>Priority</th><th>Date</th><th>Result</th><th></th></tr>' +
+      '<div class="tblwrap"><table class="tbl" id="lab-tbl"><tr><th>Order</th><th>Patient</th><th>Tests</th><th>Stage</th><th>Priority</th><th>Billing</th><th>Date</th><th></th></tr>' +
       '<tr><td colspan="8" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
       '</table><div class="loadmore" data-loadmore="1"></div></div></div>',
   })
-
+  wireToast(app)
   const more = createLoadMore(loadMore)
 
-  // Patients feed the order form and the search join. They are loaded on their
-  // own read, separately from the lab queue: when the two were fetched in one
-  // Promise.all a failed lab query left the patient list empty, which surfaced
-  // as the misleading "No patients registered yet" toast on the order form.
-  // Errors are kept (not swallowed) so the real cause — a missing index, an
-  // offline device or a permissions problem — can be shown to the user.
   async function loadPatients() {
     try {
       const r = await listOrgPatientsPage(activeOrg, { pageSize: 100 })
@@ -114,8 +123,6 @@ export async function LaboratoryView(app) {
     }
   }
 
-  // Append the next chunk of the lab queue. The first call has no cursor and
-  // replaces the list; later ones walk forward from the last row loaded.
   async function loadMore() {
     if (loading) return
     const first = cursor == null && labOrders.length === 0
@@ -129,8 +136,6 @@ export async function LaboratoryView(app) {
     }
     try {
       const pg = await listOrgLabsPage(activeOrg, { cursor })
-      // A row written between two chunk reads shifts the cursor stream and can
-      // repeat the boundary document.
       const seen = new Set(labOrders.map((l) => l.id))
       labOrders = first ? pg.rows : [...labOrders, ...pg.rows.filter((l) => !seen.has(l.id))]
       cursor = pg.cursor
@@ -155,7 +160,6 @@ export async function LaboratoryView(app) {
     }
   }
 
-  // A fresh read of the whole list.
   function reload() {
     labOrders = []
     cursor = null
@@ -166,24 +170,39 @@ export async function LaboratoryView(app) {
     loadMore().then(subscribeLive)
   }
 
-  // Orders written before the patient_name field (or from a source that did not
-  // snapshot it) still need a readable name, so fall back to the org registry.
   function patientName(l) {
     return l.patientName || (patientIndex.get(l.patientId) || {}).name || '—'
   }
 
   function render() {
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v) }
-    set('lab-pending', labOrders.filter((l) => l.status === 'order').length)
-    set('lab-processing', labOrders.filter((l) => l.status === 'processing').length)
-    set('lab-awaiting', labOrders.filter((l) => l.status === 'completed').length)
-    set('lab-verified', labOrders.filter((l) => l.status === 'verified').length)
+    // Item-level counts where items exist; fall back to the order rollup.
+    let awaiting = 0; let inLab = 0; let needs = 0; let released = 0
+    for (const l of labOrders) {
+      const items = (l.items && l.items.length) ? l.items : null
+      if (items) {
+        for (const it of items) {
+          if (it.status === ITEM_STATUS.ORDERED) awaiting++
+          else if (it.status === ITEM_STATUS.SAMPLE_COLLECTED || it.status === ITEM_STATUS.RECEIVED) inLab++
+          else if (it.status === ITEM_STATUS.RESULT_ENTERED || it.status === ITEM_STATUS.VALIDATED) needs++
+          else if (it.status === ITEM_STATUS.RELEASED) released++
+        }
+      } else {
+        if (l.status === 'order' || l.status === 'accepted' || l.status === 'specimen-collected') awaiting++
+        else if (l.status === 'processing') inLab++
+        else if (l.status === 'completed') needs++
+        else if (l.status === 'verified') released++
+      }
+    }
+    set('lab-ordered', awaiting)
+    set('lab-inlab', inLab)
+    set('lab-awaiting', needs)
+    set('lab-released', released)
 
     const tbl = document.getElementById('lab-tbl')
     if (!tbl) return
-    // A row loaded successfully: any earlier "failed to load" card is stale.
     if (labOrders.length) document.getElementById('loadError').style.display = 'none'
-    const head = '<tr><th>Order</th><th>Patient</th><th>Test</th><th>Stage</th><th>Priority</th><th>Date</th><th>Result</th><th></th></tr>'
+    const head = '<tr><th>Order</th><th>Patient</th><th>Tests</th><th>Stage</th><th>Priority</th><th>Billing</th><th>Date</th><th></th></tr>'
 
     const q = searchQuery.toLowerCase()
     const filtered = labOrders.filter((l) => {
@@ -191,257 +210,41 @@ export async function LaboratoryView(app) {
       if (!q) return true
       if ((l.patientName || '').toLowerCase().includes(q) ||
         (l.testPanel || '').toLowerCase().includes(q) ||
+        (l.orderNo || '').toLowerCase().includes(q) ||
         (l.id || '').toLowerCase().includes(q)) return true
-      // A lab order only stores the patient name, so the patient's own record
-      // is joined in — otherwise their mobile number could never find the order.
       const p = patientIndex.get(l.patientId)
       return !!p && matchesPatient(p, q)
     })
 
-    // Stage and search filters apply over everything loaded so far, and keep
-    // narrowing as more chunks arrive.
-    const shown = filtered
-
-    const canStep = caps.canOrder || caps.canVerify
-    const rows = shown.map((l) => {
-      let action = ''
-      if (!canStep) action = ''
-      else if (l.status === 'order') action = '<button class="btn ghost sm" data-act="accepted" data-id="' + esc(l.id) + '">Accept</button> <button class="btn ghost sm" data-act="cancel" data-id="' + esc(l.id) + '" title="Cancel order">✕</button>'
-      else if (l.status === 'accepted') action = '<button class="btn ghost sm" data-act="specimen-collected" data-id="' + esc(l.id) + '">Collect specimen</button>'
-      else if (l.status === 'specimen-collected') action = '<button class="btn ghost sm" data-act="processing" data-id="' + esc(l.id) + '">Start processing</button>'
-      else if (l.status === 'processing') action = '<button class="btn ghost sm" data-act="completed" data-id="' + esc(l.id) + '">Complete</button>'
-      else if (l.status === 'completed') action = '<button class="btn ghost sm" data-act="verify" data-id="' + esc(l.id) + '">Verify</button>'
-      const resultText = formatTestResult(l.result)
-      const resultDisplay = resultText ? '<span class="pill ok">' + esc(resultText.slice(0, 20)) + (resultText.length > 20 ? '…' : '') + '</span>' : '<span class="mut">—</span>'
-      return '<tr class="clickable" data-detail="' + esc(l.id) + '">' +
-        '<td><strong>' + esc(l.id.slice(0, 8)) + '</strong><div class="mut">' + esc(l.encounterId || '') + '</div></td>' +
+    const rows = filtered.map((l) => {
+      const billing = l.billingStatus === 'invoiced'
+        ? '<span class="pill ok">Invoiced</span>'
+        : '<span class="pill warn">Unbilled</span>'
+      const items = (l.items && l.items.length) ? l.items : []
+      const done = items.filter((it) => it.status === ITEM_STATUS.RELEASED).length
+      const testCell = items.length
+        ? esc(l.testPanel) + (done ? ' <span class="mut">(' + done + '/' + items.length + ' released)</span>' : '')
+        : esc(l.testPanel || '—')
+      return '<tr class="clickable" data-open="' + esc(l.id) + '">' +
+        '<td><strong>' + esc(l.orderNo || l.id.slice(0, 8)) + '</strong>' +
+        (l.source === 'standalone' ? '<div class="mut">standalone</div>' : '') + '</td>' +
         '<td><a href="#/patients/' + esc(l.patientId) + '"><strong>' + esc(patientName(l)) + '</strong></a></td>' +
-        '<td>' + esc(l.testPanel) + '</td>' +
-        '<td>' + labStatusBadge(l.status) + '</td>' +
-        '<td>' + priorityPill(l.priority) + '</td>' +
+        '<td>' + testCell + '</td>' +
+        '<td>' + orderBadge(l.status) + '</td>' +
+        '<td>' + priorityPill(l.priority) + (l.facility === 'external' ? ' <span class="pill info">Ext</span>' : '') + '</td>' +
+        '<td>' + billing + '</td>' +
         '<td class="mut">' + fmtDate(l.orderedAt) + '</td>' +
-        '<td>' + resultDisplay + '</td>' +
-        '<td>' + action + '</td></tr>'
+        '<td><a class="btn ghost sm" href="#/laboratory/orders/' + esc(l.id) + '">Open</a></td></tr>'
     }).join('')
 
     tbl.innerHTML = head + (rows || '<tr><td colspan="8" class="mut" style="text-align:center;padding:22px 8px">No lab orders found</td></tr>')
-
     more.mount(tbl.closest('.tblwrap'))
 
-    tbl.querySelectorAll('[data-act]').forEach((b) => {
-      b.onclick = async (e) => {
-        e.stopPropagation()
-        const id = b.getAttribute('data-id')
-        const act = b.getAttribute('data-act')
-        try {
-          if (act === 'verify') {
-            if (!caps.canVerify && !caps.canOrder) { toast(friendlyWriteError({ code: 'permission-denied' })); return }
-            openVerifyForm(id)
-            return
-          }
-          if (act === 'cancel') {
-            confirmCancel(id)
-            return
-          }
-          const labels = { accepted: 'Accept order', 'specimen-collected': 'Collect specimen', processing: 'Start processing', completed: 'Complete processing' }
-          confirmAction(id, act, labels[act] || 'Update')
-        } catch (e) { toast(friendlyWriteError(e, 'Update failed')) }
-      }
-    })
-
-    tbl.querySelectorAll('[data-detail]').forEach((row) => {
-      // The patient name is a real link inside the row, so the row click has to
-      // stand aside for it — otherwise clicking the name navigates to the
-      // patient AND opens the order detail on top of it.
+    tbl.querySelectorAll('[data-open]').forEach((row) => {
       row.onclick = (e) => {
         if (e.target.closest('a')) return
-        openDetailModal(row.getAttribute('data-detail'))
+        window.location.hash = '#/laboratory/orders/' + row.getAttribute('data-open')
       }
-    })
-  }
-
-  function confirmAction(id, act, label) {
-    openModal('Confirm action',
-      '<p>Are you sure you want to <strong>' + esc(label.toLowerCase()) + '</strong> this lab order?</p>' +
-      '<div class="mrow"><button class="btn ghost" data-close>Cancel</button>' +
-      '<button class="btn" id="confirmYes">' + esc(label) + '</button></div>')
-    document.getElementById('confirmYes').onclick = async () => {
-      closeModal()
-      toast('Updating…')
-      try {
-        await updateLabStatus(id, act)
-        toast('Lab order updated: ' + act)
-        reload()
-      } catch (e) { toast(friendlyWriteError(e, 'Update failed')) }
-    }
-  }
-
-  function confirmCancel(id) {
-    openModal('Cancel lab order',
-      '<p>Are you sure you want to <strong>cancel</strong> this lab order? This action cannot be undone.</p>' +
-      '<div class="mrow"><button class="btn ghost" data-close>Keep order</button>' +
-      '<button class="btn" id="cancelYes" style="background:var(--emr-bad)">Cancel order</button></div>')
-    document.getElementById('cancelYes').onclick = async () => {
-      closeModal()
-      try {
-        await updateLabStatus(id, 'cancelled')
-        toast('Lab order cancelled')
-        reload()
-      } catch (e) { toast(friendlyWriteError(e, 'Cancel failed')) }
-    }
-  }
-
-  function openDetailModal(id) {
-    const l = labOrders.find((x) => x.id === id)
-    if (!l) return
-    const tests = (l.tests && l.tests.length) ? l.tests : (l.testPanel ? [l.testPanel] : [])
-    const timeline = [
-      { label: 'Ordered', at: l.orderedAt, by: l.orderedByName },
-      { label: 'Accepted', at: l.acceptedAt, by: '' },
-      { label: 'Specimen collected', at: l.collectedAt, by: '' },
-      { label: 'Processing', at: l.processedAt, by: '' },
-      { label: 'Completed', at: l.completedAt, by: '' },
-      { label: 'Verified', at: l.verifiedAt, by: l.verifiedBy },
-    ].filter((t) => t.at)
-
-    const timelineHtml = timeline.map((t) =>
-      '<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #f1f5f9">' +
-      '<span class="pill ok" style="min-width:110px;text-align:center">' + esc(t.label) + '</span>' +
-      '<span><strong>' + fmtDate(t.at) + '</strong>' + (t.by ? ' <span class="mut">by ' + esc(t.by) + '</span>' : '') + '</span></div>'
-    ).join('')
-
-    const resultSection = l.result
-      ? '<div style="margin-top:12px;padding:12px;background:#f0fdfa;border-radius:10px;border:1px solid #86efac"><strong style="color:#166534">Result:</strong> <span style="font-size:1.05rem">' + esc(formatTestResult(l.result)) + '</span>' + (l.verifiedBy ? '<div class="mut" style="margin-top:4px">Verified by ' + esc(l.verifiedBy) + '</div>' : '') + '</div>'
-      : ''
-
-    openModal('Lab order ' + esc(l.id.slice(0, 8)),
-      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;font-size:.88rem">' +
-      '<div><span class="mut">Patient</span><br><strong>' + esc(patientName(l)) + '</strong></div>' +
-      '<div><span class="mut">Tests</span><br><strong>' + (tests.length ? tests.map((t) => esc(t)).join('<br>') : '—') + '</strong></div>' +
-      '<div><span class="mut">Priority</span><br>' + priorityPill(l.priority) + '</div>' +
-      '<div><span class="mut">Status</span><br>' + labStatusBadge(l.status) + '</div>' +
-      '<div><span class="mut">Facility</span><br>' + (l.facility === 'external' ? '<span class="pill info">External</span>' : '<span class="mut">In-house</span>') + '</div>' +
-      (l.encounterId ? '<div style="grid-column:1/-1"><span class="mut">Encounter</span><br><span class="mut">' + esc(l.encounterId) + '</span></div>' : '') +
-      '</div>' +
-      resultSection +
-      '<h4 style="margin:14px 0 6px">Result documents</h4>' +
-      '<p class="sub" style="margin:0 0 6px">' + (l.facility === 'external'
-        ? 'External order — attach the report the patient brings back (scan, photo or PDF).'
-        : 'Attach a scan, photo or PDF of the result.') + '</p><div id="labResultImages"></div>' +
-      '<div style="margin-top:14px">' + (timelineHtml || '<p class="mut">No timeline entries yet</p>') + '</div>' +
-      '<div class="mrow"><button class="btn ghost" id="printRequestBtn">🖨 Print request</button>' +
-      (l.result ? '<button class="btn ghost" id="printResultBtn">🖨 Print result</button>' : '') +
-      '<button class="btn ghost" data-close>Close</button></div>')
-
-    mountResultImages(document.getElementById('labResultImages'), {
-      kind: 'lab', orderId: l.id, patientId: l.patientId,
-    })
-
-    const ctx = () => ({
-      hospitalName: authStore.getState().activeOrgName,
-      patientName: patientName(l),
-      mrn: (patientIndex.get(l.patientId) || {}).mrn || '',
-      orderId: l.id,
-      tests,
-      facility: l.facility,
-      priority: l.priority,
-      orderedByName: l.orderedByName,
-      orderedAt: l.orderedAt,
-      result: l.result,
-      verifiedBy: l.verifiedBy,
-      verifiedAt: l.verifiedAt,
-    })
-    document.getElementById('printRequestBtn').onclick = () => printDocument('Lab request', labRequestHtml(ctx()))
-    const pr = document.getElementById('printResultBtn')
-    if (pr) pr.onclick = () => printDocument('Lab report', labResultHtml(ctx()))
-  }
-
-  function openVerifyForm(id) {
-    const l = labOrders.find((x) => x.id === id)
-    const tests = (l && l.tests && l.tests.length) ? l.tests : [(l && l.testPanel) || 'Result']
-    const fields = tests.map((t, i) => ({
-      name: 'res' + i, label: t, full: true, placeholder: 'e.g. 12.5 g/dL',
-    }))
-    fields.push({ name: 'reviewer', label: 'Reviewer', placeholder: 'Scientist name' })
-    formModal({
-      title: 'Verify result',
-      submitLabel: 'Verify',
-      fields,
-      onSubmit: async (v) => {
-        const result = {}
-        tests.forEach((t, i) => { result[t] = v['res' + i] || '' })
-        try {
-          await addLabResult(id, result)
-          await addLabVerification(id, v.reviewer || '', v.reviewer || '')
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
-        }
-        closeModal()
-        toast('Lab result verified')
-        reload()
-      },
-    })
-  }
-
-  async function openOrderForm() {
-    // The registry read may have failed or not finished yet. Retry once on
-    // demand before telling the user there are no patients — and if it really
-    // failed, say why instead of blaming the registry.
-    if (!patients.length) {
-      toast('Loading patients…')
-      await loadPatients()
-      render()
-    }
-    if (!patients.length) {
-      toast(patientLoadError
-        ? 'Could not load patients: ' + friendlyWriteError(patientLoadError)
-        : 'No patients registered yet — register a patient first.')
-      return
-    }
-    // The label carries the mobile number so the picker's filter box can find
-    // a patient by phone, not just by name.
-    const patientOpts = patients.map((p) => ({
-      value: p.pid,
-      label: p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key),
-    }))
-    formModal({
-      title: 'New lab order',
-      submitLabel: 'Place order →',
-      fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, searchable: patientOpts.length > 1, searchPlaceholder: 'Name, ID or mobile…' },
-        { name: 'tests', label: 'Tests (select one or more)', type: 'checks', options: TEST_PANELS, full: true },
-        { name: 'extra_tests', label: 'Other tests (comma separated)', full: true, placeholder: 'e.g. Ferritin, Vitamin D' },
-        {
-          name: 'facility', label: 'Lab facility', type: 'select',
-          options: [
-            { value: 'internal', label: 'Internal (in-house laboratory)' },
-            { value: 'external', label: 'External (print order for the patient)' },
-          ],
-        },
-        { name: 'priority', label: 'Priority', type: 'select', options: PRIORITIES },
-        { name: 'note', label: 'Clinical note', full: true, placeholder: 'Indication…' },
-      ],
-      onSubmit: async (v) => {
-        const extra = String(v.extra_tests || '').split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
-        const tests = [...(Array.isArray(v.tests) ? v.tests : []), ...extra]
-        if (!v.patient_id) throw new Error('Select a patient.')
-        if (!tests.length) throw new Error('Select at least one test.')
-        try {
-          const sel = patients.find((p) => p.pid === v.patient_id)
-          await createLabOrder({
-            patient_id: v.patient_id,
-            patient_name: sel ? sel.name : v.patient_id,
-            tests,
-            facility: v.facility,
-            priority: v.priority,
-          })
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
-        }
-        closeModal()
-        toast(v.facility === 'external' ? 'External lab order placed — print the request for the patient' : 'Lab order placed')
-        reload()
-      },
     })
   }
 
@@ -465,24 +268,15 @@ export async function LaboratoryView(app) {
 
   document.getElementById('refreshBtn').onclick = reload
   document.getElementById('retryBtn').onclick = reload
-  const orderBtn = document.getElementById('orderBtn')
-  if (orderBtn) orderBtn.onclick = openOrderForm
-  wireToast(app)
 
   function teardownListeners() {
     unsubs.forEach((u) => u())
     unsubs = []
   }
 
-  // Live updates for the lab queue. The patient join stays one-shot (registry
-  // is never live); a brand-new patient's contact details may only appear in
-  // search after reload.
   function subscribeLive() {
     teardownListeners()
     if (!watchedOrg) return
-    // The live feed only ever knows about the newest slice of the queue. Once
-    // the user has scrolled past it, leave the accumulated list alone rather
-    // than truncating it back to one chunk.
     if (cursor != null) return
     unsubs.push(
       subscribeOrgLabs(watchedOrg,
@@ -506,8 +300,6 @@ export async function LaboratoryView(app) {
     unsubAuth()
   })
 
-  // The app does not re-route on org change, so rebuild the listener when the
-  // active hospital switches.
   const unsubAuth = authStore.subscribe((s) => {
     if (s.activeOrg === watchedOrg) return
     watchedOrg = s.activeOrg

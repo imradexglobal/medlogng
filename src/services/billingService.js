@@ -210,6 +210,108 @@ export async function createInvoice(input) {
   return { id: invoiceId, ...invoice }
 }
 
+// ---- create invoice from explicit lines (LIMS integration) ------------------
+// Unlike createInvoice (fixed demo catalogue), this takes pre-priced lines:
+//   lines: [{ label, category, unit_price_kobo, qty, ref_type?, ref_id? }]
+// The legacy `items` TEXT field is still written (join of labels) so
+// BillingView and every existing reader keep working unchanged; the
+// structured `lines` array is additive.
+export async function createInvoiceFromLines(input) {
+  const { activeOrg, user } = authStore.getState()
+  if (!activeOrg) throw new Error('No hospital selected.')
+  const caps = myBillingCaps()
+  if (!caps.canInvoice) {
+    throw new Error('Your role cannot create invoices (missing "billing.invoice" capability). Ask an administrator.')
+  }
+  const pid = input.patient_id
+  if (!pid) throw new Error('Patient is required.')
+  const rawLines = Array.isArray(input.lines) ? input.lines : []
+  if (!rawLines.length) throw new Error('An invoice needs at least one line.')
+
+  const lines = []
+  let totalKobo = 0
+  for (const l of rawLines) {
+    const label = String(l.label || '').trim()
+    if (!label) throw new Error('Every invoice line needs a label.')
+    const unit = Math.round(Number(l.unit_price_kobo) || 0)
+    const qty = Math.max(1, Math.round(Number(l.qty) || 1))
+    if (unit < 0) throw new Error('Line price cannot be negative: ' + label)
+    totalKobo += unit * qty
+    lines.push({
+      label, category: String(l.category || '').trim(),
+      unit_price_kobo: unit, qty,
+      ref_type: String(l.ref_type || '').trim(), ref_id: String(l.ref_id || '').trim(),
+    })
+  }
+
+  const invoiceId = doc(collection(db, INVOICES)).id
+  const now = serverTimestamp()
+  const invoice = {
+    invoice_id: invoiceId,
+    patient_id: pid,
+    patient_name: input.patient_name || '',
+    organization_id: activeOrg,
+    payer: input.payer || 'Self-pay',
+    // Legacy TEXT summary (BillingView renders this as-is).
+    items: lines.map((l) => l.label + (l.qty > 1 ? ' ×' + l.qty : '') + ' · ₦' + (l.unit_price_kobo / 100).toLocaleString('en-NG')).join('; '),
+    lines,
+    total_kobo: totalKobo,
+    paid_kobo: 0,
+    status: 'unpaid',
+    date: input.date || new Date().toLocaleDateString('en-NG'),
+    admission_session_id: input.admission_session_id || '',
+    encounter_id: input.encounter_id || '',
+    source_type: String(input.source_type || '').trim(),
+    source_id: String(input.source_id || '').trim(),
+    created_by: user?.uid || null,
+    created_by_name: user?.email || '',
+    created_at: now,
+    updated_at: now,
+  }
+  await setDoc(doc(db, INVOICES, invoiceId), invoice)
+  try {
+    await logAudit({
+      action: 'invoice.created', organizationId: activeOrg, patientId: pid,
+      details: 'Invoice ' + invoiceId + ' · ' + lines.length + ' line(s) · ₦' + (totalKobo / 100).toLocaleString('en-NG') + (input.source_type ? ' · ' + input.source_type : ''),
+    })
+  } catch (e) {
+    console.warn('[billing] audit append failed:', e?.message)
+  }
+  return { id: invoiceId, ...invoice }
+}
+
+// Bill a lab order: one invoice line per ordered test, using each item's
+// FROZEN price snapshot (catalogue price changes never rewrite history),
+// then stamp the order with invoice_id + billing_status='invoiced'.
+export async function createInvoiceForLabOrder(labOrder, opts = {}) {
+  if (!labOrder || !labOrder.patientId) throw new Error('Lab order is required.')
+  const items = Array.isArray(labOrder.items) && labOrder.items.length
+    ? labOrder.items
+    : (labOrder.tests || []).map((name) => ({ test_name: name, price_kobo: 0, item_id: '' }))
+  const billable = items.filter((it) => it.status !== 'cancelled')
+  if (!billable.length) throw new Error('This lab order has no billable tests.')
+  const invoice = await createInvoiceFromLines({
+    patient_id: labOrder.patientId,
+    patient_name: labOrder.patientName || '',
+    admission_session_id: labOrder.admissionSessionId || '',
+    encounter_id: labOrder.encounterId || '',
+    payer: opts.payer,
+    source_type: 'lab_order',
+    source_id: labOrder.id,
+    lines: billable.map((it) => ({
+      label: it.test_name || 'Lab test',
+      category: 'Lab',
+      unit_price_kobo: Number(it.price_kobo) || 0,
+      qty: 1,
+      ref_type: 'lab_order_item',
+      ref_id: it.item_id || '',
+    })),
+  })
+  const { stampLabInvoice } = await import('./laboratoryService.js')
+  await stampLabInvoice(labOrder.id, invoice.id)
+  return invoice
+}
+
 // ---- record payment ------------------------------------------------------
 export async function recordPayment(input) {
   const { activeOrg, user } = authStore.getState()

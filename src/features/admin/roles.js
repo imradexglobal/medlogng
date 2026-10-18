@@ -10,8 +10,10 @@ export const ALL_CAPS = [
   'diagnosis.create',
   'prescription.create',
   'lab.order',
+  'lab.sample.collect',
   'lab.result.enter',
   'lab.result.verify',
+  'lab.catalogue.manage',
   'appointment.create',
   'beds.manage',
   'documents.upload',
@@ -57,6 +59,7 @@ export const ROLE_CAPS = {
   ],
   lab_scientist: [
     'lab.order',
+    'lab.sample.collect',
     'lab.result.enter',
     'lab.result.verify',
   ],

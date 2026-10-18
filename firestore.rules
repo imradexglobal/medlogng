@@ -230,9 +230,33 @@ service cloud.firestore {
     match /lab_orders/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'lab.order');
+      // One doc carries the whole LIMS workflow (collection → results →
+      // validation → release). Rules stay coarse here — any lab capability
+      // may update — while the CLIENT enforces the fine-grained gate per
+      // operation (lab.sample.collect / lab.result.enter / lab.result.verify,
+      // see laboratoryService.js) and every transition is audit-logged.
       allow update: if signedIn()
         && (hasCap(resource.data.organization_id, 'lab.order')
+          || hasCap(resource.data.organization_id, 'lab.sample.collect')
+          || hasCap(resource.data.organization_id, 'lab.result.enter')
           || hasCap(resource.data.organization_id, 'lab.result.verify'));
+      allow delete: if false;
+    }
+    // Test catalogue: org-scoped definitions. Readable by any signed-in user
+    // (order forms need it); writable only by lab.catalogue.manage.
+    match /lab_test_catalogue/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
+      allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
+        && resource.data.organization_id == request.resource.data.organization_id;
+      allow delete: if false;
+    }
+    // Laboratory settings (categories, specimen types, report header).
+    match /lab_settings/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
+      allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
+        && resource.data.organization_id == request.resource.data.organization_id;
       allow delete: if false;
     }
     match /lab_results/{id} {

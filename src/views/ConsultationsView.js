@@ -3,13 +3,13 @@ import { shell, formModal, toast, closeModal, wireToast, openModal, statusBadge 
 import { authStore } from '../store/authStore.js'
 import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
-  addLabOrder, myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META,
+  myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META,
 } from '../services/consultationService.js'
 import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
   listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, myAdmissionCaps, indexAdmissionsByEncounter, activeAdmissionForEncounter,
 } from '../services/admissionService.js'
-import { createLabOrder as createLabOrderDoc, myLabCaps, LAB_TEST_OPTIONS } from '../services/laboratoryService.js'
+import { myLabCaps } from '../services/laboratoryService.js'
 import { listOrgDrugs, findOpenRequest, listRequestsForEncounter, updateRequestItems } from '../services/pharmacyService.js'
 import { openPrescriptionModal } from '../features/pharmacy/prescriptionModal.js'
 import * as R from '../features/pharmacy/requests.js'
@@ -22,10 +22,7 @@ import { navigate } from '../router.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
-import { enqueue } from '../services/clinicalOutbox.js'
 import { esc } from '../utils/sanitize.js'
-
-const LAB_PANELS = LAB_TEST_OPTIONS
 
 // Encounter statuses are stored lowercase, so the shared statusBadge() (whose
 // keys are capitalised) rendered them as bare uncoloured pills. The label +
@@ -42,6 +39,11 @@ function encBadge(status) {
   const m = STATUS_FLOW.find((s) => s.key === status)
   if (!m) return '<span class="pill">' + esc(status || 'Unknown') + '</span>'
   return '<span class="pill ' + m.tone + '">' + esc(m.label) + '</span>'
+}
+
+function txt(v, fallback = '—') {
+  const t = String(v == null ? '' : v).trim()
+  return t || fallback
 }
 
 // Firestore timestamps arrive as Timestamps, plain numbers or null (a write
@@ -96,6 +98,10 @@ export async function ConsultationsView(app, params = {}) {
   let hasMore = false
   let loading = false
   let selectedEncounter = null
+  // Which pane of the tabbed workspace is showing. Persists across live
+  // repaints so a clinician writing a note is not thrown back to Overview
+  // every time the queue ticks.
+  let wsTab = 'overview'
   // Pharmacy catalogue, loaded lazily the first time the prescription form is
   // opened. Prescribing is offered only against in-stock lots, so the clinician
   // cannot queue a medicine the hospital is unable to issue.
@@ -123,25 +129,59 @@ export async function ConsultationsView(app, params = {}) {
     actions:
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>',
     body:
-      '<div class="grid2x"><div class="card"><div class="card-head"><h3>Encounter queue</h3><span class="pill info" id="enc-count">0 open</span></div>' +
+      // Both panels are viewport-height on desktop (.consult-grid): the queue
+      // scrolls in its own box and the workspace scrolls between its tab strip
+      // and its fixed action bar, so neither drags the whole page around.
+      '<div class="grid2x consult-grid"><div class="card"><div class="card-head"><h3>Encounter queue</h3><span class="pill info" id="enc-count">0 open</span></div>' +
       '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="qSearch" placeholder="Search patient, MRN or mobile…" style="max-width:240px">' +
       '<select class="input" id="qStatus" style="max-width:170px"><option value="open" selected>Open encounters</option><option value="closed">Closed</option><option value="all">All</option>' +
       STATUS_FLOW.map((s) => '<option value="' + s.key + '">' + esc(s.label) + '</option>').join('') + '</select></div>' +
       '<div class="tblwrap"><table class="tbl" id="enc-tbl"><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr>' +
       '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
       '</table><div class="loadmore" data-loadmore="1"></div></div></div>' +
-      '<div class="card"><div class="card-head"><h3 id="encTitle">No encounter selected</h3><span id="encStatus">—</span></div>' +
-      '<p class="sub">Select a patient from the queue to open the encounter workspace.</p>' +
+      '<div class="card enc-ws">' +
+      '<div class="enc-ws-head">' +
+      '<div class="card-head"><h3 id="encTitle">No encounter selected</h3><span id="encStatus">—</span></div>' +
+      '<p class="sub" id="encHint">Select a patient from the queue to open the encounter workspace.</p>' +
+      '</div>' +
+      // The long workspace is tabbed instead of one endless list: Overview
+      // (identity, flow, vitals), the SOAP note, the plan, prescriptions and
+      // lab orders each get their own pane as data is added.
+      // Compact labels so all five tabs share one row with no sideways scroll
+      // (title= carries the full name; .enc-tabs flex rules enforce the fit).
+      '<div class="tabs enc-tabs" id="encTabs">' +
+      '<button data-wt="overview" class="on" title="Overview">Overview</button>' +
+      '<button data-wt="note" title="Clinical note (SOAP)">SOAP note</button>' +
+      '<button data-wt="plan" title="Treatment plan">Plan <span class="pill ok" id="planDot" hidden>✓</span></button>' +
+      '<button data-wt="rx" title="Prescriptions">Rx <span class="pill info" id="rxCount" hidden>0</span></button>' +
+      '<button data-wt="labs" title="Lab orders">Labs <span class="pill info" id="labCount" hidden>0</span></button>' +
+      '</div>' +
+      // Only THIS box scrolls — the tab strip above and the action bar below
+      // stay pinned, so +Vitals / +Diagnosis / Advance are always reachable.
+      '<div class="enc-ws-body" id="encWsBody">' +
+      '<div data-wp="overview">' +
       '<div class="flow" id="enc-flow">' + STATUS_FLOW.map((s) => '<span class="fstep">' + esc(s.step) + '</span><span class="farrow">→</span>').join('').replace(/<span class="farrow">→<\/span>$/, '') + '</div>' +
       '<div id="encWho"></div>' +
       '<div id="encAdm"></div>' +
-      '<div class="kv"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div></div><br/>' +
-      '<label class="fld full"><span>Clinical note (SOAP)</span><textarea class="input" id="enc-note" rows="4" placeholder="S: … O: … A: … P: …"></textarea></label><div class="toolbar" style="margin-top:6px"><button class="btn sm" id="saveNoteB">Save note</button><span class="mut" id="noteState"></span></div><br/>' +
+      '<div class="kv"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div></div>' +
+      '<div id="encDx" style="margin-top:10px"></div>' +
+      '</div>' +
+      '<div data-wp="note" hidden>' +
+      '<label class="fld full"><span>Clinical note (SOAP)</span><textarea class="input" id="enc-note" rows="8" placeholder="S: … O: … A: … P: …"></textarea></label>' +
+      '<div class="toolbar" style="margin-top:6px"><button class="btn sm" id="saveNoteB">Save note</button><span class="mut" id="noteState"></span></div>' +
+      '</div>' +
+      '<div data-wp="plan" hidden>' +
       '<div id="planBox" hidden><div class="fld full"><span>Treatment plan</span><div class="input" id="planView" style="white-space:pre-wrap"></div></div></div>' +
-      '<div id="encRx"></div>' +
-      '<div class="toolbar"><button class="btn ghost sm" id="vitalsB">+ Vitals</button><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="planB">+ Plan</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
+      '<p class="sub" id="planEmpty">No plan saved on this encounter yet — add one with <strong>+ Plan</strong> below.</p>' +
+      '</div>' +
+      '<div data-wp="rx" hidden><div id="encRx"></div></div>' +
+      '<div data-wp="labs" hidden><div id="encLabs"></div></div>' +
+      '</div>' +
+      // Fixed action bar: never scrolls away, whatever tab is showing.
+      '<div class="toolbar enc-ws-bar"><button class="btn ghost sm" id="vitalsB">+ Vitals</button><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="planB">+ Plan</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
       (caps.canEdit ? '<button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm" id="closeEncB">Close encounter →</button>' : '') +
-      (bedCaps.canAdmit ? '<button class="btn sm" id="admitFromEncB">Admit patient</button>' : '') + '</div></div></div>',
+      (bedCaps.canAdmit ? '<button class="btn sm" id="admitFromEncB">Admit patient</button>' : '') + '</div>' +
+      '</div></div>',
   })
 
   // The queue only stores patient_name, so the readable identity (MRN, age,
@@ -332,6 +372,21 @@ export async function ConsultationsView(app, params = {}) {
     ensureVisibleMeta()
   }
 
+  // ---- workspace tabs -------------------------------------------------------
+  // One pane at a time inside #encWsBody; only that box scrolls, so the tab
+  // strip and the action bar below it stay pinned in place.
+  function showWsTab(name) {
+    wsTab = name
+    document.querySelectorAll('#encTabs button').forEach((b) =>
+      b.classList.toggle('on', b.getAttribute('data-wt') === name))
+    document.querySelectorAll('#encWsBody [data-wp]').forEach((p) => {
+      p.hidden = p.getAttribute('data-wp') !== name
+    })
+  }
+  document.querySelectorAll('#encTabs button').forEach((b) => {
+    b.onclick = () => showWsTab(b.getAttribute('data-wt'))
+  })
+
   function renderWorkspace() {
     const titleEl = document.getElementById('encTitle')
     const statusEl = document.getElementById('encStatus')
@@ -340,13 +395,20 @@ export async function ConsultationsView(app, params = {}) {
     if (!selectedEncounter) {
       if (titleEl) titleEl.textContent = 'No encounter selected'
       if (statusEl) statusEl.textContent = '—'
+      const hintEl = document.getElementById('encHint')
+      if (hintEl) hintEl.hidden = false
       if (whoEl) whoEl.innerHTML = ''
       const admEl0 = document.getElementById('encAdm')
       if (admEl0) admEl0.innerHTML = ''
       const rxE = document.getElementById('encRx')
       if (rxE) rxE.innerHTML = ''
+      const labsE0 = document.getElementById('encLabs')
+      if (labsE0) labsE0.innerHTML = ''
+      const dxE0 = document.getElementById('encDx')
+      if (dxE0) dxE0.innerHTML = ''
       rxScripts = []
       rxFor = ''
+      paintBadges()
       const admitBtn0 = document.getElementById('admitFromEncB')
       if (admitBtn0) admitBtn0.style.display = 'none'
       paintFlow(-1)
@@ -356,6 +418,8 @@ export async function ConsultationsView(app, params = {}) {
     const m = patientMeta(e)
     if (titleEl) titleEl.textContent = m.name
     if (statusEl) statusEl.innerHTML = encBadge(e.status)
+    const hintEl = document.getElementById('encHint')
+    if (hintEl) hintEl.hidden = true
     if (whoEl) {
       const demo = [m.age !== '' && m.age != null ? m.age + 'y' : '', m.sex].filter(Boolean).join(' · ') || '—'
       whoEl.innerHTML =
@@ -413,22 +477,83 @@ export async function ConsultationsView(app, params = {}) {
     const vitals = e.vitals || {}
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || '—' }
     set('v-bp', vitals.BP); set('v-pulse', vitals.Pulse); set('v-temp', vitals.Temp); set('v-spo2', vitals.SpO2)
+    // Diagnoses recorded on this encounter — the whole list when the doc has
+    // it, else the single `diagnosis` string older rows carry.
+    const dxEl = document.getElementById('encDx')
+    if (dxEl) {
+      const dxList = (Array.isArray(e.raw?.diagnoses) && e.raw.diagnoses.length)
+        ? e.raw.diagnoses
+        : (e.diagnosis ? [{ condition: e.diagnosis }] : [])
+      dxEl.innerHTML = dxList.length
+        ? '<em style="font-style:normal;font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--emr-muted)">Diagnoses</em><div style="margin-top:5px">' +
+          dxList.map((d) => '<span class="pill info" style="margin:0 6px 6px 0">' + esc(txt(d.condition)) + '</span>').join('') +
+          '</div>'
+        : ''
+    }
     if (noteEl && document.activeElement !== noteEl) noteEl.value = e.chiefComplaint || e.diagnosis || ''
     // The saved plan is data, not an editor — show it read-only when present so
     // "Plan set" is backed by something the prescriber can actually read back.
     const planBox = document.getElementById('planBox')
     const planView = document.getElementById('planView')
+    const planEmpty = document.getElementById('planEmpty')
     if (planBox && planView) {
       if (e.treatmentPlan) {
         planView.textContent = e.treatmentPlan
         planBox.hidden = false
+        if (planEmpty) planEmpty.hidden = true
       } else {
         planView.textContent = ''
         planBox.hidden = true
+        if (planEmpty) planEmpty.hidden = false
       }
     }
+    renderEncLabs()
     loadEncRx()
+    paintBadges()
     ensureVisibleMeta()
+  }
+
+  // Tab-strip counters: which panes actually hold data, at a glance, without
+  // hopping through the tabs to find out.
+  function paintBadges() {
+    const e = selectedEncounter
+    const planDot = document.getElementById('planDot')
+    if (planDot) planDot.hidden = !(e && e.treatmentPlan)
+    const labEl = document.getElementById('labCount')
+    if (labEl) {
+      const n = e && Array.isArray(e.labOrders) ? e.labOrders.length : 0
+      labEl.hidden = !n
+      labEl.textContent = n
+    }
+    const rxEl = document.getElementById('rxCount')
+    if (rxEl) {
+      const n = e ? rxScripts.length : 0
+      rxEl.hidden = !n
+      rxEl.textContent = n
+    }
+  }
+
+  // Lab orders live as a snapshot on the encounter itself (written by
+  // "+ Lab order"), so this pane reads straight off the selected row — no
+  // extra query, and it repaints with the live encounter feed.
+  function renderEncLabs() {
+    const el = document.getElementById('encLabs')
+    if (!el) return
+    const orders = (selectedEncounter && selectedEncounter.labOrders) || []
+    if (!orders.length) {
+      el.innerHTML = '<p class="sub">No lab orders on this encounter yet — place one with <strong>+ Lab order</strong> below.</p>'
+      return
+    }
+    el.innerHTML =
+      '<div class="tblwrap"><table class="tbl">' +
+      '<tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr>' +
+      orders.map((o) =>
+        '<tr><td><strong>' + esc(txt(o.lab_order_id || o.id)) + '</strong></td>' +
+        '<td>' + esc(txt(o.test_panel || (Array.isArray(o.tests) ? o.tests.join(', ') : ''))) + '</td>' +
+        '<td>' + esc(txt(o.priority, 'Routine')) + '</td>' +
+        '<td class="mut">' + esc(when(o.ordered_at)) + '</td></tr>').join('') +
+      '</table></div>' +
+      '<p class="sub" style="margin-top:8px">Snapshot copied onto this encounter when the order was placed — the live result trail stays in Laboratory.</p>'
   }
 
   // ---- prescriptions for this encounter ------------------------------------
@@ -444,6 +569,12 @@ export async function ConsultationsView(app, params = {}) {
     }
     if (!force && rxFor === enc.id) return
     const seq = ++rxSeq
+    // A different encounter's scripts must never linger — neither in the list
+    // nor in the tab badge — while this one is being fetched.
+    if (rxFor !== enc.id) {
+      rxScripts = []
+      rxExpanded.clear()
+    }
     rxFor = enc.id
     if (!rxScripts.length) el.innerHTML = '<p class="sub" style="margin:10px 0 0">Loading prescriptions…</p>'
     try {
@@ -467,7 +598,8 @@ export async function ConsultationsView(app, params = {}) {
     const el = document.getElementById('encRx')
     if (!el) return
     if (!rxScripts.length) {
-      el.innerHTML = ''
+      el.innerHTML = '<p class="sub">No prescriptions on this encounter yet — write one with <strong>+ Prescription</strong> below.</p>'
+      paintBadges()
       return
     }
     const rows = rxScripts.map((r) => {
@@ -501,12 +633,11 @@ export async function ConsultationsView(app, params = {}) {
         '</td></tr>'
     }).join('')
     el.innerHTML =
-      '<div class="card-head" style="margin:14px 0 6px;padding-top:12px;border-top:1px solid var(--emr-line)">' +
-        '<h3>Prescriptions</h3><span class="pill info">' + rxScripts.length + '</span></div>' +
       '<div class="tblwrap"><table class="tbl">' +
         '<tr><th>Medicines</th><th>Lines</th><th>Status</th><th>Written</th><th></th></tr>' + rows +
       '</table></div>' +
       '<p class="sub" style="margin-top:8px">One row per prescription for this encounter — click a row to read the whole script.</p>'
+    paintBadges()
 
     el.querySelectorAll('[data-rx-row]').forEach((row) => {
       row.onclick = (ev) => {
@@ -613,6 +744,7 @@ export async function ConsultationsView(app, params = {}) {
         }
         closeModal()
         toast('Diagnosis added')
+        showWsTab('overview')
         reload()
       },
     })
@@ -641,6 +773,7 @@ export async function ConsultationsView(app, params = {}) {
         } catch (e) { throw new Error(friendlyWriteError(e)) }
         closeModal()
         toast('Vitals saved')
+        showWsTab('overview')
         reload()
       },
     })
@@ -706,6 +839,7 @@ export async function ConsultationsView(app, params = {}) {
             : (rxResult?.pendingSync
               ? 'Prescription saved — will reach the pharmacy when the connection allows'
               : 'Prescription sent to the pharmacy queue — ' + n + ' medicine' + plural)))
+        showWsTab('rx')
         reload()
         loadEncRx(true)
       },
@@ -789,6 +923,7 @@ export async function ConsultationsView(app, params = {}) {
         } catch (e) { throw new Error(friendlyWriteError(e)) }
         closeModal()
         toast('Plan saved')
+        showWsTab('plan')
         reload()
       },
     })
@@ -797,70 +932,10 @@ export async function ConsultationsView(app, params = {}) {
   function openLabOrderForm() {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
     if (!canLab) { toast(friendlyWriteError({ code: 'permission-denied' })); return }
-    formModal({
-      title: 'New lab order',
-      submitLabel: 'Place order →',
-      fields: [
-        { name: 'tests', label: 'Tests (select one or more)', type: 'checks', options: LAB_PANELS, full: true },
-        { name: 'extra_tests', label: 'Other tests (comma separated)', full: true, placeholder: 'e.g. Ferritin, Vitamin D' },
-        {
-          name: 'facility', label: 'Lab facility', type: 'select',
-          options: [
-            { value: 'internal', label: 'Internal (in-house laboratory)' },
-            { value: 'external', label: 'External (print order for the patient)' },
-          ],
-        },
-        { name: 'priority', label: 'Priority', type: 'select', options: ['Routine', 'Urgent', 'STAT'] },
-      ],
-      onSubmit: async (v) => {
-        const extra = String(v.extra_tests || '').split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
-        const tests = [...(Array.isArray(v.tests) ? v.tests : []), ...extra]
-        if (!tests.length) throw new Error('Select at least one test.')
-        const summary = tests.join(', ')
-        // The encounter snapshot may predate the patient_name field, so join the
-        // registry name (patientMeta) as the source of truth for the lab row.
-        const name = patientMeta(selectedEncounter).name
-        // Canonical lab_orders doc (appears in Laboratory queue + patient Labs
-        // tab) plus an embedded reference on the encounter. The lab doc is
-        // primary: if IT fails, nothing is written to the encounter either.
-        // If only the encounter snapshot fails, the order is already placed —
-        // queue the snapshot instead of throwing, so the user can never end up
-        // retrying into a DUPLICATE lab order.
-        let lab
-        try {
-          lab = await createLabOrderDoc({
-            patient_id: selectedEncounter.patientId,
-            patient_name: name,
-            encounter_id: selectedEncounter.id,
-            tests,
-            facility: v.facility,
-            priority: v.priority,
-          })
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
-        }
-        let snapshotPending = false
-        try {
-          await addLabOrder(selectedEncounter.id, { lab_order_id: lab.id, test_panel: summary, tests, priority: v.priority })
-        } catch (e) {
-          try {
-            await enqueue('lab_snapshot', {
-              encounterId: selectedEncounter.id,
-              labOrder: { lab_order_id: lab.id, test_panel: summary, tests, priority: v.priority },
-            })
-            snapshotPending = true
-          } catch {
-            throw new Error(friendlyWriteError(e))
-          }
-        }
-        closeModal()
-        const base = v.facility === 'external'
-          ? 'External lab order placed — print the request for the patient'
-          : 'Lab order placed'
-        toast(snapshotPending ? base + ' · encounter note syncing' : base)
-        reload()
-      },
-    })
+    // Order entry moved to the full-page LIMS form, which also snapshots the
+    // order onto this encounter once placed.
+    window.location.hash = '#/laboratory/new?patient=' + encodeURIComponent(selectedEncounter.patientId) +
+      '&encounter=' + encodeURIComponent(selectedEncounter.id)
   }
 
   // Refresh is the one action that closes the open encounter — a full re-read
