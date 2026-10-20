@@ -10,7 +10,7 @@
 //                                        update: patient.demographics.update
 // Both docs are written in one batch so they can never drift apart.
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, writeBatch, serverTimestamp, limit,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, writeBatch, runTransaction, serverTimestamp, limit,
   orderBy,
 } from '../firebase.js'
 import { runChunk } from './pagination.js'
@@ -21,6 +21,7 @@ import {
   normalizePhone, phoneKey, parseSearchTerm, matchesPatient,
 } from '../features/patients/search.js'
 import { logAudit } from './adminService.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const ORG_PATIENTS = 'organization_patients'
 
@@ -136,8 +137,9 @@ export async function listOrgPatientsPage(orgId, { pageSize = PATIENTS_PAGE, cur
       return toPatientRow({ ...data, patient_id: pid })
     })
     .filter((r) => !!r.pid)
-  // Page is already id-ordered; keep a light name sort for display only.
-  rows.sort((a, b) => a.name.localeCompare(b.name))
+  // Deliberately keep the Firestore order (organization_id + patient_id).
+  // Re-sorting by name after the cursor walk would skip or duplicate rows
+  // across pages as new patients are inserted between chunks.
   return { rows, hasMore, cursor: next }
 }
 
@@ -157,6 +159,22 @@ export async function listOrgPatients(orgId) {
     .filter((r) => !!r.pid)
   rows.sort((a, b) => a.name.localeCompare(b.name))
   return rows
+}
+
+// Complete list for pickers (lab order, billing invoice) that must be able to
+// find ANY registered patient by name, MRN or mobile. The page API returns one
+// bounded, patient_id-ordered chunk, so a capped read silently hides everyone
+// past that chunk from the picker. Walks the cursor to exhaustion.
+export async function listOrgPatientsAll(orgId, { chunkSize = 300, max = 5000 } = {}) {
+  const all = []
+  let cursor = null
+  for (;;) {
+    const pg = await listOrgPatientsPage(orgId, { pageSize: chunkSize, cursor })
+    all.push(...pg.rows)
+    if (!pg.hasMore || !pg.rows.length || all.length >= max) break
+    cursor = pg.cursor
+  }
+  return all
 }
 
 export async function getPatient(pid) {
@@ -257,6 +275,41 @@ export async function findOpenEncounterForPatient(pid, orgId = '') {
   return open.length ? open[0] : null
 }
 
+// Pre-check whether a patient has any clinical trail in this hospital that
+// would block deletion: encounters, admissions, invoices. Returns { deletable: boolean, trail: string[] }.
+export async function patientHasClinicalTrail(pid, orgId) {
+  if (!pid || !orgId) return { deletable: true, trail: [] }
+  const trail = []
+  try {
+    const encSnap = await getDocs(query(
+      collection(db, 'encounters'),
+      where('patient_id', '==', pid),
+      where('organization_id', '==', orgId),
+      limit(1),
+    ))
+    if (!encSnap.empty) trail.push(encSnap.size + ' encounter(s)')
+  } catch { /* ignore read errors — treat as deletable */ }
+  try {
+    const admSnap = await getDocs(query(
+      collection(db, 'admissions'),
+      where('patient_id', '==', pid),
+      where('organization_id', '==', orgId),
+      limit(1),
+    ))
+    if (!admSnap.empty) trail.push(admSnap.size + ' admission(s)')
+  } catch { /* ignore */ }
+  try {
+    const invSnap = await getDocs(query(
+      collection(db, 'invoices'),
+      where('patient_id', '==', pid),
+      where('organization_id', '==', orgId),
+      limit(1),
+    ))
+    if (!invSnap.empty) trail.push(invSnap.size + ' invoice(s)')
+  } catch { /* ignore */ }
+  return { deletable: trail.length === 0, trail }
+}
+
 export function openEncounterExistsError(existing) {
   let when = 'date unknown'
   try {
@@ -292,22 +345,44 @@ export async function createPatientDoc(coll, pid, data, cap) {
   if (cap && !can(myActiveMembership(), cap)) {
     throw new Error('Your role cannot do this (missing "' + cap + '" capability). Ask an administrator.')
   }
-  // Duplicate guard: one open encounter per patient per hospital. Rejects the
-  // create so the caller must close the existing encounter first.
-  if (coll === 'encounters') {
-    const existing = await findOpenEncounterForPatient(pid, activeOrg)
-    if (existing) throw openEncounterExistsError(existing)
-  }
-  const ref = doc(collection(db, coll))
-  await setDoc(ref, {
+
+  const encounterData = {
     ...data,
     patient_id: pid,
     organization_id: activeOrg,
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: serverTimestamp(),
     updated_at: serverTimestamp(),
-  })
+  }
+
+  // Duplicate guard: one open encounter per patient per hospital. The check and
+  // the write run inside a single Firestore transaction so two concurrent calls
+  // can never both pass the guard and create two open encounters.
+  if (coll === 'encounters') {
+    return await runTransaction(db, async (transaction) => {
+      const encQuery = query(
+        collection(db, 'encounters'),
+        where('patient_id', '==', pid),
+      )
+      const snap = await transaction.get(encQuery)
+      const open = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((r) => {
+          if (!isEncounterOpenStatus(r?.status)) return false
+          const rowOrg = r?.organization_id || ''
+          if (activeOrg && rowOrg && rowOrg !== activeOrg) return false
+          return true
+        })
+      if (open.length) throw openEncounterExistsError(open[0])
+      const ref = doc(collection(db, coll))
+      transaction.set(ref, encounterData)
+      return ref.id
+    })
+  }
+
+  const ref = doc(collection(db, coll))
+  await setDoc(ref, encounterData)
   try {
     await logAudit({ action: 'patient.' + coll + '.created', organizationId: activeOrg, patientId: pid, details: String(data.condition || data.medicine || data.encounter_type || coll) })
   } catch (e) {
@@ -363,22 +438,25 @@ async function findDuplicate(orgId, surname, given_names, key, excludePid = '') 
   }
 
   // Step 2: Check global patients online (all hospitals except current to avoid duplicate returns)
-  // Query the global patients collection, filtering out the current hospital
+  // Query the global patients collection for active patients. We intentionally do
+  // NOT use `organization_id != orgId` here: Firestore's `!=` excludes documents
+  // where the field is missing, and paired with `limit(20)` it silently drops
+  // matches past the first page. Fetch a larger page and exclude the current
+  // hospital in memory instead.
   const cloudMatches = []
   try {
     const patientsCol = collection(db, 'patients')
     const q = query(
       patientsCol,
-      where('organization_id', '!=', orgId), // exclude current hospital
       where('status', '==', 'active'),
-      limit(20),
+      limit(100),
     )
     const snap = await getDocs(q)
     const allOther = snap.docs.map((d) => {
       const data = d.data() || {}
       const pid = d.id
       return toPatientRow({ ...data, patient_id: pid })
-    })
+    }).filter((r) => r.organization_id !== orgId && r.pid)
 
     // Filter by name + phone similarity
     const namePhoneInCloud = allOther.find(

@@ -13,6 +13,13 @@ export const ADMISSION_DISCHARGED = 'discharged'
 
 export const ADMISSION_TYPES = ['Emergency', 'Elective', 'Transfer', 'Observation']
 
+export const DISCHARGE_TYPES = [
+  { value: 'discharged', label: 'Discharged' },
+  { value: 'absconded', label: 'Absconded / eloped' },
+  { value: 'transferout', label: 'Transferred out' },
+  { value: 'deceased', label: 'Deceased' },
+]
+
 // Two writers have historically written the `admissions` collection with
 // different vocabularies:
 //   - admissionService.createAdmission() → status 'active' | 'discharged',
@@ -219,6 +226,14 @@ export function validateAdmissionInput(v, ctx = {}) {
   if (total > 0 && occ >= total) {
     return wardName + ' is full (' + occ + ' / ' + total + '). Transfer or discharge first.'
   }
+  // When a ward master has configured beds, confirm the requested bed actually
+  // exists in that ward (Bed 5 is meaningless on a 3-bed ward).
+  if (total > 0) {
+    const bedIdx = Number(bedNumber.replace(/\D/g, ''))
+    if (!Number.isFinite(bedIdx) || bedIdx < 1 || bedIdx > total) {
+      return 'Bed ' + bedNumber + ' does not exist in ' + wardName + ' (beds 1 – ' + total + ').'
+    }
+  }
   const bedTaken = (admissions || []).find((a) =>
     a.status === ADMISSION_ACTIVE && sameText(a.wardName, ward.name) && sameText(a.bedNumber, bedNumber))
   if (bedTaken) {
@@ -229,6 +244,15 @@ export function validateAdmissionInput(v, ctx = {}) {
 
 export function validateDischargeInput(v) {
   if (!String((v || {}).reason || '').trim()) return 'Discharge reason is required.'
+  const dt = String((v || {}).dischargeType || 'discharged').trim().toLowerCase()
+  const validTypes = ['discharged', 'absconded', 'transferout', 'deceased']
+  if (!validTypes.includes(dt)) return 'Invalid discharge type.'
+  const when = (v || {}).dischargeDate
+  if (when != null) {
+    const ms = tsMillis(when)
+    if (!ms) return 'Invalid discharge date.'
+    if (ms > Date.now()) return 'Discharge date cannot be in the future.'
+  }
   return null
 }
 

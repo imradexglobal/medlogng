@@ -134,6 +134,8 @@ export function sanitizeComponent(raw, index = 0) {
   const high = Number(raw && raw.ref_high)
   component.ref_low = Number.isFinite(low) && String((raw && raw.ref_low) ?? '').trim() !== '' ? low : null
   component.ref_high = Number.isFinite(high) && String((raw && raw.ref_high) ?? '').trim() !== '' ? high : null
+  component.critical_low = Number.isFinite(Number(raw && raw.ref_critical_low)) ? Number(raw.ref_critical_low) : null
+  component.critical_high = Number.isFinite(Number(raw && raw.ref_critical_high)) ? Number(raw.ref_critical_high) : null
   if (component.ref_low != null && component.ref_high != null && component.ref_low > component.ref_high) {
     return { ok: false, error: name + ': lower reference limit is above the upper limit.' }
   }
@@ -195,6 +197,8 @@ export function snapshotTestConfig(test) {
         ref_low: c.ref_low ?? null,
         ref_high: c.ref_high ?? null,
         ref_text: c.ref_text || '',
+        critical_low: c.critical_low ?? null,
+        critical_high: c.critical_high ?? null,
         ref_rules: (c.ref_rules || []).map((r) => ({ ...r })),
         options: (c.options || []).map((o) => o),
         display_order: c.display_order,
@@ -235,12 +239,14 @@ export function resolveReferenceFor(component, sex, dob, now) {
     if (r.age_min != null && (age == null || age < r.age_min)) continue
     if (r.age_max != null && (age == null || age > r.age_max)) continue
     if (r.age_min == null && r.age_max == null && !r.sex) continue
-    return { low: r.low ?? null, high: r.high ?? null, text: r.text || '' }
+    return { low: r.low ?? null, high: r.high ?? null, text: r.text || '', critical_low: r.critical_low ?? null, critical_high: r.critical_high ?? null }
   }
   return {
     low: component.ref_low ?? null,
     high: component.ref_high ?? null,
     text: component.ref_text || '',
+    critical_low: component.critical_low ?? null,
+    critical_high: component.critical_high ?? null,
   }
 }
 
@@ -254,12 +260,16 @@ export function computeFlag(value, ref) {
   if (!ref) return ''
   const low = ref.low != null && Number.isFinite(Number(ref.low)) ? Number(ref.low) : null
   const high = ref.high != null && Number.isFinite(Number(ref.high)) ? Number(ref.high) : null
+  const critLow = ref.critical_low != null && Number.isFinite(Number(ref.critical_low)) ? Number(ref.critical_low) : null
+  const critHigh = ref.critical_high != null && Number.isFinite(Number(ref.critical_high)) ? Number(ref.critical_high) : null
+  if (critLow != null && n <= critLow) return 'critical-low'
+  if (critHigh != null && n >= critHigh) return 'critical-high'
   if (low != null && n < low) return 'L'
   if (high != null && n > high) return 'H'
   return ''
 }
 
-export const FLAG_LABELS = { L: 'Low', H: 'High', '': '' }
+export const FLAG_LABELS = { L: 'Low', H: 'High', 'critical-low': 'Critical low', 'critical-high': 'Critical high', '': '' }
 
 // ---- ordered items ----------------------------------------------------------
 
@@ -407,12 +417,14 @@ export function legacyStatusToItemStatus(status) {
 // views, reports and older modules keep reading one vocabulary. The LEAST
 // advanced active item wins: a half-done order shows its earliest bottleneck.
 export function deriveOrderStatus(items) {
-  const active = (items || []).filter((it) => it.status !== ITEM_STATUS.CANCELLED)
-  if (!active.length) return 'cancelled'
+  const all = (items || [])
+  // Rejected samples are exceptions, not forward bottlenecks — exclude them so
+  // a half-done order shows its earliest real bottleneck.
+  const active = all.filter((it) => it.status !== ITEM_STATUS.CANCELLED && it.status !== ITEM_STATUS.REJECTED)
+  if (!active.length) return all.some((it) => it.status === ITEM_STATUS.REJECTED) ? 'rejected' : 'cancelled'
   if (!items || !items.length) return 'order'
   if (active.some((it) => it.status === ITEM_STATUS.ORDERED)) return 'order'
   if (active.some((it) => it.status === ITEM_STATUS.SAMPLE_COLLECTED)) return 'specimen-collected'
-  if (active.some((it) => it.status === ITEM_STATUS.REJECTED)) return 'processing'
   if (active.some((it) => it.status === ITEM_STATUS.RECEIVED)) return 'processing'
   if (active.some((it) => it.status === ITEM_STATUS.RESULT_ENTERED)) return 'completed'
   // validated + released only
@@ -461,6 +473,15 @@ export function validateResultValues(snapshot, rawValues, { draft = false } = {}
   const missing = components.filter((c) => c.required !== false && c.result_type !== 'text' && !String(values[c.id]?.value || '').trim())
   if (missing.length) {
     return { ok: false, values, error: 'Enter a result for: ' + missing.map((c) => c.display_name || c.name).join(', ') }
+  }
+  // Type validation: numeric components must parse as finite numbers.
+  const typeErrors = components.filter((c) => {
+    const v = String(values[c.id]?.value || '').trim()
+    if (!v || c.result_type !== 'numeric') return false
+    return !Number.isFinite(Number(v))
+  })
+  if (typeErrors.length) {
+    return { ok: false, values, error: 'Invalid number for: ' + typeErrors.map((c) => c.display_name || c.name).join(', ') }
   }
   return { ok: true, values }
 }
@@ -522,25 +543,25 @@ export const STARTER_TESTS = [
   {
     code: 'FBC', name: 'Full Blood Count (FBC)', category: 'Haematology', specimen_type: 'Whole blood (EDTA)', price_kobo: 900000,
     components: [
-      { name: 'HGB', display_name: 'Haemoglobin', result_type: 'numeric', unit: 'g/dL' },
-      { name: 'HCT', display_name: 'Haematocrit', result_type: 'numeric', unit: '%' },
-      { name: 'RBC', display_name: 'Red blood cell count', result_type: 'numeric', unit: '10^12/L' },
-      { name: 'WBC', display_name: 'White blood cell count', result_type: 'numeric', unit: '10^9/L' },
-      { name: 'MCV', display_name: 'Mean corpuscular volume', result_type: 'numeric', unit: 'fL' },
-      { name: 'MCH', display_name: 'Mean corpuscular haemoglobin', result_type: 'numeric', unit: 'pg' },
-      { name: 'MCHC', display_name: 'Mean corpuscular Hb concentration', result_type: 'numeric', unit: 'g/dL' },
-      { name: 'PLT', display_name: 'Platelet count', result_type: 'numeric', unit: '10^9/L' },
-      { name: 'NEUT', display_name: 'Neutrophils', result_type: 'numeric', unit: '%' },
-      { name: 'LYMPH', display_name: 'Lymphocytes', result_type: 'numeric', unit: '%' },
-      { name: 'MONO', display_name: 'Monocytes', result_type: 'numeric', unit: '%' },
-      { name: 'EOS', display_name: 'Eosinophils', result_type: 'numeric', unit: '%' },
-      { name: 'BASO', display_name: 'Basophils', result_type: 'numeric', unit: '%' },
+      { name: 'HGB', display_name: 'Haemoglobin', result_type: 'numeric', unit: 'g/dL', ref_low: 12.0, ref_high: 18.0 },
+      { name: 'HCT', display_name: 'Haematocrit', result_type: 'numeric', unit: '%', ref_low: 36.0, ref_high: 54.0 },
+      { name: 'RBC', display_name: 'Red blood cell count', result_type: 'numeric', unit: '10^12/L', ref_low: 4.0, ref_high: 6.0 },
+      { name: 'WBC', display_name: 'White blood cell count', result_type: 'numeric', unit: '10^9/L', ref_low: 4.0, ref_high: 11.0 },
+      { name: 'MCV', display_name: 'Mean corpuscular volume', result_type: 'numeric', unit: 'fL', ref_low: 80, ref_high: 100 },
+      { name: 'MCH', display_name: 'Mean corpuscular haemoglobin', result_type: 'numeric', unit: 'pg', ref_low: 27, ref_high: 34 },
+      { name: 'MCHC', display_name: 'Mean corpuscular Hb concentration', result_type: 'numeric', unit: 'g/dL', ref_low: 32, ref_high: 36 },
+      { name: 'PLT', display_name: 'Platelet count', result_type: 'numeric', unit: '10^9/L', ref_low: 150, ref_high: 450 },
+      { name: 'NEUT', display_name: 'Neutrophils', result_type: 'numeric', unit: '%', ref_low: 40, ref_high: 70 },
+      { name: 'LYMPH', display_name: 'Lymphocytes', result_type: 'numeric', unit: '%', ref_low: 20, ref_high: 40 },
+      { name: 'MONO', display_name: 'Monocytes', result_type: 'numeric', unit: '%', ref_low: 2, ref_high: 8 },
+      { name: 'EOS', display_name: 'Eosinophils', result_type: 'numeric', unit: '%', ref_low: 1, ref_high: 4 },
+      { name: 'BASO', display_name: 'Basophils', result_type: 'numeric', unit: '%', ref_low: 0, ref_high: 2 },
     ],
   },
-  { code: 'ESR', name: 'ESR', category: 'Haematology', specimen_type: 'Whole blood (EDTA)', price_kobo: 250000, components: [{ name: 'ESR', display_name: 'Erythrocyte sedimentation rate', result_type: 'numeric', unit: 'mm/hr' }] },
+  { code: 'ESR', name: 'ESR', category: 'Haematology', specimen_type: 'Whole blood (EDTA)', price_kobo: 250000, components: [{ name: 'ESR', display_name: 'Erythrocyte sedimentation rate', result_type: 'numeric', unit: 'mm/hr', ref_low: 0, ref_high: 20 }] },
   { code: 'BFMP', name: 'Blood film for parasites', category: 'Haematology', specimen_type: 'Whole blood (EDTA)', price_kobo: 300000, components: [{ name: 'PARASITES', display_name: 'Parasites seen', result_type: 'qualitative', options: ['Not seen', 'Seen'] }] },
   { code: 'BG', name: 'Blood group & genotype', category: 'Haematology', specimen_type: 'Whole blood (EDTA)', price_kobo: 200000, components: [{ name: 'BLOOD GROUP', display_name: 'Blood group', result_type: 'text' }, { name: 'GENOTYPE', display_name: 'Genotype', result_type: 'text' }] },
-  { code: 'PT', name: 'Prothrombin time / INR', category: 'Haematology', specimen_type: 'Plasma (citrate)', price_kobo: 450000, components: [{ name: 'PT', display_name: 'Prothrombin time', result_type: 'numeric', unit: 's' }, { name: 'INR', display_name: 'INR', result_type: 'numeric', unit: '' }] },
+  { code: 'PT', name: 'Prothrombin time / INR', category: 'Haematology', specimen_type: 'Plasma (citrate)', price_kobo: 450000, components: [{ name: 'PT', display_name: 'Prothrombin time', result_type: 'numeric', unit: 's', ref_low: 11, ref_high: 13.5 }, { name: 'INR', display_name: 'INR', result_type: 'numeric', unit: '', ref_low: 0.8, ref_high: 1.2 }] },
   { code: 'MRTLDT', name: 'Malaria RDT', category: 'Parasitology', specimen_type: 'Whole blood (plain)', price_kobo: 250000, components: [{ name: 'MALARIA RDT', display_name: 'Malaria RDT', result_type: 'qualitative', options: ['Negative', 'Positive'] }] },
   { code: 'MP', name: 'Malaria Parasite (thick & thin film)', category: 'Parasitology', specimen_type: 'Whole blood (EDTA)', price_kobo: 350000, components: [{ name: 'MP', display_name: 'Malaria parasites', result_type: 'qualitative', options: ['Not seen', 'Seen'] }, { name: 'DENSITY', display_name: 'Parasite density', result_type: 'text' }] },
   { code: 'WIDAL', name: 'Widal test', category: 'Serology / Immunology', specimen_type: 'Serum', price_kobo: 300000, components: [{ name: 'WIDAL', display_name: 'Widal result', result_type: 'text' }] },
@@ -548,23 +569,28 @@ export const STARTER_TESTS = [
   { code: 'HCV', name: 'Hepatitis C antibody (Anti-HCV)', category: 'Serology / Immunology', specimen_type: 'Serum', price_kobo: 500000, components: [{ name: 'HCV', display_name: 'Anti-HCV', result_type: 'qualitative', options: ['Non-Reactive', 'Reactive'] }] },
   { code: 'HIV', name: 'HIV screening', category: 'Serology / Immunology', specimen_type: 'Serum', price_kobo: 500000, components: [{ name: 'HIV', display_name: 'HIV screening', result_type: 'qualitative', options: ['Non-Reactive', 'Reactive', 'Indeterminate'] }] },
   { code: 'HCG', name: 'Pregnancy test (HCG)', category: 'Serology / Immunology', specimen_type: 'Urine', price_kobo: 200000, components: [{ name: 'HCG', display_name: 'Urine HCG', result_type: 'qualitative', options: ['Negative', 'Positive'] }] },
-  { code: 'CRP', name: 'CRP', category: 'Serology / Immunology', specimen_type: 'Serum', price_kobo: 450000, components: [{ name: 'CRP', display_name: 'C-reactive protein', result_type: 'numeric', unit: 'mg/L' }] },
+  { code: 'CRP', name: 'CRP', category: 'Serology / Immunology', specimen_type: 'Serum', price_kobo: 450000, components: [{ name: 'CRP', display_name: 'C-reactive protein', result_type: 'numeric', unit: 'mg/L', ref_low: 0, ref_high: 10 }] },
   { code: 'UA', name: 'Urinalysis', category: 'Urinalysis', specimen_type: 'Urine', price_kobo: 400000, components: [{ name: 'Physical', display_name: 'Physical', result_type: 'text' }, { name: 'Chemical', display_name: 'Chemical', result_type: 'text' }, { name: 'Microscopy', display_name: 'Microscopy', result_type: 'text' }] },
   { code: 'UCS', name: 'Urine culture & sensitivity', category: 'Microbiology', specimen_type: 'Urine', price_kobo: 800000, components: [{ name: 'CULTURE', display_name: 'Culture growth', result_type: 'text' }, { name: 'SENSITIVITY', display_name: 'Sensitivity', result_type: 'text' }] },
   { code: 'STOOL', name: 'Stool analysis', category: 'Parasitology', specimen_type: 'Stool', price_kobo: 350000, components: [{ name: 'Appearance', display_name: 'Appearance', result_type: 'text' }, { name: 'MUCUS', display_name: 'Mucus', result_type: 'qualitative', options: ['Absent', 'Present'] }, { name: 'BLOOD', display_name: 'Blood', result_type: 'qualitative', options: ['Absent', 'Present'] }, { name: 'OVA / PARASITES', display_name: 'Ova / parasites', result_type: 'text' }] },
-  { code: 'LFT', name: 'Liver function test', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 750000, components: [{ name: 'ALT', display_name: 'ALT (SGPT)', result_type: 'numeric', unit: 'U/L' }, { name: 'AST', display_name: 'AST (SGOT)', result_type: 'numeric', unit: 'U/L' }, { name: 'ALP', display_name: 'Alkaline phosphatase', result_type: 'numeric', unit: 'U/L' }, { name: 'TBIL', display_name: 'Total bilirubin', result_type: 'numeric', unit: 'µmol/L' }, { name: 'DBIL', display_name: 'Direct bilirubin', result_type: 'numeric', unit: 'µmol/L' }, { name: 'ALB', display_name: 'Albumin', result_type: 'numeric', unit: 'g/L' }] },
-  { code: 'UE', name: 'Urea & electrolytes', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 600000, components: [{ name: 'UREA', display_name: 'Urea', result_type: 'numeric', unit: 'mmol/L' }, { name: 'CREA', display_name: 'Creatinine', result_type: 'numeric', unit: 'µmol/L' }, { name: 'NA', display_name: 'Sodium', result_type: 'numeric', unit: 'mmol/L' }, { name: 'K', display_name: 'Potassium', result_type: 'numeric', unit: 'mmol/L' }, { name: 'CL', display_name: 'Chloride', result_type: 'numeric', unit: 'mmol/L' }] },
-  { code: 'FBS', name: 'Fasting blood glucose', category: 'Clinical Chemistry', specimen_type: 'Plasma (fluoride)', price_kobo: 250000, components: [{ name: 'FBS', display_name: 'Fasting blood glucose', result_type: 'numeric', unit: 'mmol/L' }] },
-  { code: 'RBS', name: 'Random blood sugar', category: 'Clinical Chemistry', specimen_type: 'Plasma (fluoride)', price_kobo: 250000, components: [{ name: 'RBS', display_name: 'Random blood sugar', result_type: 'numeric', unit: 'mmol/L' }] },
-  { code: 'LIPID', name: 'Lipid profile', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 800000, components: [{ name: 'CHOL', display_name: 'Total cholesterol', result_type: 'numeric', unit: 'mmol/L' }, { name: 'TG', display_name: 'Triglycerides', result_type: 'numeric', unit: 'mmol/L' }, { name: 'HDL', display_name: 'HDL cholesterol', result_type: 'numeric', unit: 'mmol/L' }, { name: 'LDL', display_name: 'LDL cholesterol', result_type: 'numeric', unit: 'mmol/L' }] },
-  { code: 'HBA1C', name: 'HbA1c', category: 'Clinical Chemistry', specimen_type: 'Whole blood (EDTA)', price_kobo: 750000, components: [{ name: 'HBA1C', display_name: 'HbA1c', result_type: 'numeric', unit: '%' }] },
-  { code: 'CREA', name: 'Serum creatinine', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 300000, components: [{ name: 'CREA', display_name: 'Creatinine', result_type: 'numeric', unit: 'µmol/L' }] },
-  { code: 'TFT', name: 'Thyroid function test', category: 'Hormone Assay', specimen_type: 'Serum', price_kobo: 1200000, components: [{ name: 'TSH', display_name: 'TSH', result_type: 'numeric', unit: 'mIU/L' }, { name: 'FT3', display_name: 'Free T3', result_type: 'numeric', unit: 'pmol/L' }, { name: 'FT4', display_name: 'Free T4', result_type: 'numeric', unit: 'pmol/L' }] },
+  { code: 'LFT', name: 'Liver function test', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 750000, components: [{ name: 'ALT', display_name: 'ALT (SGPT)', result_type: 'numeric', unit: 'U/L', ref_low: 0, ref_high: 40 }, { name: 'AST', display_name: 'AST (SGOT)', result_type: 'numeric', unit: 'U/L', ref_low: 0, ref_high: 40 }, { name: 'ALP', display_name: 'Alkaline phosphatase', result_type: 'numeric', unit: 'U/L', ref_low: 44, ref_high: 147 }, { name: 'TBIL', display_name: 'Total bilirubin', result_type: 'numeric', unit: 'µmol/L', ref_low: 0, ref_high: 21 }, { name: 'DBIL', display_name: 'Direct bilirubin', result_type: 'numeric', unit: 'µmol/L', ref_low: 0, ref_high: 5.1 }, { name: 'ALB', display_name: 'Albumin', result_type: 'numeric', unit: 'g/L', ref_low: 35, ref_high: 50 }] },
+  { code: 'UE', name: 'Urea & electrolytes', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 600000, components: [{ name: 'UREA', display_name: 'Urea', result_type: 'numeric', unit: 'mmol/L', ref_low: 2.5, ref_high: 7.8 }, { name: 'CREA', display_name: 'Creatinine', result_type: 'numeric', unit: 'µmol/L', ref_low: 60, ref_high: 110 }, { name: 'NA', display_name: 'Sodium', result_type: 'numeric', unit: 'mmol/L', ref_low: 135, ref_high: 145 }, { name: 'K', display_name: 'Potassium', result_type: 'numeric', unit: 'mmol/L', ref_low: 3.5, ref_high: 5.0 }, { name: 'CL', display_name: 'Chloride', result_type: 'numeric', unit: 'mmol/L', ref_low: 98, ref_high: 106 }] },
+  { code: 'FBS', name: 'Fasting blood glucose', category: 'Clinical Chemistry', specimen_type: 'Plasma (fluoride)', price_kobo: 250000, components: [{ name: 'FBS', display_name: 'Fasting blood glucose', result_type: 'numeric', unit: 'mmol/L', ref_low: 3.9, ref_high: 5.6 }] },
+  { code: 'RBS', name: 'Random blood sugar', category: 'Clinical Chemistry', specimen_type: 'Plasma (fluoride)', price_kobo: 250000, components: [{ name: 'RBS', display_name: 'Random blood sugar', result_type: 'numeric', unit: 'mmol/L', ref_low: 3.9, ref_high: 11.1 }] },
+  { code: 'LIPID', name: 'Lipid profile', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 800000, components: [{ name: 'CHOL', display_name: 'Total cholesterol', result_type: 'numeric', unit: 'mmol/L', ref_low: 0, ref_high: 5.2 }, { name: 'TG', display_name: 'Triglycerides', result_type: 'numeric', unit: 'mmol/L', ref_low: 0, ref_high: 1.7 }, { name: 'HDL', display_name: 'HDL cholesterol', result_type: 'numeric', unit: 'mmol/L', ref_low: 1.0, ref_high: 2.0 }, { name: 'LDL', display_name: 'LDL cholesterol', result_type: 'numeric', unit: 'mmol/L', ref_low: 0, ref_high: 3.0 }] },
+  { code: 'HBA1C', name: 'HbA1c', category: 'Clinical Chemistry', specimen_type: 'Whole blood (EDTA)', price_kobo: 750000, components: [{ name: 'HBA1C', display_name: 'HbA1c', result_type: 'numeric', unit: '%', ref_low: 0, ref_high: 5.7 }] },
+  { code: 'CREA', name: 'Serum creatinine', category: 'Clinical Chemistry', specimen_type: 'Serum', price_kobo: 300000, components: [{ name: 'CREA', display_name: 'Creatinine', result_type: 'numeric', unit: 'µmol/L', ref_low: 60, ref_high: 110 }] },
+  { code: 'TFT', name: 'Thyroid function test', category: 'Hormone Assay', specimen_type: 'Serum', price_kobo: 1200000, components: [{ name: 'TSH', display_name: 'TSH', result_type: 'numeric', unit: 'mIU/L', ref_low: 0.4, ref_high: 4.0 }, { name: 'FT3', display_name: 'Free T3', result_type: 'numeric', unit: 'pmol/L', ref_low: 2.0, ref_high: 4.4 }, { name: 'FT4', display_name: 'Free T4', result_type: 'numeric', unit: 'pmol/L', ref_low: 10, ref_high: 21 }] },
 ]
 
 export function starterTestToDoc(t, index) {
   const components = (t.components || []).map((c, i) => {
-    const r = sanitizeComponent({ ...c, display_order: i }, i)
+    // Seed identity only — names, units and parameter lists. Reference ranges are
+    // intentionally stripped here: they vary by laboratory, analyser, age and sex
+    // and must be configured by the facility (applyStandardReferenceRanges
+    // offers the STARTER_TESTS ranges as an explicit, opt-in starting point).
+    const { ref_low, ref_high, ref_text, ref_rules, ...identity } = c
+    const r = sanitizeComponent({ ...identity, display_order: i }, i)
     if (!r.ok) throw new Error('starter test ' + t.code + ': ' + r.error)
     return r.component
   })

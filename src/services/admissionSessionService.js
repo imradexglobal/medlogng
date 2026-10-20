@@ -18,6 +18,7 @@ import { MODALITIES, imagingStatus, validateImagingOrder } from '../features/adm
 import {
   listOrgWards,
 } from './wardService.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const ADMISSION_PLAN_ITEMS = 'admission_plan_items'
 
@@ -71,12 +72,12 @@ export async function createPlanItem(admissionSessionId, input) {
     type: String(input.type || '').trim().toLowerCase(),
     status: 'planned',
     text: String(input.text || '').trim(),
-    revisions: [{ text: input.text, by: authStore.getState().user?.email || '', at: now }],
+    revisions: [{ text: input.text, by: currentStaffName(), at: now }],
     created_by: authStore.getState().user?.uid || null,
-    created_by_name: authStore.getState().user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: serverNow,
     updated_by: authStore.getState().user?.uid || null,
-    updated_by_name: authStore.getState().user?.email || '',
+    updated_by_name: currentStaffName(),
     updated_at: serverNow,
   }
 
@@ -120,11 +121,11 @@ export async function updatePlanItem(sid, itemId, input) {
     type: String(input.type || '').trim().toLowerCase(),
     updated_at: serverNow,
     updated_by: authStore.getState().user?.uid || null,
-    updated_by_name: authStore.getState().user?.email || '',
+    updated_by_name: currentStaffName(),
     // Append revision instead of overwriting
     revisions: [
       ...(await getPlanItem(sid, itemId)).revisions,
-      { text: input.text, by: authStore.getState().user?.email || '', at: now },
+      { text: input.text, by: currentStaffName(), at: now },
     ],
   }
 
@@ -147,7 +148,7 @@ export async function updatePlanStatus(sid, itemId, status) {
     status: next,
     updated_at: serverTimestamp(),
     updated_by: authStore.getState().user?.uid || null,
-    updated_by_name: authStore.getState().user?.email || '',
+    updated_by_name: currentStaffName(),
   })
   return getPlanItem(sid, itemId)
 }
@@ -167,10 +168,10 @@ export async function removePlanItem(sid, itemId, reason) {
     status: 'removed',
     updated_at: serverTimestamp(),
     updated_by: authStore.getState().user?.uid || null,
-    updated_by_name: authStore.getState().user?.email || '',
+    updated_by_name: currentStaffName(),
     revisions: [
       ...(existing?.revisions || []),
-      { text: 'Removed: ' + reasonTxt, by: authStore.getState().user?.email || '', at: now },
+      { text: 'Removed: ' + reasonTxt, by: currentStaffName(), at: now },
     ],
   })
   return getPlanItem(sid, itemId)

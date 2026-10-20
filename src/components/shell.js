@@ -23,13 +23,13 @@ export const NAV = [
 
 export function statusBadge(s) {
   const map = {
-    Paid: 'ok', Dispensed: 'ok', Verified: 'ok', Synced: 'ok', Completed: 'ok', Active: 'ok', 'Checked-in': 'ok',
+    Paid: 'ok', Dispensed: 'ok', Verified: 'ok', Synced: 'ok', Completed: 'ok', Active: 'ok', 'Checked-in': 'ok', 'checked-in': 'ok',
     'Part-paid': 'warn', Pending: 'warn', Ready: 'warn', Waiting: 'warn', Low: 'warn', 'With vitals': 'warn',
-    Requested: 'warn', 'Partially dispensed': 'warn', Reversed: 'warn',
+    Requested: 'warn', 'Partially dispensed': 'warn', Reversed: 'warn', 'no-show': 'warn',
     'In consultation': 'info', Processing: 'info', Confirmed: 'info', Admitted: 'info', Accepted: 'info', 'Specimen collected': 'info',
     External: 'info',
-    Unpaid: 'bad', Out: 'bad', Expiring: 'bad', Overdue: 'bad',
-    Scheduled: '', Open: '', OK: 'ok', 'NHIA claim': 'info',
+    Unpaid: 'bad', Out: 'bad', Expiring: 'bad', Overdue: 'bad', cancelled: 'bad',
+    Scheduled: '', Open: '', OK: 'ok', 'NHIA claim': 'info', scheduled: '',
   }
   const cls = map[s] || ''
   return '<span class="pill ' + cls + '">' + esc(s) + '</span>'
@@ -39,10 +39,13 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
   const { user, activeOrgName } = authStore.getState()
   const email = user?.email || ''
   const org = activeOrgName || ORG.name
-  const initials = (email || 'u').slice(0, 2).toUpperCase()
   const online = typeof navigator === 'undefined' || navigator.onLine !== false
   const me = myActiveMembership()
   const role = me?.role ? String(me.role).replace(/_/g, ' ') : 'member'
+  // The sidebar identifies the person by staff name — the same value records
+  // and reports show — and only falls back to the sign-in email.
+  const who = me?.staff_name || user?.displayName || email
+  const initials = (String(who || '').match(/\b\w/g) || ['u']).slice(0, 2).join('').toUpperCase()
 
   app.innerHTML =
     '<div class="emr">' +
@@ -61,7 +64,7 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
             (online ? 'Online · Firestore' : 'Offline · local cache') +
             '</strong><em id="syncDetail">' + (online ? 'writes sync to the cloud' : 'writes queue until you reconnect') + '</em></span></div>' +
           '<div class="me"><span class="avatar">' + esc(initials) + '</span>' +
-            '<span class="me-meta"><strong>' + esc(email || 'signed out') + '</strong><em>' + esc(role) + '</em></span>' +
+            '<span class="me-meta"><strong>' + esc(who || 'signed out') + '</strong><em>' + esc(role) + '</em></span>' +
             '<button id="outBtn" class="iconbtn" title="Sign out" aria-label="Sign out">⎋</button></div>' +
         '</div>' +
       '</aside>' +
@@ -336,6 +339,34 @@ export function demoFormModal(title, fieldsHtml, saveLabel = 'Save (UI preview)'
     '<button class="btn" data-toast="Saved locally (UI preview). No data was written."> ' + esc(saveLabel) + '</button></div>')
 }
 
+// Wire a filter box that narrows the options of a <select> in place. Option
+// labels carry the mobile number, so a typed number is matched against digits
+// only — '+234 803 123 4567' must be findable by typing '0803…'. Never leaves
+// a hidden option selected, so the user can always see what they will submit.
+//
+// Used by formModal's `searchable` selects and exported so full-page pickers
+// (lab new order, billing new invoice) can offer the exact same patient-search
+// UX without a floating dropdown that can cover the input field.
+export function wireSearchableSelect(box, sel) {
+  if (!box || !sel) return
+  const options = Array.from(sel.options)
+  box.oninput = () => {
+    const q = box.value.trim().toLowerCase()
+    const digits = q.replace(/\D/g, '')
+    for (const o of options) {
+      const label = String(o.getAttribute('data-label') || o.textContent || '').toLowerCase()
+      o.hidden = !(!q
+        || (/[0-9]/.test(q) ? label.replace(/\D/g, '').includes(digits) : label.includes(q)))
+    }
+    // Never leave a hidden option selected — the clerk has to be able to see
+    // what they are about to submit.
+    if (sel.selectedOptions[0] && sel.selectedOptions[0].hidden) {
+      const first = options.find((o) => !o.hidden)
+      sel.value = first ? first.value : ''
+    }
+  }
+}
+
 // Real form modal: collects named fields, shows errors inline, never claims a
 // save that did not happen. `onSubmit(values)` should throw to keep the modal
 // open, or close it itself (closeModal) on success.
@@ -486,27 +517,8 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
     el.onchange = refreshPreviews
   })
 
-  // Option labels carry the mobile number, so a typed number is matched against
-  // digits only — '+234 803 123 4567' must be findable by typing '0803…'.
   document.querySelectorAll('#fmFields [data-filter-for]').forEach((box) => {
-    const sel = document.getElementById(box.getAttribute('data-filter-for'))
-    if (!sel) return
-    const options = Array.from(sel.options)
-    box.oninput = () => {
-      const q = box.value.trim().toLowerCase()
-      const digits = q.replace(/\D/g, '')
-      for (const o of options) {
-        const label = String(o.getAttribute('data-label') || o.textContent || '').toLowerCase()
-        o.hidden = !(!q
-          || (/[0-9]/.test(q) ? label.replace(/\D/g, '').includes(digits) : label.includes(q)))
-      }
-      // Never leave a hidden option selected — the clerk has to be able to see
-      // what they are about to submit.
-      if (sel.selectedOptions[0] && sel.selectedOptions[0].hidden) {
-        const first = options.find((o) => !o.hidden)
-        sel.value = first ? first.value : ''
-      }
-    }
+    wireSearchableSelect(box, document.getElementById(box.getAttribute('data-filter-for')))
   })
 
   const errEl = document.getElementById('fmError')
@@ -531,6 +543,64 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
       btn.textContent = label
     }
   }
+}
+
+// ---- Inline field validation helpers -----------------------------------------
+// Usage: <label class="fld">Label<input class="input" data-validate="required|email|phone|number" data-hint="hint-id" /></label>
+// After form modal renders, call wireValidation(root) to attach listeners.
+// On input, validates and shows/hides hint. On submit, checks all fields.
+
+function validateField(el) {
+  const rules = (el.dataset.validate || '').split('|').filter(Boolean)
+  if (!rules.length) return true
+  const value = (el.value || '').trim()
+  for (const rule of rules) {
+    if (rule === 'required' && !value) return false
+    if (rule === 'email' && value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return false
+    if (rule === 'phone' && value && !/^[\d\s+\-()]{7,}$/.test(value)) return false
+    if (rule === 'number' && value && isNaN(Number(value))) return false
+    if (rule.startsWith('min:') && value) {
+      const min = Number(rule.split(':')[1])
+      if (Number(value) < min) return false
+    }
+    if (rule.startsWith('max:') && value) {
+      const max = Number(rule.split(':')[1])
+      if (Number(value) > max) return false
+    }
+    if (rule.startsWith('minlen:') && value) {
+      const min = Number(rule.split(':')[1])
+      if (value.length < min) return false
+    }
+  }
+  return true
+}
+
+function showFieldError(el, show) {
+  const hintId = el.dataset.hint
+  if (!hintId) return
+  const hint = document.getElementById(hintId)
+  if (!hint) return
+  hint.textContent = el.dataset.errormsg || 'Invalid value'
+  hint.hidden = !show
+  el.classList.toggle('invalid', show)
+  el.classList.toggle('valid', !show)
+}
+
+export function wireValidation(root) {
+  root.querySelectorAll('[data-validate]').forEach((el) => {
+    el.oninput = () => showFieldError(el, !validateField(el))
+    el.onblur = () => showFieldError(el, !validateField(el))
+  })
+}
+
+export function validateForm(root) {
+  let valid = true
+  root.querySelectorAll('[data-validate]').forEach((el) => {
+    const ok = validateField(el)
+    showFieldError(el, !ok)
+    if (!ok) valid = false
+  })
+  return valid
 }
 
 export function field(label, inner) {

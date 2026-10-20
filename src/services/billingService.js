@@ -9,6 +9,8 @@ import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
+import { fmtDate } from '../utils/format.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const INVOICES = 'invoices'
 const PAYMENTS = 'payments'
@@ -153,31 +155,12 @@ export async function createInvoice(input) {
     console.warn('[billing] patient verification error:', e)
   }
 
-  // Calculate total using the existing business logic
-  // The price catalogue uses fixed prices; we calculate based on item + qty
-  const catalogue = [
-    ['General Outpatient Department (GOPD) consultation', 'Consult', 5000],   // 5000 kobo = ₦50.00
-    ['Antenatal visit', 'Consult', 8000],    // 8000 kobo = ₦80.00
-    ['FBC + ESR', 'Lab', 6500],             // 6500 kobo = ₦65.00
-    ['Malaria RDT', 'Lab', 2500],           // 2500 kobo = ₦25.00
-    ['Ward bed (per day)', 'Bed', 15000],    // 15000 kobo = ₦150.00
-    ['Amlodipine 5mg ×30', 'Drug', 4500],   // 4500 kobo = ₦45.00
-  ]
-
-  let totalKobo = 0
-  let itemsText = ''
-
-  // Find item in catalogue and calculate
-  const itemMatch = catalogue.find((c) => c[0] === input.item)
-  if (itemMatch) {
-    const priceKobo = itemMatch[2]  // price in kobo
-    totalKobo = priceKobo * Number(input.qty)
-    itemsText = input.item + ' · ' + input.qty + ' × ₦' + naira(priceKobo / 100)
-  } else {
-    // Unknown item - use 0 total (caller should handle)
-    totalKobo = 0
-    itemsText = input.item + ' · ' + input.qty
-  }
+  // Unit price comes from the caller (settings price or invoice-adjusted value),
+  // in kobo. Defaults to 0 when not supplied.
+  const priceKobo = Math.round(Number(input.unit_price_kobo || 0) || 0)
+  const qty = Math.max(1, Math.round(Number(input.qty) || 1))
+  const totalKobo = priceKobo * qty
+  const itemsText = input.item + ' · ' + qty + ' × ₦' + (priceKobo / 100).toLocaleString('en-NG')
 
   const invoiceId = doc(collection(db, INVOICES)).id
   const now = serverTimestamp()
@@ -191,11 +174,11 @@ export async function createInvoice(input) {
     total_kobo: totalKobo,  // stored in kobo for precision
     paid_kobo: 0,  // initially 0
     status: 'unpaid',
-    date: input.date || new Date().toLocaleDateString('en-NG'),
+    date: input.date || fmtDate(Date.now()),
     admission_session_id: input.admission_session_id || '',
     encounter_id: input.encounter_id || '',
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
   }
@@ -258,13 +241,13 @@ export async function createInvoiceFromLines(input) {
     total_kobo: totalKobo,
     paid_kobo: 0,
     status: 'unpaid',
-    date: input.date || new Date().toLocaleDateString('en-NG'),
+    date: input.date || fmtDate(Date.now()),
     admission_session_id: input.admission_session_id || '',
     encounter_id: input.encounter_id || '',
     source_type: String(input.source_type || '').trim(),
     source_id: String(input.source_id || '').trim(),
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
   }
@@ -357,7 +340,7 @@ export async function recordPayment(input) {
     amount_naira: amountKobo / 100,
     method: input.method || 'Cash',
     receipt_number: 'REC-' + paymentId.slice(0, 8).toUpperCase(),
-    paid_by: user?.email || '',
+    paid_by: currentStaffName(),
     paid_at: serverTimestamp(),
     organization_id: activeOrg,
     notes: input.notes || '',
@@ -376,6 +359,83 @@ export async function recordPayment(input) {
     newOutstanding: outstandingKobo / 100,
     status: status,
   }
+}
+
+// ---- list payments for an org --------------------------------------------
+export async function listOrgPayments(orgId) {
+  if (!orgId) return []
+  const snap = await getDocs(query(
+    collection(db, PAYMENTS),
+    where('organization_id', '==', orgId),
+  ))
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => {
+    const ms = (t) => (t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : 0))
+    return ms(b.paid_at) - ms(a.paid_at)
+  })
+}
+
+// ---- edit a previously saved payment -------------------------------------
+// Adjusts the invoice's paid_kobo by the difference and updates the payment
+// record (amount, method, notes). The original payment is never deleted — the
+// ledger stays intact because the invoice total is recomputed from the delta.
+export async function updatePayment(paymentId, { amount_kobo, method, notes }) {
+  const { activeOrg, user } = authStore.getState()
+  if (!activeOrg) throw new Error('No hospital selected.')
+  const caps = myBillingCaps()
+  if (!caps.canPayment) {
+    throw new Error('Your role cannot edit payments (missing "billing.payment" capability).')
+  }
+
+  const paymentSnap = await getDoc(doc(db, PAYMENTS, paymentId))
+  if (!paymentSnap.exists()) throw new Error('Payment not found.')
+  const payment = paymentSnap.data()
+  if (payment.organization_id !== activeOrg) throw new Error('This payment belongs to a different hospital.')
+
+  const newAmount = Math.round(Number(amount_kobo) || 0)
+  if (newAmount < 0) throw new Error('Amount cannot be negative.')
+
+  const oldAmount = Number(payment.amount_kobo || 0)
+  const delta = newAmount - oldAmount
+
+  // Get current invoice
+  const invoice = await getInvoice(payment.invoice_id)
+  if (!invoice) throw new Error('Linked invoice not found.')
+
+  const currentPaid = invoice.raw?.paid_kobo || 0
+  const newPaidKobo = currentPaid + delta
+  const totalKobo = invoice.raw?.total_kobo || 0
+  const outstandingKobo = totalKobo - newPaidKobo
+
+  let status = 'unpaid'
+  if (outstandingKobo <= 0) {
+    status = 'paid'
+  } else if (outstandingKobo < totalKobo) {
+    status = 'part-paid'
+  }
+
+  // Update the invoice's paid_kobo by the delta
+  await updateDoc(doc(db, INVOICES, payment.invoice_id), {
+    paid_kobo: newPaidKobo,
+    status: status,
+    updated_at: serverTimestamp(),
+  })
+
+  // Update the payment record
+  await updateDoc(doc(db, PAYMENTS, paymentId), {
+    amount_kobo: newAmount,
+    amount_naira: newAmount / 100,
+    method: method || payment.method || 'Cash',
+    notes: notes != null ? notes : (payment.notes || ''),
+    updated_at: serverTimestamp(),
+  })
+
+  try {
+    await logAudit({ action: 'payment.edited', organizationId: activeOrg, patientId: invoice.patientId, details: 'Payment ' + paymentId + ' · ₦' + (oldAmount / 100).toLocaleString('en-NG') + ' → ₦' + (newAmount / 100).toLocaleString('en-NG') })
+  } catch (e) {
+    console.warn('[billing] audit append failed:', e?.message)
+  }
+
+  return { invoiceId: payment.invoice_id, paymentId, amount: newAmount / 100, newOutstanding: outstandingKobo / 100, status }
 }
 
 // ---- helper: convert timestamp to millis ---

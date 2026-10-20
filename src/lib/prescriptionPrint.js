@@ -6,15 +6,8 @@
 // documents established, so one `@media print` block covers every sheet the app
 // emits.
 import { esc } from '../utils/sanitize.js'
-
-function fmtDate(ts) {
-  const ms = ts && typeof ts.toMillis === 'function' ? ts.toMillis() : (typeof ts === 'number' ? ts : 0)
-  if (!ms) return '—'
-  const d = new Date(ms)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) +
-    ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-}
+import { fmtDateTime } from '../utils/format.js'
+import { staffLabel } from './staffName.js'
 
 function metaTable(rows) {
   return '<table class="p-meta">' + rows
@@ -54,8 +47,8 @@ export function prescriptionHtml(o) {
     ['Script no.', o.scriptId ? String(o.scriptId).slice(0, 8).toUpperCase() : ''],
     ['Encounter', o.encounterId ? String(o.encounterId).slice(0, 8) : ''],
     ['Status', o.status],
-    ['Prescribed by', o.prescribedBy],
-    ['Date', fmtDate(o.prescribedAt)],
+    ['Prescribed by', staffLabel(o.prescribedBy)],
+    ['Date', fmtDateTime(o.prescribedAt)],
   ]
   return '' +
     '<div class="p-head">' +

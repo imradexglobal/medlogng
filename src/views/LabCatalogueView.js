@@ -7,13 +7,18 @@ import { shell, toast, wireToast, openModal, closeModal } from '../components/sh
 import { authStore } from '../store/authStore.js'
 import {
   listOrgTests, createTest, updateTest, setTestActive, validateTestInput,
-  seedStarterCatalogue, myLabAdminCaps, getLabSettings, saveLabSettings,
-  defaultLabSettings,
+  seedStarterCatalogue, applyStandardReferenceRanges, myLabAdminCaps,
+  getLabSettings, saveLabSettings, defaultLabSettings,
 } from '../services/labCatalogueService.js'
+import { refreshOrderSnapshotsFromCatalogue } from '../services/laboratoryService.js'
 import { DEFAULT_CATEGORIES, DEFAULT_SPECIMEN_TYPES } from '../features/labs/domain.js'
 import { esc } from '../utils/sanitize.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { onCleanup } from '../lib/lifecycle.js'
+import { confirmDelete } from './deleteUi.js'
+import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
+import { canDeleteRecords } from '../services/deleteService.js'
+import { deleteLabTest } from '../services/deleteService.js'
 
 const naira = (kobo) => '₦' + ((Number(kobo) || 0) / 100).toLocaleString('en-NG')
 
@@ -31,7 +36,7 @@ function blankComponent() {
 export async function LabCatalogueView(app, params = {}) {
   const { activeOrg } = authStore.getState()
   const adminCaps = myLabAdminCaps()
-  const canManage = adminCaps.has('lab.catalogue.manage')
+  const canManage = adminCaps.canManageCatalogue
   const editId = params.id || null   // 'new' or a test id
 
   let tests = []
@@ -95,19 +100,23 @@ export async function LabCatalogueView(app, params = {}) {
     }
     return (loadError ? '<div class="card"><p class="sub">' + esc(friendlyWriteError(loadError)) + '</p><button class="btn ghost" id="retryBtn">Retry</button></div>' : '') +
       (tests.length === 0 && !loadError
-        ? '<div class="card" style="text-align:center"><h3>Your catalogue is empty</h3>' +
+        ? '<div class="card" style="text-align:center"><div class="empty-icon" style="font-size:3rem;margin-bottom:10px">🧪</div>' +
+        '<h3>Your catalogue is empty</h3>' +
         '<p class="sub">Seed it with the 24 common starter tests (no reference ranges baked in — you configure those), or add your own tests one by one.</p>' +
         '<div class="mrow" style="justify-content:center"><button class="btn" id="seedBtn">Seed starter catalogue</button>' +
         '<a class="btn ghost" href="#/laboratory/catalogue/new">+ Add a test manually</a></div></div>'
         : '') +
-      '<div class="card"><div class="toolbar"><strong>' + tests.length + ' tests</strong></div>' +
-      renderTestsTable(canManage) + '</div>' +
+      '<div class="card"><div class="toolbar"><strong>' + tests.length + ' tests</strong>' +
+        (canManage ? ' <button class="btn ghost sm" id="applyStdRangesBtn">Apply standard ranges</button>' +
+          ' <button class="btn ghost sm" id="refreshOrderSnapshotsBtn">Refresh order ranges</button>' : '') +
+        '</div>' +
+        renderTestsTable(!canManage) + '</div>' +
       renderSettingsCard()
   }
 
   function renderTestsTable(readonly) {
     if (!tests.length && !loadError) return ''
-    return '<div class="tblwrap"><table class="tbl"><tr><th>Code</th><th>Name</th><th>Category</th><th>Specimen</th><th>Price</th><th>Turnaround</th><th>Components</th><th>Status</th>' + (readonly ? '' : '<th></th>') + '</tr>' +
+    return '<div class="tblwrap"><table class="tbl"><thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Specimen</th><th>Price</th><th>Turnaround</th><th>Components</th><th>Status</th>' + (readonly ? '' : '<th style="width:120px">Actions</th>') + '</tr></thead><tbody>' +
       tests.map((t) =>
         '<tr>' +
         '<td><span class="pill">' + esc(t.code) + '</span></td>' +
@@ -119,12 +128,13 @@ export async function LabCatalogueView(app, params = {}) {
         '<td class="mut">' + ((t.components || []).length || '—') + '</td>' +
         '<td>' + (t.active ? '<span class="pill ok">Active</span>' : '<span class="pill bad">Inactive</span>') + '</td>' +
         (readonly ? '' :
-          '<td><div class="mrow">' +
-          '<a class="btn ghost sm" href="#/laboratory/catalogue/' + esc(t.id) + '">Edit</a>' +
-          '<button class="btn ghost sm" data-toggle="' + esc(t.id) + '">' + (t.active ? 'Disable' : 'Enable') + '</button>' +
-          '</div></td>') +
+          '<td style="white-space:nowrap">' + kebabCell({ rowId: t.id, items: [
+            { label: 'Edit', dataAction: 'edit' },
+            { label: t.active ? 'Disable' : 'Enable', dataAction: 'toggle' },
+            { label: 'Delete', tone: 'danger', dataAction: 'delete' }
+          ] }) + '</td>') +
         '</tr>').join('') +
-      '</table></div>'
+      '</tbody></table></div>'
   }
 
   function renderSettingsCard() {
@@ -172,8 +182,46 @@ export async function LabCatalogueView(app, params = {}) {
         catch (e) { toast(friendlyWriteError(e, 'Update failed')) }
       }
     })
+    wireKebabs(document, async (rowId, action) => {
+      const t = tests.find((x) => x.id === rowId)
+      if (!t) return
+      if (action === 'edit') {
+        window.location.hash = '#/laboratory/catalogue/' + rowId
+        return
+      }
+      if (action === 'toggle') {
+        try { await setTestActive(t.id, !t.active); toast(t.active ? 'Test disabled' : 'Test enabled'); bootstrap() }
+        catch (e) { toast(friendlyWriteError(e, 'Update failed')) }
+        return
+      }
+      if (action === 'delete') {
+        confirmDelete('test ' + t.code + ' ' + t.name, () => deleteLabTest(rowId), bootstrap)
+      }
+    })
     const retry = document.getElementById('retryBtn')
     if (retry) retry.onclick = bootstrap
+    const applyStdRanges = document.getElementById('applyStdRangesBtn')
+    if (applyStdRanges) {
+      applyStdRanges.onclick = async () => {
+        if (!confirm('Apply standard reference ranges to tests with blank ranges? Already-set ranges will not be overwritten.')) return
+        try {
+          const result = await applyStandardReferenceRanges()
+          toast('Applied standard ranges to ' + result.updatedTests + ' test(s) (' + result.updatedComponents + ' component(s))')
+          bootstrap()
+        } catch (e) { toast(friendlyWriteError(e, 'Apply failed')) }
+      }
+    }
+    const refreshSnapshots = document.getElementById('refreshOrderSnapshotsBtn')
+    if (refreshSnapshots) {
+      refreshSnapshots.onclick = async () => {
+        if (!confirm('Back-fill blank reference ranges onto existing lab order snapshots from the live catalogue? Already-set ranges on orders will not be overwritten.')) return
+        try {
+          const result = await refreshOrderSnapshotsFromCatalogue()
+          toast('Refreshed order snapshots: ' + result.updatedOrders + ' order(s), ' + result.updatedItems + ' item(s), ' + result.updatedComponents + ' range(s)')
+          bootstrap()
+        } catch (e) { toast(friendlyWriteError(e, 'Refresh failed')) }
+      }
+    }
     const saveSettings = document.getElementById('saveSettingsBtn')
     if (saveSettings) {
       saveSettings.onclick = async () => {
@@ -199,25 +247,20 @@ export async function LabCatalogueView(app, params = {}) {
   }
 
   function componentRow(c, i) {
-    return '<div class="comp-row" data-comp="' + esc(c.id) + '" style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin:8px 0">' +
-      '<div class="frow">' +
-      '<label>Name<input class="input" data-f="name" value="' + esc(c.name) + '" placeholder="e.g. haemoglobin"></label>' +
-      '<label>Display name<input class="input" data-f="display_name" value="' + esc(c.display_name) + '" placeholder="e.g. Haemoglobin (Hb)"></label>' +
-      '</div><div class="frow">' +
-      '<label>Type<select class="input" data-f="result_type">' +
+    return '<tr data-comp="' + esc(c.id) + '">' +
+      '<td><input class="input" data-f="name" value="' + esc(c.name) + '" placeholder="e.g. haemoglobin"></td>' +
+      '<td><input class="input" data-f="display_name" value="' + esc(c.display_name) + '" placeholder="e.g. Haemoglobin (Hb)"></td>' +
+      '<td><select class="input" data-f="result_type">' +
       RESULT_TYPES.map((r) => '<option value="' + r.value + '"' + (c.result_type === r.value ? ' selected' : '') + '>' + r.label + '</option>').join('') +
-      '</select></label>' +
-      '<label>Unit<input class="input" data-f="unit" value="' + esc(c.unit || '') + '"></label>' +
-      '</div><div class="frow">' +
-      '<label>Reference low<input class="input" data-f="ref_low" value="' + esc(c.ref_low ?? '') + '"></label>' +
-      '<label>Reference high<input class="input" data-f="ref_high" value="' + esc(c.ref_high ?? '') + '"></label>' +
-      '</div><div class="frow">' +
-      '<label>Reference text<input class="input" data-f="ref_text" value="' + esc(c.ref_text || '') + '" placeholder="e.g. negative, or a sex-specific note"></label>' +
-      '<label>Options (comma-separated)<input class="input" data-f="options" value="' + esc((c.options || []).join(', ')) + '"></label>' +
-      '</div>' +
-      '<div class="mrow"><label style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-f="required"' + (c.required ? ' checked' : '') + '> Required</label>' +
-      '<button class="btn ghost sm" data-remove-comp="' + esc(c.id) + '">Remove</button></div>' +
-      '</div>'
+      '</select></td>' +
+      '<td><input class="input" data-f="unit" value="' + esc(c.unit || '') + '" placeholder="e.g. g/dL"></td>' +
+      '<td><input class="input" data-f="ref_low" value="' + esc(c.ref_low ?? '') + '"></td>' +
+      '<td><input class="input" data-f="ref_high" value="' + esc(c.ref_high ?? '') + '"></td>' +
+      '<td><input class="input" data-f="ref_text" value="' + esc(c.ref_text || '') + '" placeholder="e.g. negative"></td>' +
+      '<td><input class="input" data-f="options" value="' + esc((c.options || []).join(', ')) + '" placeholder="comma-separated"></td>' +
+      '<td style="text-align:center"><input type="checkbox" data-f="required"' + (c.required ? ' checked' : '') + '></td>' +
+      '<td style="text-align:right"><button class="btn ghost sm" data-remove-comp="' + esc(c.id) + '" title="Remove row">✕</button></td>' +
+      '</tr>'
   }
 
   function renderEditor() {
@@ -241,8 +284,12 @@ export async function LabCatalogueView(app, params = {}) {
 
       '<div class="card"><h3>Result components</h3>' +
       '<p class="sub">Each component becomes a field on the result-entry screen and a row on the printed report. Numeric components can carry unit + reference range. Leave ranges empty until your laboratory confirms them — nothing is invented for you.</p>' +
-      '<div id="compList">' + (editing.components || []).map(componentRow).join('') + '</div>' +
-      '<button class="btn ghost sm" id="addCompBtn">+ Add component</button>' +
+      ((editing.components || []).length
+        ? '<div class="tblwrap"><table class="tbl comp-tbl"><thead><tr><th>Name</th><th>Display name</th><th>Type</th><th>Unit</th><th>Ref low</th><th>Ref high</th><th>Ref text</th><th>Options</th><th title="Required">Req</th><th></th></tr></thead><tbody>' +
+          editing.components.map(componentRow).join('') +
+          '</tbody></table></div>'
+        : '<p class="mut">No components yet — a test without components gets a single free-text result field.</p>') +
+      '<button class="btn ghost sm" id="addCompBtn" style="margin-top:8px">+ Add component</button>' +
       '</div>' +
 
       '<div class="mrow" style="margin-top:14px">' +
@@ -252,21 +299,18 @@ export async function LabCatalogueView(app, params = {}) {
   }
 
   function wireEditor() {
-    const root = document.getElementById('compList')
     document.getElementById('addCompBtn').onclick = () => {
       syncEditor()
       editing.components.push(blankComponent())
       render()
     }
-    if (root) {
-      root.querySelectorAll('[data-remove-comp]').forEach((b) => {
-        b.onclick = () => {
-          syncEditor()
-          editing.components = editing.components.filter((c) => c.id !== b.getAttribute('data-remove-comp'))
-          render()
-        }
-      })
-    }
+    document.querySelectorAll('[data-remove-comp]').forEach((b) => {
+      b.onclick = () => {
+        syncEditor()
+        editing.components = editing.components.filter((c) => c.id !== b.getAttribute('data-remove-comp'))
+        render()
+      }
+    })
     document.getElementById('saveTestBtn').onclick = async () => {
       syncEditor()
       const err = validateTestInput(editing)

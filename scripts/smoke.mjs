@@ -283,8 +283,17 @@ assert.equal(activeAdmissionForEncounter(index, ''), null, 'blank encounter id i
 assert.equal(activeAdmissionForEncounter(new Map(), 'enc_7'), null, 'empty index is safe')
 
 // ---- admission validation ---------------------------------------------------
-const ok = { patient_id: 'p9', ward_name: 'Ward A', bed_number: 'Bed 3' }
+// Ward A is a configured 2-bed ward with Bed 2 taken, so Bed 1 is the free bed.
+const ok = { patient_id: 'p9', ward_name: 'Ward A', bed_number: 'Bed 1' }
 assert.equal(validateAdmissionInput(ok, { wards, admissions: admRows }), null, 'free bed in a configured ward passes')
+
+// A configured ward only owns beds 1..totalBeds — a bed outside that range is
+// refused even when the ward has capacity and the slot looks free.
+assert.match(
+  validateAdmissionInput({ ...ok, bed_number: 'Bed 9' }, { wards, admissions: admRows }),
+  /does not exist in Ward A \(beds 1 – 2\)/,
+  'an out-of-range bed is refused on a configured ward',
+)
 
 assert.match(
   validateAdmissionInput({ ...ok, ward_name: 'Ward B' }, { wards, admissions: admRows }),
@@ -310,7 +319,7 @@ assert.equal(
   'the remaining active bed still blocks'
 )
 assert.equal(
-  validateAdmissionInput({ patient_id: 'p1', ward_name: 'Ward A', bed_number: 'Bed 9' },
+  validateAdmissionInput({ patient_id: 'p1', ward_name: 'Ward A', bed_number: 'Bed 1' },
     { wards, admissions: [{ ...legacy, status: 'discharged' }, { ...canonical, status: 'discharged' }] }),
   null,
   'a discharged patient can be re-admitted'
@@ -326,7 +335,7 @@ assert.equal(validateAdmissionInput({ ward_name: 'Ward A', bed_number: 'Bed 1' }
 assert.equal(validateAdmissionInput({ patient_id: 'p9', bed_number: 'Bed 1' }, { wards, admissions: admRows }), 'Ward is required.')
 assert.equal(validateAdmissionInput({ patient_id: 'p9', ward_name: 'Ward A' }, { wards, admissions: admRows }), 'Bed is required.')
 assert.equal(
-  validateAdmissionInput({ ...ok, patient_id: 'p1', bed_number: 'Bed 3' }, { wards, admissions: [] }),
+  validateAdmissionInput({ ...ok, patient_id: 'p1', bed_number: 'Bed 2' }, { wards, admissions: [] }),
   null,
   'p1 holds nothing when the ward has no admissions yet'
 )
@@ -392,8 +401,39 @@ for (const coll of ['admissions', 'wards', 'beds', 'rooms']) {
   )
 }
 
-// An admission is the audit record of a bed; it is discharged, never deleted.
-assert.ok(/allow delete: if false;/.test(matchBlock('admissions')), 'admissions must never be deleted')
+// Admissions may only be removed AFTER discharge and only by a holder of
+// data.delete in the hospital that owns the admission (deleteService enforces
+// the discharge-first order; the rule pins ownership via resource.data).
+assert.ok(
+  /allow delete: if canDelete\(resource\.data\.organization_id\);/.test(matchBlock('admissions')),
+  'admissions delete must be org-pinned canDelete',
+)
+
+// The `data.delete` gate: collections that carry clinical/billing records
+// delete only through canDelete(resource.data.organization_id) — ownership
+// always comes from the stored doc, so a client can never re-point it.
+for (const coll of [
+  'patients', 'organization_patients', 'encounters', 'vitals', 'allergies',
+  'diagnoses', 'clinical_notes', 'medication_requests', 'lab_orders',
+  'lab_test_catalogue', 'imaging_orders', 'appointments', 'invoices',
+  'stock_lots', 'documents',
+]) {
+  assert.ok(
+    /allow delete: if canDelete\(resource\.data\.organization_id\);/.test(matchBlock(coll)),
+    coll + ' delete must be gated by org-pinned canDelete (data.delete)',
+  )
+}
+
+// Append-only ledgers are NEVER deletable — money, doses, stock movement and
+// the audit trail are the hospital's permanent record. (`stock_movements`
+// writes its clause as `allow update, delete: if false;`.)
+for (const coll of ['payments', 'dispensations', 'stock_movements', 'audit_events', 'result_images']) {
+  const block = matchBlock(coll)
+  assert.ok(
+    /allow (?:delete|update, delete): if false;/.test(block),
+    coll + ' is an append-only ledger and must never be deletable',
+  )
+}
 
 // Admissions queries need: org + the one-way encounter link, plus org +
 // created_at for the server-paginated list (see admissionService
@@ -540,12 +580,27 @@ assert.ok(/setTimeout\(runSearch/.test(patientsViewSrc), 'the registry search is
 
 // Every patient picker must be reachable by mobile number too. A <select> cannot
 // be typed into, so a clerk who only knows the number had no way in at all.
-for (const view of ['AppointmentsView', 'BillingView', 'LaboratoryView', 'AdmissionsView']) {
-  const src = fs.readFileSync(new URL('../src/views/' + view + '.js', import.meta.url), 'utf8')
+// LaboratoryView dropped its patient <select> entirely — orders are filtered by
+// a free-text search that joins through matchesPatient (phone-key aware), which
+// covers the same clerk need without a picker.
+for (const view of ['AppointmentsView', 'BillingView', 'AdmissionsView']) {
+  const url = ['.js', '.jsx']
+    .map((ext) => new URL('../src/views/' + view + ext, import.meta.url))
+    .find((u) => fs.existsSync(u))
+  assert.ok(url, view + ' view source exists (.js or .jsx)')
+  const src = fs.readFileSync(url, 'utf8')
   const opts = src.match(/const patientOpts =[\s\S]*?\n    \}/)
   assert.ok(opts, view + ' builds a patient option list')
   assert.ok(/formatPhone/.test(opts[0]), view + ' patient options carry the mobile number')
-  assert.ok(/searchable:/.test(src), view + ' patient picker is filterable')
+  // Filterable by typing: either the shell's `searchable` select or a bespoke
+  // type-ahead (BillingView) that joins through matchesPatient.
+  const filterable = /searchable:/.test(src) ||
+    (/matchesPatient\(/.test(src) && /invPatientSearch|patient-dropdown/.test(src))
+  assert.ok(filterable, view + ' patient picker is filterable')
+}
+{
+  const labSrc = fs.readFileSync(new URL('../src/views/LaboratoryView.js', import.meta.url), 'utf8')
+  assert.ok(/matchesPatient/.test(labSrc), 'LaboratoryView search joins through matchesPatient (mobile reachable)')
 }
 
 // Encounters are started ONLY from the Patients page. Consultations is a queue
@@ -581,8 +636,8 @@ import {
 const patients = TABLE_BY_TABLE.patients
 const orgPats = TABLE_BY_TABLE.organization_patients
 
-assert.equal(IMPORT_ORDER_TABLES.length, 21, 'registry covers clinical + operational + org config')
-assert.equal(Object.keys(TABLE_BY_TABLE).length, 21, 'every table is indexable by name')
+assert.equal(IMPORT_ORDER_TABLES.length, 22, 'registry covers clinical + operational + org config')
+assert.equal(Object.keys(TABLE_BY_TABLE).length, 22, 'every table is indexable by name')
 assert.equal(TABLE_BY_COLLECTION.encounters.collection, 'encounters', 'collection index round-trips')
 assert.ok(orgPats.orgKeyed, 'organization_patients is org-keyed')
 assert.ok(orgPats.derived, 'organization_patients is derived from patients')
@@ -605,8 +660,9 @@ for (const entry of IMPORT_ORDER_TABLES) {
 
 // ---- SQL DDL ---------------------------------------------------------------
 const patientsDdl = buildCreateTableSql(patients)
-assert.match(patientsDdl, /PRIMARY KEY \("id"\)/, 'patients table has a text primary key')
-assert.ok(!/PRIMARY KEY \("id" TEXT NOT NULL/.test(patientsDdl), 'id is declared once, as the primary key line')
+assert.match(patientsDdl, /"id" TEXT NOT NULL PRIMARY KEY/, 'patients table has a text primary key')
+assert.ok(!/PRIMARY KEY \("id"\)/.test(patientsDdl), 'the primary key is declared inline on id, not repeated as a table constraint')
+assert.ok(!/"id" TEXT NOT NULL(?! PRIMARY KEY)/.test(patientsDdl), 'id is declared once, as the primary key')
 const encDdl = buildCreateTableSql(TABLE_BY_TABLE.encounters)
 assert.match(encDdl, /FOREIGN KEY \("patient_id"\) REFERENCES "patients"\("id"\)/, 'encounter FK to patients')
 assert.match(encDdl, /"vitals" TEXT/, 'json columns stored as TEXT')

@@ -3,6 +3,7 @@ import { loadOrganization, setActiveOrg, logout } from '../services/authService.
 import { navigate } from '../router.js'
 import { esc } from '../utils/sanitize.js'
 import { BUILD_ID, BUILD_TIME } from '../buildInfo.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 // Hospital choice view: shown when user belongs to multiple hospitals
 export async function HospitalChoiceView(app) {
@@ -33,7 +34,7 @@ export async function HospitalChoiceView(app) {
 
   app.innerHTML =
     '<div class="topbar"><strong>MedLogNg</strong>' +
-    '<span>' + esc(user.email || '') + ' <button id="out" class="btn btn-ghost btn-sm">Sign out</button></span></div>' +
+    '<span>' + esc(currentStaffName() || user.email || '') + ' <button id="out" class="btn btn-ghost btn-sm">Sign out</button></span></div>' +
     '<div class="welcome"><div class="card welcome-card">' +
     '<p class="eyebrow">Select Hospital</p>' +
     '<h1>You belong to multiple hospitals</h1>' +

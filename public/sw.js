@@ -6,15 +6,21 @@
  * intercepted — the Firestore SDK handles its own caching and write queue.
  *
  * Strategy:
- *  - Navigations: network-first, fall back to the cached SPA shell so hash
- *    routes (#/patients etc.) keep working with no connection.
+ *  - Navigations: cached shell served instantly when the device reports
+ *    offline; when online, the network is raced against a short timeout so a
+ *    dead or hanging connection can no longer stall boot for tens of seconds
+ *    waiting on DNS. Slow network → shell appears after the timeout, and the
+ *    late network response still refreshes the cache for the next load.
  *  - Same-origin static assets (hashed build output): stale-while-revalidate.
  *    Content hashes make them immutable, so serving from cache is always safe
  *    and a background refresh picks up new builds.
- *  - Cross-origin (Firebase/Firestore/Auth): untouched — pass through.
+ *  - Cross-origin images (login-screen Unsplash photos): cache-first so the
+ *    login screen paints offline after one successful online visit.
+ *  - Cross-origin Firebase/Firestore/Auth: untouched — pass through.
  */
-const CACHE = 'medilogng-shell-v1'
+const CACHE = 'medilogng-shell-v2'
 const SHELL = ['./', './index.html', './logo.svg', './manifest.webmanifest']
+const NAV_TIMEOUT_MS = 2000
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -30,25 +36,28 @@ self.addEventListener('activate', (event) => {
   )
 })
 
+function timeout(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request
   if (req.method !== 'GET') return
 
   const url = new URL(req.url)
-  if (url.origin !== self.location.origin) return // Firestore/Auth/Firebase — SDK owns these
 
-  // SPA navigations: network-first so a deploy is picked up immediately,
-  // cached shell so an offline reload still boots the app.
+  // Cross-origin: only cache images. Firebase / Firestore / Auth traffic is
+  // left to the SDKs, which own their own retry and offline behaviour.
+  if (url.origin !== self.location.origin) {
+    if (req.destination === 'image') {
+      event.respondWith(cacheFirstImage(req))
+    }
+    return
+  }
+
+  // SPA navigations (hash routes all load the same document).
   if (req.mode === 'navigate') {
-    event.respondWith(
-      fetch(req).then((res) => {
-        const copy = res.clone()
-        caches.open(CACHE).then((cache) => cache.put('./index.html', copy))
-        return res
-      }).catch(() =>
-        caches.match('./index.html').then((hit) => hit || Response.error())
-      )
-    )
+    event.respondWith(navigationResponse(req))
     return
   }
 
@@ -66,3 +75,38 @@ self.addEventListener('fetch', (event) => {
     })
   )
 })
+
+async function navigationResponse(req) {
+  const cache = await caches.open(CACHE)
+  const cached = await cache.match('./index.html')
+  // Device knows it is offline — skip the network entirely, no timeout wait.
+  if (navigator.onLine === false) {
+    return cached || Response.error()
+  }
+  // Online (or the flag is stale): race the network against a short timeout.
+  // The fetch is not cancelled on loss — a late 200 still refreshes the cache.
+  const network = fetch(req).then((res) => {
+    if (res && res.status === 200) {
+      cache.put('./index.html', res.clone()).catch(() => {})
+    }
+    return res
+  }).catch(() => null)
+  const winner = await Promise.race([network, timeout(NAV_TIMEOUT_MS).then(() => null)])
+  return winner || cached || Response.error()
+}
+
+async function cacheFirstImage(req) {
+  const cache = await caches.open(CACHE)
+  const hit = await cache.match(req)
+  if (hit) return hit
+  try {
+    const res = await fetch(req)
+    // Opaque (no-cors <img>) responses report status 0 but are still cacheable.
+    if (res && (res.type === 'opaque' || res.status === 200)) {
+      cache.put(req, res.clone()).catch(() => {})
+    }
+    return res
+  } catch {
+    return Response.error()
+  }
+}

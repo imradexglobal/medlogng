@@ -77,13 +77,13 @@ await test('resolveReferenceFor: sex-specific beats general, first matching rule
       { sex: '', age_min: 0, age_max: 12, low: 11, high: 14, text: 'child' },
     ],
   }
-  assert.deepEqual(resolveReferenceFor(comp, 'female', null, null), { low: 12, high: 16, text: '' })
-  assert.deepEqual(resolveReferenceFor(comp, 'male', null, null), { low: 14, high: 18, text: '' })
-  assert.deepEqual(resolveReferenceFor(comp, '', null, null), { low: 8, high: 12, text: '' })
+  assert.deepEqual(resolveReferenceFor(comp, 'female', null, null), { low: 12, high: 16, text: '', critical_low: null, critical_high: null })
+  assert.deepEqual(resolveReferenceFor(comp, 'male', null, null), { low: 14, high: 18, text: '', critical_low: null, critical_high: null })
+  assert.deepEqual(resolveReferenceFor(comp, '', null, null), { low: 8, high: 12, text: '', critical_low: null, critical_high: null })
   // Age rule wins for a child when no sex is supplied (sex rules skipped).
   const dob = new Date()
   dob.setFullYear(dob.getFullYear() - 8)
-  assert.deepEqual(resolveReferenceFor(comp, '', dob.toISOString(), null), { low: 11, high: 14, text: 'child' })
+  assert.deepEqual(resolveReferenceFor(comp, '', dob.toISOString(), null), { low: 11, high: 14, text: 'child', critical_low: null, critical_high: null })
 })
 
 await test('flagValues attaches flags + the resolved reference per numeric component', () => {
@@ -298,7 +298,7 @@ await test('collect → receive → result → validate → release, with rollup
   let stored = docData('lab_orders/' + order.id)
   assert.equal(stored.items[0].status, 'sample_collected')
   assert.equal(stored.status, 'specimen-collected')
-  assert.equal(stored.items[0].collection.collected_by_name, 'user@hospital.ng')
+  assert.equal(stored.items[0].collection.collected_by_name, 'Test User')
   assert.ok(auditActions().includes('lab.sample.collected'))
 
   await receiveItems(order.id, [itemId])
@@ -319,7 +319,7 @@ await test('collect → receive → result → validate → release, with rollup
   await validateItem(order.id, itemId)
   stored = docData('lab_orders/' + order.id)
   assert.equal(stored.items[0].status, 'validated')
-  assert.equal(stored.items[0].result.validated_by_name, 'user@hospital.ng')
+  assert.equal(stored.items[0].result.validated_by_name, 'Test User')
 
   await releaseItem(order.id, itemId)
   stored = docData('lab_orders/' + order.id)

@@ -18,6 +18,7 @@ import {
   toRequestItems, applyIssue, statusForProgress, normalizeRequest, toLine, mergeRequestLine,
   lineOutstanding, isOpenRequest, REQUEST_STATUS, requestProgress, toQty, freshLineId,
 } from '../features/pharmacy/requests.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const DRUGS = 'stock_lots'
 const DISPENSE = 'dispensations'
@@ -49,6 +50,7 @@ function toDrugRow(r) {
     unit: r.unit || 'tabs',
     stock: r.stock || 0,
     price: r.price || 0,
+    purchase_price: r.purchase_price || 0,
     batch: r.batch || '',
     expiry: r.expiry || '',
     status: r.status || 'OK',
@@ -241,12 +243,13 @@ export async function createDrug(input) {
         unit: input.unit || 'tabs',
         stock: openingQty,
         price: input.price || 0,
+        purchase_price: input.purchase_price || 0,
         batch: input.batch || '',
         expiry: input.expiry || '',
         status: openingQty === 0 ? 'Out' : (openingQty < 20 ? 'Low' : 'OK'),
         supplier: input.supplier || '',
         created_by: user?.uid || null,
-        created_by_name: user?.email || '',
+        created_by_name: currentStaffName(),
         created_at: now,
         updated_at: now,
       })
@@ -265,7 +268,7 @@ export async function createDrug(input) {
         expiry: input.expiry || '',
         reference: 'opening balance',
         created_by: user?.uid || null,
-        created_by_name: user?.email || '',
+        created_by_name: currentStaffName(),
         created_at: now,
       })
     } else {
@@ -280,12 +283,13 @@ export async function createDrug(input) {
         unit: input.unit || 'tabs',
         stock: 0,
         price: input.price || 0,
+        purchase_price: input.purchase_price || 0,
         batch: input.batch || '',
         expiry: input.expiry || '',
         status: 'Out',
         supplier: input.supplier || '',
         created_by: user?.uid || null,
-        created_by_name: user?.email || '',
+        created_by_name: currentStaffName(),
         created_at: now,
         updated_at: now,
       })
@@ -311,6 +315,7 @@ export async function createDrug(input) {
       sku: input.sku || generateSku(input.drug_code, input.strength, input.pack_size) || '',
       unit: input.unit || 'tabs',
       price: input.price || 0,
+      purchase_price: input.purchase_price || 0,
       batch: input.batch || '',
       expiry: input.expiry || '',
       supplier: input.supplier || '',
@@ -346,7 +351,7 @@ export async function updateDrug(did, input) {
       reason: input.reason || 'Stock adjustment via UI',
       counted_qty: Number(input.stock) || 0,
       created_by: user?.uid || null, // note: user may not be in scope; adjust per app needs
-      created_by_name: user?.email || '',
+      created_by_name: currentStaffName(),
       created_at: now,
     })
 
@@ -360,6 +365,7 @@ export async function updateDrug(did, input) {
       unit: input.unit,
       stock: input.stock,
       price: input.price,
+      purchase_price: input.purchase_price,
       batch: input.batch,
       expiry: input.expiry,
       status: input.status,
@@ -423,7 +429,7 @@ export async function receiveBatch(input) {
       invoice_ref: input.invoice_ref || '',
       received_at: now,
       created_by: user?.uid || null,
-      created_by_name: user?.email || '',
+      created_by_name: currentStaffName(),
       created_at: now,
     })
 
@@ -433,6 +439,7 @@ export async function receiveBatch(input) {
       stock: newStock,
       batch: input.batch,
       expiry: input.expiry,
+      purchase_price: input.unit_cost != null ? Number(input.unit_cost) : data.purchase_price,
       // Keep the derived status in step with stock, so restocking a lot that had
       // fallen to zero stops reading "Out".
       status: newStock === 0 ? 'Out' : (newStock < 20 ? 'Low' : 'OK'),
@@ -543,7 +550,7 @@ export async function dispense(input) {
         dispensation_id: dispensationId,
         medication_request_id: medicationRequestId || '',
         created_by: user?.uid || null,
-        created_by_name: user?.email || '',
+        created_by_name: currentStaffName(),
         created_at: now,
       })
 
@@ -586,7 +593,7 @@ export async function dispense(input) {
       patient_id: patientId,
       patient_name: patientName,
       items: itemsString,
-      by: user?.email || '',
+      by: currentStaffName(),
       status: 'dispensed',
       organization_id: activeOrg,
       created_at: now,
@@ -740,7 +747,7 @@ export async function reverseDispenseIssue({ requestId, lineId }) {
       medication_request_id: requestId,
       line_id: lineId,
       created_by: user?.uid || null,
-      created_by_name: user?.email || '',
+      created_by_name: currentStaffName(),
       created_at: now,
     })
 
@@ -763,7 +770,7 @@ export async function reverseDispenseIssue({ requestId, lineId }) {
         drug_id: line.drug_id, sku: lot.sku || '', name: lot.name || medicine,
         batch, qty, unit: lot.unit || 'tabs',
       }]),
-      by: user?.email || '',
+      by: currentStaffName(),
       status: 'reversed',
       reason: 'Dispense reversed for "' + medicine + '"',
       organization_id: activeOrg,
@@ -907,7 +914,7 @@ export async function requestMedicationLines({ patientId, patientName = '', enco
     items: normalised,
     status: REQUEST_STATUS.REQUESTED,
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
     ...(syncKey ? { sync_keys: [syncKey] } : {}),
@@ -1081,7 +1088,7 @@ export async function correctStock(drugId, countedQty, reason) {
       reason: reason || '',
       counted_qty: countedQty,
       created_by: user?.uid || null,
-      created_by_name: user?.email || '',
+      created_by_name: currentStaffName(),
       created_at: now,
     })
 
@@ -1114,7 +1121,7 @@ export async function createDispense(input) {
     patient_id: input.patient_id || '',
     patient_name: input.patient_name || '',
     items: input.items || '',
-    by: input.by || user?.email || '',
+    by: input.by || currentStaffName(),
     status: 'pending',
     time: now,
     organization_id: activeOrg,

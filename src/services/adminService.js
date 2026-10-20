@@ -8,6 +8,7 @@ import {
 import { authStore } from '../store/authStore.js'
 import { ROLE_CAPS, can, isValidEmail, MAX_HOSPITAL_ADMINS, capsForRole, normalizeCaps } from '../features/admin/roles.js'
 import { runChunk } from './pagination.js'
+import { currentStaffName, rememberStaffName } from '../lib/staffName.js'
 
 export function myMembership(orgId) {
   const { memberships } = authStore.getState()
@@ -42,6 +43,7 @@ export async function logAudit({ action, organizationId, patientId = null, detai
     await addDoc(collection(db, 'audit_events'), {
       actor_user_id: u.uid,
       actor_email: u.email || null,
+      actor_name: currentStaffName() || null,
       actor_organization_id: organizationId,
       action,
       patient_id: patientId,
@@ -154,6 +156,26 @@ export async function requirePasswordReset(m, required = true) {
     { action: 'member.password_reset_required', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${required ? 'must change' : 'cleared'}` })
 }
 
+// Rename a staff member. The name is what every clinical record, report and
+// printout shows instead of the sign-in email, so it is the one detail admins
+// edit most. An admin may rename anyone, including themselves.
+export async function updateMemberName(m, name) {
+  const clean = String(name || '').replace(/\s+/g, ' ').trim()
+  if (!clean) throw new Error('Staff name required')
+  if (clean.length > 80) throw new Error('Staff name is too long (80 characters max)')
+  if (clean === String(m.staff_name || '').trim()) return
+  await writeMember(m.id, { staff_name: clean },
+    { action: 'member.name_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id || '—'} → ${clean}` })
+  rememberStaffName({ userId: m.user_id, email: m.email, name: clean })
+  // Renaming yourself must be visible in the shell without a reload.
+  if (m.user_id === auth.currentUser?.uid) {
+    const st = authStore.getState()
+    authStore.setState({
+      memberships: (st.memberships || []).map((x) => (x.id === m.id ? { ...x, staff_name: clean } : x)),
+    })
+  }
+}
+
 // ---- staff invites (admin pre-approves email + role; staff sets own password) --
 export async function listInvites(orgId) {
   // Pushed to the server (was client-side filter over the full invite list).
@@ -252,6 +274,7 @@ export async function registerThisDevice(orgId) {
   await setDoc(doc(db, 'devices', id), {
     user_id: u.uid,
     user_email: u.email || null,
+    user_name: currentStaffName() || null,
     organization_id: orgId,
     device_name: (navigator.userAgentData?.platform || navigator.platform || 'desktop').slice(0, 80),
     platform: /android/i.test(navigator.userAgent) ? 'android' : 'windows',
@@ -274,7 +297,7 @@ export async function setDeviceStatus(dev, status) {
   await logAudit({
     action: status === 'revoked' ? 'device.revoked' : 'device.reactivated',
     organizationId: dev.organization_id,
-    details: `${dev.device_name || dev.id} · ${dev.user_email || dev.user_id}`,
+    details: `${dev.device_name || dev.id} · ${staffNameForId(dev.user_id) || dev.user_name || dev.user_email || dev.user_id}`,
   })
 }
 
@@ -319,7 +342,7 @@ export async function listAudit(orgId, { action = '', cursor = null } = {}) {
 
 export const AUDIT_ACTIONS = [
   '', 'member.approved', 'member.rejected', 'member.suspended', 'member.reactivated',
-  'member.role_updated', 'member.capabilities_updated', 'member.password_reset_required', 'invite.created',
+  'member.role_updated', 'member.capabilities_updated', 'member.password_reset_required', 'member.name_updated', 'invite.created',
   'invite.revoked', 'invite.accepted', 'org.updated', 'device.revoked',
   'device.reactivated', 'password.changed', 'email.verified',
   'data.template', 'data.export', 'data.staged', 'data.push',

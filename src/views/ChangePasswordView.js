@@ -4,6 +4,7 @@ import { logout, changeOwnPassword } from '../services/authService.js'
 import { validateNewPassword } from '../features/admin/roles.js'
 import { navigate } from '../router.js'
 import { esc } from '../utils/sanitize.js'
+import { staffLabel } from '../lib/staffName.js'
 
 function renderPasswordField(inputId, labelText, autocomplete, placeholder, type = 'password') {
   const toggleId = inputId + 'Toggle'
@@ -40,7 +41,7 @@ export async function ChangePasswordView(app) {
   app.innerHTML =
     '<div class="auth-wrap"><div class="card auth-card">' +
     '<div class="brand"><span class="brand-mark">✚</span><span><h1>MedLogNg</h1><p class="muted">Change your password</p></span></div>' +
-    '<p>Your administrator requires a password change for <strong>' + esc(user.email || '') + '</strong> ' +
+    '<p>Your administrator requires a password change for <strong>' + esc(staffLabel(user.email) || user.email || '') + '</strong> ' +
     'before you can continue. Minimum 8 characters, letters + numbers, not a common password.</p>' +
     renderPasswordField('np', 'New password', 'new-password', 'New password') +
     renderPasswordField('cp', 'Confirm new password', 'new-password', 'Repeat new password') +

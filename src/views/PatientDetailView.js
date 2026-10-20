@@ -2,6 +2,7 @@
 import { authStore } from '../store/authStore.js'
 import { shell, setPage, skeletonCard, statusBadge, formModal, toast, closeModal, openModal, wireToast } from '../components/shell.js'
 import { esc } from '../utils/sanitize.js'
+import { fmtDate } from '../utils/format.js'
 import { emptyRow } from '../data/mockData.js'
 import { can } from '../features/admin/roles.js'
 import { myActiveMembership, getClinicalStaff } from '../services/authService.js'
@@ -10,17 +11,22 @@ import {
   getPatient, updatePatient, listPatientDocs, createPatientDoc, findOpenEncounterForPatient,
   myPatientCaps, friendlyPatientError, formatPhone,
 } from '../services/patientService.js'
+import { getPatientPhotoMeta, getPatientPhotoBlob, upsertPatientPhoto, removePatientPhoto } from '../services/patientPhotoService.js'
 import {
   createAdmission, dischargeAdmission, listOrgWards, validateAdmissionInput, normalizeAdmission,
   ADMISSION_TYPES,
 } from '../services/admissionService.js'
 import { listOrgDrugs, requestMedicationLines, updateRequestItems } from '../services/pharmacyService.js'
+import { listPatientAdministrations } from '../services/medicationAdminService.js'
 import { openPrescriptionModal } from '../features/pharmacy/prescriptionModal.js'
 import * as R from '../features/pharmacy/requests.js'
+import * as A from '../features/pharmacy/administration.js'
 import { printDocument } from '../lib/print.js'
 import { prescriptionHtml } from '../lib/prescriptionPrint.js'
 import { enqueue } from '../services/clinicalOutbox.js'
 import { ENCOUNTER_STATUS_FLOW_META } from '../features/encounters/domain.js'
+import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
+import { staffLabel } from '../lib/staffName.js'
 
 const TABS = ['Dashboard', 'Personal Data', 'Blood & Allergies', 'Next of Kin', 'Timeline', 'Encounters', 'Vitals', 'Diagnoses', 'Medications', 'Labs', 'Admissions', 'Documents']
 const SEXES = [{ value: '', label: 'Not set' }, 'Female', 'Male']
@@ -62,10 +68,16 @@ function s(v, fallback = '—') {
   const t = String(v == null ? '' : v).trim()
   return t || fallback
 }
+// A person read off a record: rows written before staff names existed hold an
+// email or uid, so map those back to the staff name (values that already are
+// names pass straight through).
+function who(v, fallback = '—') {
+  return s(staffLabel(v), fallback)
+}
 
 function table(cols, rows, htmlRow) {
-  return '<div class="tblwrap"><table class="tbl"><tr>' + cols.map((c) => '<th>' + esc(c) + '</th>').join('') + '</tr>' +
-    (rows.length ? rows.map(htmlRow).join('') : emptyRow(cols.length)) + '</table></div>'
+  return '<div class="tblwrap"><table class="tbl"><thead><tr>' + cols.map((c) => '<th>' + esc(c) + '</th>').join('') + '</tr></thead><tbody>' +
+    (rows.length ? rows.map(htmlRow).join('') : emptyRow(cols.length)) + '</tbody></table></div>'
 }
 
 export async function PatientDetailView(app, params = {}) {
@@ -119,36 +131,101 @@ export async function PatientDetailView(app, params = {}) {
     return
   }
 
+  // Photo + last visit (lazy, non-blocking: header paints with initials first).
+  let photoMeta = null
+  let photoUrl = null
+  let lastVisit = null
+  ;(async () => {
+    try {
+      photoMeta = await getPatientPhotoMeta(pid).catch(() => null)
+      if (photoMeta) {
+        const blob = await getPatientPhotoBlob(pid).catch(() => null)
+        if (blob) photoUrl = URL.createObjectURL(blob)
+      }
+      const enc = await listPatientDocs('encounters', pid, { limitN: 1 }).catch(() => ({ rows: [] }))
+      const latest = (enc.rows || [])[0]
+      if (latest) lastVisit = latest.created_at
+    } catch { /* non-fatal */ }
+    refreshHeaderPhoto()
+    const subTitle = [p.mrn, ageText, p.sex, lastVisit ? 'last seen ' + fmtDate(lastVisit) : '']
+      .filter(Boolean).join(' · ')
+    const sp = document.querySelector('.top-title p')
+    if (sp) sp.textContent = subTitle
+  })()
+
   const ini = (p.name || '').split(' ').map((x) => x[0]).slice(0, 2).join('').toUpperCase()
-  const subtitle = [p.pid, p.mrn || 'no MRN', p.sex, p.age !== '' ? p.age + 'y' : '', p.payer]
+  const ageText = p.age !== '' ? p.age + 'y' : ''
+  const subtitle = [p.mrn, ageText, p.sex, lastVisit ? 'last seen ' + fmtDate(lastVisit) : '']
     .filter(Boolean).join(' · ')
 
-  const body =
-    '<div class="phead"><span class="pavatar">' + esc(ini) + '</span>' +
-    '<div style="flex:1;min-width:220px"><h2>' + esc(p.name) + ' ' + statusBadge(p.status) + '</h2>' +
-    '<div class="meta">DOB ' + esc(p.dob || 'not recorded') + ' · ' + esc(formatPhone(p.phone, p.phone_key)) +
-    ' · Registered ' + (p.registered ? new Date(p.registered).toLocaleDateString('en-NG') : '—') + '</div>' +
-    '<div class="allergy">⚠ Allergy: <strong>' + esc(p.allergy_display || 'None known') + '</strong> — always confirm before prescribing</div></div>' +
-    '<div><div class="kv" style="grid-template-columns:1fr 1fr">' +
-    '<div><em>Payer</em><strong>' + esc(p.payer) + '</strong></div>' +
-    '<div><em>Sync</em><strong style="font-size:.85rem">● ' + (navigator.onLine !== false ? 'Firestore' : 'Local cache') + '</strong></div>' +
-    '</div></div></div>' +
-    '<div class="tabs" id="ptabs">' + TABS.map((t, i) => '<button data-t="' + t + '" class="' + (i === 0 ? 'on' : '') + '">' + t + '</button>').join('') + '</div>' +
-    '<div id="ppane"></div>'
+  // Build the patient header: photo when available, otherwise initials avatar.
+  // Painted first with initials, then updated once the photo blob loads.
+  function renderHeader() {
+    const photoHtml = photoUrl
+      ? '<span id="pavatarbox"><img src="' + photoUrl + '" alt="Patient photo" class="pavatar photo" /></span>'
+      : '<span id="pavatarbox">' + esc(ini) + '</span>'
+    const photoActions = (caps.canUpdate || caps.canCreate)
+      ? '<div class="phead-actions">' +
+        '<button class="btn ghost sm" id="photoUploadBtn" title="Upload photo">📷</button>' +
+        (photoUrl ? '<button class="btn ghost sm" id="photoRemoveBtn" title="Remove photo">✕</button>' : '') +
+        '</div>'
+      : ''
+    const body =
+      '<div class="phead">' + photoHtml + photoActions +
+      '<div style="flex:1;min-width:220px"><h2>' + esc(p.name) + ' ' + statusBadge(p.status) + '</h2>' +
+      '<div class="meta">DOB ' + esc(p.dob || 'not recorded') + ' · ' + esc(formatPhone(p.phone, p.phone_key)) +
+      ' · Registered ' + (p.registered ? fmtDate(p.registered) : '—') + '</div>' +
+      '<div class="allergy">⚠ Allergy: <strong>' + esc(p.allergy_display || 'None known') + '</strong> — always confirm before prescribing</div></div>' +
+      '<div><div class="kv" style="grid-template-columns:1fr 1fr">' +
+      '<div><em>MRN</em><strong>' + esc(p.mrn || '—') + '</strong></div>' +
+      '<div><em>Payer</em><strong>' + esc(p.payer || 'Self-pay') + '</strong></div>' +
+      '</div></div></div>' +
+      '<div class="tabs" id="ptabs">' + TABS.map((t, i) => '<button data-t="' + t + '" class="' + (i === 0 ? 'on' : '') + '">' + t + '</button>').join('') + '</div>' +
+      '<div id="ppane"></div>'
 
-  setPage({
-    title: p.name,
-    subtitle,
-    actions:
-      backActions +
-      (caps.canUpdate ? '<button class="btn ghost" id="editBtn">Edit demographics</button>' : '') +
-      (canEncounter ? '<button class="btn" id="encBtn">Start encounter</button>' : ''),
-    body,
-  })
+    setPage({
+      title: p.name,
+      subtitle,
+      actions:
+        backActions +
+        (caps.canUpdate ? '<button class="btn ghost" id="editBtn">Edit demographics</button>' : '') +
+        (canEncounter ? '<button class="btn" id="encBtn">Start encounter</button>' : ''),
+      body,
+    })
 
-  // Navigate to modern edit page
-  const editBtn = document.getElementById('editBtn')
-  if (editBtn) editBtn.onclick = () => { window.location.hash = '#/patients/' + pid + '/edit' }
+    const editBtn = document.getElementById('editBtn')
+    if (editBtn) editBtn.onclick = () => { window.location.hash = '#/patients/' + pid + '/edit' }
+
+    const encBtn = document.getElementById('encBtn')
+    if (encBtn) encBtn.onclick = openEncounter
+
+    const pu = document.getElementById('photoUploadBtn')
+    if (pu) pu.onclick = () => openPhotoUpload()
+    const pr = document.getElementById('photoRemoveBtn')
+    if (pr) pr.onclick = () => openPhotoRemove()
+  }
+
+  function refreshHeaderPhoto() {
+    const box = document.getElementById('pavatarbox')
+    if (box) {
+      box.innerHTML = photoUrl
+        ? '<img src="' + photoUrl + '" alt="Patient photo" class="pavatar photo" />'
+        : esc(ini)
+    }
+    const actions = document.querySelector('.phead-actions')
+    if (actions) {
+      actions.innerHTML = (caps.canUpdate || caps.canCreate)
+        ? '<button class="btn ghost sm" id="photoUploadBtn" title="Upload photo">📷</button>' +
+          (photoUrl ? '<button class="btn ghost sm" id="photoRemoveBtn" title="Remove photo">✕</button>' : '')
+        : ''
+    }
+    const pu = document.getElementById('photoUploadBtn')
+    if (pu) pu.onclick = () => openPhotoUpload()
+    const pr = document.getElementById('photoRemoveBtn')
+    if (pr) pr.onclick = () => openPhotoRemove()
+  }
+
+  renderHeader()
 
   function openEdit() {
     window.location.hash = '#/patients/' + pid + '/edit'
@@ -181,11 +258,11 @@ export async function PatientDetailView(app, params = {}) {
   }
 
   // ---- Dashboard data loading & rendering -------------------------------------
-  let dashboardFilter = 'vitals'
+  let dashboardFilter = sessionStorage.getItem('pdashboard:' + pid) || 'vitals'
 
   async function loadDashboardData() {
     try {
-      const [vitalsRes, encountersRes, diagnosesRes, medsRes, labsRes, admissionsRes, docsRes] = await Promise.all([
+      const [vitalsRes, encountersRes, diagnosesRes, medsRes, labsRes, admissionsRes, docsRes, dosesRes] = await Promise.all([
         listPatientDocs('vitals', pid),
         listPatientDocs('encounters', pid),
         listPatientDocs('diagnoses', pid),
@@ -193,6 +270,7 @@ export async function PatientDetailView(app, params = {}) {
         listPatientDocs('lab_orders', pid),
         listPatientDocs('admissions', pid),
         listPatientDocs('documents', pid),
+        listPatientAdministrations(pid),
       ])
 
       const allVitals = vitalsRes.rows || []
@@ -206,7 +284,8 @@ export async function PatientDetailView(app, params = {}) {
         medsRes.rows || [],
         labsRes.rows || [],
         admissionsRes.rows || [],
-        docsRes.rows || []
+        docsRes.rows || [],
+        dosesRes || []
       )
 
       // Active diagnoses (status === 'Active')
@@ -238,7 +317,7 @@ export async function PatientDetailView(app, params = {}) {
     }
   }
 
-  function buildUnifiedTimeline(encounters, vitals, diagnoses, meds, labs, admissions, docs) {
+  function buildUnifiedTimeline(encounters, vitals, diagnoses, meds, labs, admissions, docs, doses = []) {
     const entries = []
 
     // Encounters
@@ -250,7 +329,7 @@ export async function PatientDetailView(app, params = {}) {
         primary: s(e.encounter_type || e.type || e.reason || 'Encounter'),
         secondary: s(e.reason || e.chief_complaint || 'No reason recorded') + ' · ' + encLabel(e.status),
         status: e.status,
-        clinician: s(e.clinician_name || e.clinician || e.created_by_name),
+        clinician: who(e.clinician_name || e.clinician || e.created_by_name),
         raw: e,
       })
     }
@@ -269,8 +348,8 @@ export async function PatientDetailView(app, params = {}) {
         timestamp: v.created_at,
         icon: '📍',
         primary: parts.join('  •  '),
-        secondary: s(v.created_by_name || v.created_by),
-        clinician: s(v.created_by_name || v.created_by),
+        secondary: who(v.created_by_name || v.created_by),
+        clinician: who(v.created_by_name || v.created_by),
         raw: v,
       })
     }
@@ -282,9 +361,9 @@ export async function PatientDetailView(app, params = {}) {
         timestamp: d.created_at,
         icon: '🩺',
         primary: s(d.condition || d.name || d.icd_code || 'Diagnosis'),
-        secondary: (d.icd_code ? '[' + d.icd_code + '] ' : '') + s(d.status, 'Active') + ' · ' + s(d.created_by_name || d.created_by),
+        secondary: (d.icd_code ? '[' + d.icd_code + '] ' : '') + s(d.status, 'Active') + ' · ' + who(d.created_by_name || d.created_by),
         status: d.status,
-        clinician: s(d.created_by_name || d.created_by),
+        clinician: who(d.created_by_name || d.created_by),
         raw: d,
       })
     }
@@ -296,10 +375,27 @@ export async function PatientDetailView(app, params = {}) {
         timestamp: m.created_at,
         icon: '💊',
         primary: s(m.medicine || m.name) + ' ' + s(m.dosage) + (m.quantity ? ' ×' + m.quantity : ''),
-        secondary: s(m.status, 'Requested') + ' · ' + s(m.created_by_name || m.created_by),
+        secondary: s(m.status, 'Requested') + ' · ' + who(m.created_by_name || m.created_by),
         status: m.status,
-        clinician: s(m.created_by_name || m.created_by),
+        clinician: who(m.created_by_name || m.created_by),
         raw: m,
+      })
+    }
+
+    // Doses actually given — who gave what, when, and how it reached the
+    // patient. Reversals read as their own event so a corrected mistake stays
+    // visible rather than silently disappearing from the record.
+    for (const d of doses) {
+      const reversed = d.type === 'reversed'
+      entries.push({
+        type: 'dose',
+        timestamp: d.administered_at || d.created_at,
+        icon: reversed ? '↩' : '💉',
+        primary: (reversed ? 'Reversed: ' : 'Given: ') + s(d.medicine) + ' ×' + s(d.qty, '1'),
+        secondary: [String(d.route || '').toUpperCase(), s(d.site, ''), s(d.note, '')].filter(Boolean).join(' · ') +
+          (reversed ? ' · ' : ' · ') + who(d.administered_by_name || d.administered_by),
+        clinician: who(d.administered_by_name || d.administered_by),
+        raw: d,
       })
     }
 
@@ -310,9 +406,9 @@ export async function PatientDetailView(app, params = {}) {
         timestamp: l.created_at,
         icon: '🧪',
         primary: s(l.test || l.test_panel || l.panel || 'Lab order'),
-        secondary: s(l.stage || l.status, 'Ordered') + (l.priority ? ' · ' + l.priority : '') + ' · ' + s(l.created_by_name || l.created_by),
+        secondary: s(l.stage || l.status, 'Ordered') + (l.priority ? ' · ' + l.priority : '') + ' · ' + who(l.created_by_name || l.created_by),
         status: l.stage || l.status,
-        clinician: s(l.created_by_name || l.created_by),
+        clinician: who(l.created_by_name || l.created_by),
         raw: l,
       })
     }
@@ -326,10 +422,10 @@ export async function PatientDetailView(app, params = {}) {
         timestamp: a.admissionDate || a.createdAt,
         icon: '🛏️',
         primary: s(a.wardName) + ' · ' + s(a.bedNumber),
-        secondary: s(a.attendingProvider) + ' · ' + s(a.status === 'discharged' ? 'Discharged' : 'Admitted') +
+        secondary: who(a.attendingProvider) + ' · ' + s(a.status === 'discharged' ? 'Discharged' : 'Admitted') +
           (a.encounterId ? ' · from encounter ' + a.encounterId.slice(0, 8) + '…' : ''),
         status: a.status,
-        clinician: s(a.attendingProvider),
+        clinician: who(a.attendingProvider),
         raw: a,
       })
     }
@@ -341,8 +437,8 @@ export async function PatientDetailView(app, params = {}) {
         timestamp: d.created_at,
         icon: '📄',
         primary: s(d.name || d.filename || d.title || 'Document'),
-        secondary: s(d.type || d.kind) + ' · ' + s(d.created_by_name || d.created_by),
-        clinician: s(d.created_by_name || d.created_by),
+        secondary: s(d.type || d.kind) + ' · ' + who(d.created_by_name || d.created_by),
+        clinician: who(d.created_by_name || d.created_by),
         raw: d,
       })
     }
@@ -418,6 +514,7 @@ export async function PatientDetailView(app, params = {}) {
       { value: 'encounters', label: 'Encounters Only' },
       { value: 'diagnoses', label: 'Diagnoses' },
       { value: 'medications', label: 'Medications' },
+      { value: 'dose', label: 'Doses given' },
       { value: 'labs', label: 'Lab Orders/Results' },
       { value: 'admissions', label: 'Admissions' },
       { value: 'documents', label: 'Documents' },
@@ -464,18 +561,19 @@ export async function PatientDetailView(app, params = {}) {
         <div class="summary-item">
           <div class="summary-item-main">
             <span class="summary-item-label">${esc(dx.condition || dx.name || dx.icd_code || 'Diagnosis')}</span>
-            <span class="summary-item-detail">${dx.icd_code ? '[' + esc(dx.icd_code) + ']' : ''} ${esc(dx.status || 'Active')} · ${esc(s(dx.created_by_name || dx.created_by))} · ${esc(when(dx.created_at))}</span>
+            <span class="summary-item-detail">${dx.icd_code ? '[' + esc(dx.icd_code) + ']' : ''} ${esc(dx.status || 'Active')} · ${esc(who(dx.created_by_name || dx.created_by))} · ${esc(when(dx.created_at))}</span>
           </div>
           <span class="pill ok">${esc(dx.status || 'Active')}</span>
         </div>
       `).join('')
-      : '<p class="sub">No active diagnoses.</p>'
+      : '<p class="sub">No active diagnoses.</p>' +
+        (canDx ? ' <button class="btn ghost sm" id="dashDxBtn2">+ Add diagnosis</button>' : '')
 
     // Flattened to one entry per medicine, since a prescription holds several.
     const activeLines = d.activeMeds.flatMap(m => R.toRequestItems(m).map(l => ({
       line: l,
       script: R.normalizeRequest(m),
-      createdBy: m.created_by_name || m.created_by || '',
+        createdBy: staffLabel(m.created_by_name || m.created_by) || '',
       createdAt: m.created_at,
     })))
 
@@ -492,7 +590,8 @@ export async function PatientDetailView(app, params = {}) {
           <span class="pill ${owed === 0 ? 'ok' : 'warn'}">${owed === 0 ? 'Dispensed' : issued + ' of ' + R.toQty(l.quantity, 0) + ' issued'}</span>
         </div>`
       }).join('')
-      : '<p class="sub">No current medications.</p>'
+      : '<p class="sub">No current medications.</p>' +
+        (canRx ? ' <button class="btn ghost sm" id="dashRxBtn2">+ New prescription</button>' : '')
 
     const allergiesHtml = d.allergies.length
       ? d.allergies.map(a => '<span class="allergy-tag-display">' + esc(a) + '</span>').join(' ')
@@ -626,7 +725,7 @@ function paneHtml(t) {
         (rows.length
           ? rows.map((e) => '<div class="titem"><div class="when">' + esc(when(e.created_at)) + '</div>' +
             '<strong>' + esc(s(e.encounter_type || e.type || e.reason || 'Encounter')) + '</strong>' +
-            '<div class="mut">' + esc(s(e.clinician_name || e.clinician || e.note || e.title, 'No detail recorded')) + '</div></div>').join('')
+            '<div class="mut">' + esc(who(e.clinician_name || e.clinician || e.note || e.title, 'No detail recorded')) + '</div></div>').join('')
           : '<p class="sub">No clinical events recorded yet for this patient.</p>') +
         '</div>'
     }
@@ -640,14 +739,14 @@ function paneHtml(t) {
           '<tr class="clickable" data-enc-row="' + esc(e.id) + '" title="View everything recorded on this encounter">' +
           '<td>' + esc(when(e.created_at)) + '</td><td><strong>' + esc(s(e.encounter_type || e.type || e.reason)) + '</strong>' +
           (e.reason && (e.encounter_type || e.type) ? '<div class="mut">' + esc(s(e.reason)) + '</div>' : '') + '</td>' +
-          '<td>' + esc(s(e.clinician_name || e.clinician || e.created_by)) + '</td><td>' + encBadge(e.status) + '</td>' +
+          '<td>' + esc(who(e.clinician_name || e.clinician || e.created_by)) + '</td><td>' + encBadge(e.status) + '</td>' +
           '<td class="mut">View →</td></tr>')
       case 'Vitals':
         return table(['When', 'BP', 'Pulse', 'Temp', 'SpO₂', 'By'], rows, (v) =>
           '<tr><td>' + esc(when(v.created_at)) + '</td>' +
           '<td><strong>' + esc((v.bp_systolic || '—') + '/' + (v.bp_diastolic || '—')) + '</strong></td>' +
           '<td>' + esc(s(v.pulse)) + '</td><td>' + esc(s(v.temp_c)) + '</td><td>' + esc(s(v.spo2)) + '</td>' +
-          '<td class="mut">' + esc(s(v.created_by_name || v.created_by)) + '</td></tr>') +
+          '<td class="mut">' + esc(who(v.created_by_name || v.created_by)) + '</td></tr>') +
           (canVitals ? '<br/><button class="btn" id="vitalsBtn">+ Record vitals</button>' : '')
       case 'Diagnoses':
         return table(['Condition', 'Recorded', 'Status'], rows, (d) =>
@@ -669,11 +768,15 @@ function paneHtml(t) {
             (names.length > 2 ? ' <span class="mut">+' + (names.length - 2) + ' more</span>' : '')
           const lines = script.items.map((l) => {
             const issued = R.toQty(l.dispensed_qty, 0)
+            const given = A.lineGiven(l)
+            const left = A.lineRemainingToGive(l)
             return '<tr><td><strong>' + esc(s(l.medicine)) + '</strong>' +
               (l.external ? ' <span class="pill info">external</span>' : '') + '</td>' +
               '<td>' + esc(s(l.dosage)) + '</td>' +
               '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
               '<td>' + (issued ? esc(issued) : '<span class="mut">—</span>') + '</td>' +
+              '<td>' + (given ? '<strong>' + esc(given) + '</strong>' : '<span class="mut">—</span>') + '</td>' +
+              '<td>' + (left > 0 ? '<span class="pill warn">' + esc(left) + ' to go</span>' : '<span class="pill ok">done</span>') + '</td>' +
               '<td class="mut">' + esc(s(l.instructions)) + '</td></tr>'
           }).join('')
           return '<tr class="clickable" data-rx-row="' + id + '">' +
@@ -681,23 +784,20 @@ function paneHtml(t) {
             '<td>' + summary + '</td>' +
             '<td>' + statusBadge(script.status) + '</td>' +
             '<td class="mut">' + esc(when(raw.created_at)) +
-            (raw.created_by_name || raw.created_by ? '<div class="mut">' + esc(s(raw.created_by_name || raw.created_by)) + '</div>' : '') + '</td>' +
-            '<td style="white-space:nowrap">' +
-              '<button class="btn ghost sm" data-rx-print="' + id + '">🖨 Print</button>' +
-              (canRx && open ? '<button class="btn ghost sm" data-rx-adjust="' + id + '">Adjust</button>' : '') +
-            '</td></tr>' +
+            (raw.created_by_name || raw.created_by ? '<div class="mut">' + esc(who(raw.created_by_name || raw.created_by)) + '</div>' : '') + '</td>' +
+            '<td style="white-space:nowrap">' + kebabCell({ rowId: id, items: [
+              { label: '🖨 Print', dataAction: 'print' },
+              ...(canRx && open ? [{ label: 'Adjust', dataAction: 'adjust' }] : [])
+            ] }) + '</td></tr>' +
             '<tr data-rx-detail="' + id + '" style="display:none"><td colspan="5" style="background:#f8fafc">' +
             (lines
-              ? '<div class="tblwrap"><table class="tbl" style="margin:6px 0">' +
-                '<tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Instructions</th></tr>' +
-                lines + '</table></div>'
+              ? '<div class="tblwrap"><table class="tbl" style="margin:6px 0"><thead><tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Given</th><th></th><th>Instructions</th></tr></thead><tbody>' +
+                lines + '</tbody></table></div>'
               : '<p class="sub" style="margin:8px 0">No medicines on this prescription.</p>') +
             '</td></tr>'
         }).join('')
-        return '<div class="tblwrap"><table class="tbl">' +
-          '<tr><th>Prescription</th><th>Medicines</th><th>Status</th><th>Ordered</th><th></th></tr>' +
-          (scriptRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No prescriptions yet.</td></tr>') +
-          '</table></div>' +
+        return '<div class="tblwrap"><table class="tbl"><thead><tr><th>Prescription</th><th>Medicines</th><th>Status</th><th>Ordered</th><th style="width:100px">Actions</th></tr></thead><tbody>' +
+          (scriptRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No prescriptions yet.</td></tr>') + '</tbody></table></div>' +
           (canRx ? '<br/><button class="btn" id="rxBtn">+ New prescription</button>' : '')
       }
       case 'Labs':
@@ -709,7 +809,7 @@ function paneHtml(t) {
           const a = normalizeAdmission(raw)
           return '<tr><td><strong>' + esc(s(a.wardName) + ' · ' + s(a.bedNumber)) + '</strong></td>' +
             '<td>' + esc(when(a.admissionDate || a.createdAt)) + '</td>' +
-            '<td>' + esc(s(a.attendingProvider)) + '</td>' +
+            '<td>' + esc(who(a.attendingProvider)) + '</td>' +
             '<td>' + (a.encounterId
               ? '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(a.encounterId) + '">View</a>'
               : '<span class="mut">—</span>') + '</td>' +
@@ -853,6 +953,21 @@ function paneHtml(t) {
       hint: 'Edit this script. Medicines the pharmacy has already issued are locked and stay on the prescription.',
       initialLines: toModalLines(script),
       onSubmit: async (lines) => {
+        // Allergy safety check: warn if any prescribed medicine matches a
+        // known patient allergy (case-insensitive substring match).
+        const allergies = Array.isArray(p.allergy) ? p.allergy : (p.allergy ? String(p.allergy).split(/[,;]/).map(s => s.trim()).filter(Boolean) : [])
+        const conflicts = lines.filter((l) => {
+          const med = String(l.medicine || '').toLowerCase()
+          return allergies.some((a) => med.includes(a.toLowerCase()) || a.toLowerCase().includes(med))
+        })
+        if (conflicts.length) {
+          const names = conflicts.map((l) => esc(l.medicine)).join(', ')
+          const confirmed = window.confirm(
+            'Allergy alert: ' + names + ' matches a recorded allergy for ' + esc(p.name) +
+            '. Continue prescribing anyway?'
+          )
+          if (!confirmed) return
+        }
         try {
           await updateRequestItems(script.id, lines)
         } catch (e) {
@@ -883,6 +998,21 @@ function paneHtml(t) {
       title: 'New prescription',
       submitLabel: 'Send to pharmacy',
       onSubmit: async (lines) => {
+        // Allergy safety check: warn if any prescribed medicine matches a
+        // known patient allergy (case-insensitive substring match).
+        const allergies = Array.isArray(p.allergy) ? p.allergy : (p.allergy ? String(p.allergy).split(/[,;]/).map(s => s.trim()).filter(Boolean) : [])
+        const conflicts = lines.filter((l) => {
+          const med = String(l.medicine || '').toLowerCase()
+          return allergies.some((a) => med.includes(a.toLowerCase()) || a.toLowerCase().includes(med))
+        })
+        if (conflicts.length) {
+          const names = conflicts.map((l) => esc(l.medicine)).join(', ')
+          const confirmed = window.confirm(
+            'Allergy alert: ' + names + ' matches a recorded allergy for ' + esc(p.name) +
+            '. Continue prescribing anyway?'
+          )
+          if (!confirmed) return
+        }
         const rxArgs = { patientId: pid, patientName: p.name || '', lines }
         let created = false
         let queued = false
@@ -1014,7 +1144,7 @@ function paneHtml(t) {
   async function openEncounterDetail(e) {
     const eid = e.id
     const encType = s(e.encounter_type || e.type || e.reason || 'Encounter')
-    const clinician = s(e.clinician_name || e.clinician || e.created_by_name || e.created_by)
+    const clinician = who(e.clinician_name || e.clinician || e.created_by_name || e.created_by)
     const vitals = e.vitals && typeof e.vitals === 'object' ? e.vitals : {}
     const dxList = (Array.isArray(e.diagnoses) && e.diagnoses.length)
       ? e.diagnoses
@@ -1038,7 +1168,7 @@ function paneHtml(t) {
         '<div class="kv" style="grid-template-columns:1fr 1fr 1fr">' +
         kvRow('Type', encType) + kvRow('Clinician', clinician) + kvRow('Status', encLabel(e.status)) +
         kvRow('Opened', when(e.created_at)) + kvRow('Last updated', when(e.updated_at)) +
-        kvRow('Recorded by', s(e.created_by_name || e.created_by)) +
+        kvRow('Recorded by', who(e.created_by_name || e.created_by)) +
         '</div>' +
         (e.reason && (e.encounter_type || e.type)
           ? '<div style="margin-top:10px"><em style="font-style:normal;font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--emr-muted)">Reason</em>' +
@@ -1070,8 +1200,7 @@ function paneHtml(t) {
       + section('Treatment plan', pre(e.treatment_plan))
       + section('Prescriptions',
         (rxItems.length
-          ? '<div class="tblwrap"><table class="tbl">' +
-            '<tr><th>Medicine</th><th>Dosage</th><th>Qty</th><th>Instructions</th></tr>' +
+          ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Medicine</th><th>Dosage</th><th>Qty</th><th>Instructions</th></tr></thead><tbody>' +
             rxItems.map((l) =>
               '<tr><td><strong>' + esc(s(l.medicine)) + '</strong>' +
               (l.external ? ' <span class="pill info">external</span>' : '') +
@@ -1079,19 +1208,19 @@ function paneHtml(t) {
               '<td>' + esc(s(l.dosage)) + '</td>' +
               '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
               '<td class="mut">' + esc(s(l.instructions)) + '</td></tr>').join('') +
-            '</table></div>'
+            '</tbody></table></div>'
           : '<p class="sub" style="margin:0">No medicines snapshotted on the encounter.</p>') +
         '<div id="encd-rx"><p class="sub" style="margin:8px 0 0">Loading pharmacy scripts…</p></div>')
+      + section('Medications given', '<div id="encd-doses"><p class="sub" style="margin:0">Loading doses…</p></div>')
       + section('Lab orders',
         (labSnap.length
-          ? '<div class="tblwrap"><table class="tbl">' +
-            '<tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr>' +
+          ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr></thead><tbody>' +
             labSnap.map((o) =>
               '<tr><td><strong>' + esc(s(o.lab_order_id || o.id)) + '</strong></td>' +
               '<td>' + esc(s(o.test_panel || (Array.isArray(o.tests) ? o.tests.join(', ') : ''))) + '</td>' +
               '<td>' + esc(s(o.priority, 'Routine')) + '</td>' +
               '<td class="mut">' + esc(when(o.ordered_at)) + '</td></tr>').join('') +
-            '</table></div>'
+            '</tbody></table></div>'
           : '<p class="sub" style="margin:0">No lab orders snapshotted on the encounter.</p>') +
         '<div id="encd-labs"><p class="sub" style="margin:8px 0 0">Loading lab orders…</p></div>')
       + section('Admissions', '<div id="encd-adm"><p class="sub" style="margin:0">Loading admissions…</p></div>')
@@ -1120,13 +1249,12 @@ function paneHtml(t) {
 
     const lv = linked(vitalsRes.rows)
     fill('encd-vitals', lv.length
-      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl">' +
-        '<tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>SpO₂</th><th>By</th></tr>' +
+      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>When</th><th>BP</th><th>Pulse</th><th>Temp</th><th>SpO₂</th><th>By</th></tr></thead><tbody>' +
         lv.map((v) => '<tr><td>' + esc(when(v.created_at)) + '</td>' +
           '<td><strong>' + esc((v.bp_systolic || '—') + '/' + (v.bp_diastolic || '—')) + '</strong></td>' +
           '<td>' + esc(s(v.pulse)) + '</td><td>' + esc(s(v.temp_c)) + '</td><td>' + esc(s(v.spo2)) + '</td>' +
-          '<td class="mut">' + esc(s(v.created_by_name || v.created_by)) + '</td></tr>').join('') +
-        '</table></div>'
+          '<td class="mut">' + esc(who(v.created_by_name || v.created_by)) + '</td></tr>').join('') +
+        '</tbody></table></div>'
       : none)
 
     const ldx = linked(dxRes.rows)
@@ -1134,7 +1262,7 @@ function paneHtml(t) {
       ? '<div style="margin-top:8px">' + ldx.map((d) =>
         '<div class="summary-item"><div class="summary-item-main">' +
         '<span class="summary-item-label">' + esc(s(d.condition || d.name || d.icd_code)) + '</span>' +
-        '<span class="summary-item-detail">' + esc(when(d.created_at)) + ' · ' + esc(s(d.created_by_name || d.created_by)) + '</span>' +
+        '<span class="summary-item-detail">' + esc(when(d.created_at)) + ' · ' + esc(who(d.created_by_name || d.created_by)) + '</span>' +
         '</div><span class="pill ok">' + esc(s(d.status, 'Active')) + '</span></div>').join('') + '</div>'
       : '')
 
@@ -1146,43 +1274,62 @@ function paneHtml(t) {
           '<tr><td><strong>' + esc(s(l.medicine)) + '</strong></td><td>' + esc(s(l.dosage)) + '</td>' +
           '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
           '<td>' + (R.toQty(l.dispensed_qty, 0) ? esc(R.toQty(l.dispensed_qty, 0)) : '<span class="mut">—</span>') + '</td>' +
+          '<td>' + (A.lineGiven(l) ? '<strong>' + esc(A.lineGiven(l)) + '</strong>' : '<span class="mut">—</span>') + '</td>' +
+          '<td>' + (A.lineRemainingToGive(l) > 0 ? '<span class="pill warn">' + esc(A.lineRemainingToGive(l)) + ' to go</span>' : '<span class="pill ok">done</span>') + '</td>' +
           '<td class="mut">' + esc(s(l.instructions)) + '</td></tr>').join('')
         return '<div style="margin-top:10px"><div class="toolbar" style="margin-bottom:4px">' +
           statusBadge(script.status) +
           '<span class="mut">Script ' + esc(String(script.id).slice(0, 8)) + ' · ' + esc(when(raw.created_at)) +
-          (script.prescribedBy ? ' · ' + esc(script.prescribedBy) : '') + '</span></div>' +
+          (script.prescribedBy ? ' · ' + esc(staffLabel(script.prescribedBy) || script.prescribedBy) : '') + '</span></div>' +
           (lines
-            ? '<div class="tblwrap"><table class="tbl">' +
-              '<tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Instructions</th></tr>' +
-              lines + '</table></div>'
+            ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Given</th><th></th><th>Instructions</th></tr></thead><tbody>' +
+              lines + '</tbody></table></div>'
             : '<p class="sub" style="margin:0">No lines on this script.</p>') +
           '</div>'
       }).join('')
       : '')
 
+    // Doses actually given on this encounter — who, what, how it reached the
+    // patient. Reversals stay visible beside the original rather than editing it.
+    const doses = await listPatientAdministrations(pid).catch(() => [])
+    const ldoses = (doses || []).filter((d) => d.encounter_id === eid)
+    fill('encd-doses', ldoses.length
+      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>When</th><th>Medicine</th><th>Qty</th><th>Route</th><th>By</th></tr></thead><tbody>' +
+        ldoses.map((d) => {
+          const reversed = d.type === 'reversed'
+          return '<tr><td class="mut">' + esc(when(d.administered_at || d.created_at)) + '</td>' +
+            '<td><strong>' + esc(s(d.medicine)) + '</strong>' +
+            (reversed ? ' <span class="pill warn">reversed</span>' : '') +
+            (d.site ? '<div class="mut">' + esc(d.site) + '</div>' : '') +
+            (d.note ? '<div class="mut">' + esc(d.note) + '</div>' : '') + '</td>' +
+            '<td>' + esc(String(d.qty || 1)) + (d.unit ? ' ' + esc(d.unit) : '') + '</td>' +
+            '<td>' + esc(String(d.route || 'oral').toUpperCase()) + '</td>' +
+            '<td class="mut">' + esc(who(d.administered_by_name || d.administered_by)) + '</td></tr>'
+        }).join('') +
+        '</tbody></table></div>'
+      : none)
+
     const llabs = linked(labsRes.rows)
     fill('encd-labs', llabs.length
-      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl">' +
-        '<tr><th>Order</th><th>Test</th><th>Stage</th><th>Ordered</th></tr>' +
+      ? '<div class="tblwrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Order</th><th>Test</th><th>Stage</th><th>Ordered</th></tr></thead><tbody>' +
         llabs.map((l) => '<tr><td><strong>' + esc(s(l.id)) + '</strong></td>' +
           '<td>' + esc(s(l.test || l.test_panel || l.panel)) + '</td>' +
           '<td>' + statusBadge(s(l.stage || l.status, 'Ordered')) + '</td>' +
           '<td class="mut">' + esc(when(l.created_at)) + '</td></tr>').join('') +
-        '</table></div>'
+        '</tbody></table></div>'
       : '')
 
     const ladm = linked(admsRes.rows)
     fill('encd-adm', ladm.length
-      ? '<div class="tblwrap"><table class="tbl">' +
-        '<tr><th>Ward · Bed</th><th>Since</th><th>Doctor</th><th>Status</th></tr>' +
+      ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Ward · Bed</th><th>Since</th><th>Doctor</th><th>Status</th></tr></thead><tbody>' +
         ladm.map((raw) => {
           const a = normalizeAdmission(raw)
           return '<tr><td><strong>' + esc(s(a.wardName) + ' · ' + s(a.bedNumber)) + '</strong></td>' +
             '<td>' + esc(when(a.admissionDate || a.createdAt)) + '</td>' +
-            '<td>' + esc(s(a.attendingProvider)) + '</td>' +
+            '<td>' + esc(who(a.attendingProvider)) + '</td>' +
             '<td>' + statusBadge(a.status === 'discharged' ? 'Discharged' : 'Admitted') + '</td></tr>'
         }).join('') +
-        '</table></div>'
+        '</tbody></table></div>'
       : none)
   }
 
@@ -1280,7 +1427,62 @@ function paneHtml(t) {
     })
   }
 
+  function openEdit() {
+    window.location.hash = '#/patients/' + pid + '/edit'
+  }
+
+  async function openPhotoUpload() {
+    const { activeOrg } = authStore.getState()
+    if (!activeOrg) { toast('No hospital selected'); return }
+    openModal('Upload patient photo',
+      '<input type="file" id="photoFile" accept="image/*" style="display:none">' +
+      '<button class="btn sm" id="photoPick">📎 Choose file</button>' +
+      '<button class="btn ghost sm" id="photoShoot">📷 Take photo</button>' +
+      '<p class="sub" style="margin-top:10px">Photo is compressed to WebP (≤ 500 KB) and stored in the patient record.</p>' +
+      '<div class="mrow"><button class="btn ghost" data-close>Cancel</button></div>')
+    const input = document.getElementById('photoFile')
+    const pick = document.getElementById('photoPick')
+    const shoot = document.getElementById('photoShoot')
+    if (pick) pick.onclick = () => input.click()
+    if (shoot) shoot.onclick = () => { input.capture = 'environment'; input.click() }
+    input.onchange = async () => {
+      const file = input.files && input.files[0]
+      if (!file) return
+      try {
+        await upsertPatientPhoto({ pid, file })
+        toast('Photo uploaded')
+        closeModal()
+        photoMeta = await getPatientPhotoMeta(pid)
+        const blob = await getPatientPhotoBlob(pid)
+        if (blob) photoUrl = URL.createObjectURL(blob)
+        refreshHeaderPhoto()
+      } catch (e) {
+        toast(friendlyPatientError(e, 'Upload failed'))
+      }
+    }
+  }
+
+  async function openPhotoRemove() {
+    if (!confirm('Remove this patient\'s photo?')) return
+    try {
+      await removePatientPhoto(pid)
+      toast('Photo removed')
+      closeModal()
+        photoUrl = null
+        photoMeta = null
+        refreshHeaderPhoto()
+      } catch (e) {
+        toast(friendlyPatientError(e, 'Could not remove photo'))
+    }
+  }
+
   function openConsent() {
+    const { activeOrg } = authStore.getState()
+    if (!activeOrg) { toast('No hospital selected'); return }
+    if (!can(myActiveMembership(), 'patient.demographics.update')) {
+      toast('Your role cannot record consent. Ask an administrator.')
+      return
+    }
     formModal({
       title: 'Record consent',
       submitLabel: 'Save consent',
@@ -1323,11 +1525,11 @@ function paneHtml(t) {
       }
     })
     const scriptFor = (id) => (loadCache.Medications?.rows || []).find((x) => x.id === id)
-    pane.querySelectorAll('[data-rx-print]').forEach((b) => {
-      b.onclick = () => { const raw = scriptFor(b.getAttribute('data-rx-print')); if (raw) printScript(raw) }
-    })
-    pane.querySelectorAll('[data-rx-adjust]').forEach((b) => {
-      b.onclick = () => { const raw = scriptFor(b.getAttribute('data-rx-adjust')); if (raw) adjustScript(raw) }
+    wireKebabs(pane, (rowId, action) => {
+      const raw = scriptFor(rowId)
+      if (!raw) return
+      if (action === 'print') printScript(raw)
+      if (action === 'adjust') adjustScript(raw)
     })
     const a = document.getElementById('admBtn'); if (a) a.onclick = openAdmission
     // Discharge buttons rendered inside the Admissions tab rows.
@@ -1347,6 +1549,7 @@ function paneHtml(t) {
     if (feedFilter) {
       feedFilter.onchange = () => {
         dashboardFilter = feedFilter.value
+        sessionStorage.setItem('pdashboard:' + pid, dashboardFilter)
         // Re-render just the feed list
         const d = loadCache.Dashboard || { timeline: [] }
         let filtered = d.timeline
@@ -1408,6 +1611,8 @@ function paneHtml(t) {
     const dashDx = document.getElementById('dashDxBtn'); if (dashDx) dashDx.onclick = openDiagnosis
     const dashRx = document.getElementById('dashRxBtn'); if (dashRx) dashRx.onclick = openPrescription
     const dashAdm = document.getElementById('dashAdmBtn'); if (dashAdm) dashAdm.onclick = openAdmission
+    const dashDx2 = document.getElementById('dashDxBtn2'); if (dashDx2) dashDx2.onclick = openDiagnosis
+    const dashRx2 = document.getElementById('dashRxBtn2'); if (dashRx2) dashRx2.onclick = openPrescription
 
     wireToast(pane)
   }

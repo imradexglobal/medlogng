@@ -2,7 +2,7 @@ import './styles.css'
 import './app.css'
 import { auth } from './firebase.js'
 import { authStore } from './store/authStore.js'
-import { initAuthListener } from './services/authService.js'
+import { initAuthListener, attemptOfflineLogin, saveLastLogin, refreshSession } from './services/authService.js'
 import { primePayers } from './services/payerService.js'
 import { registerRoute, initRouter, handleRoute, navigate, setGuard } from './router.js'
 import { checkAccess, startAccessWatch } from './services/authService.js'
@@ -23,6 +23,7 @@ const EditPatientView = () => import('./views/EditPatientView.js').then((m) => m
 const AppointmentsView = () => import('./views/AppointmentsView.js').then((m) => m.AppointmentsView)
 const ConsultationsView = () => import('./views/ConsultationsView.js').then((m) => m.ConsultationsView)
 const AdmissionsView = () => import('./views/AdmissionsView.js').then((m) => m.AdmissionsView)
+const AdmitView = () => import('./views/AdmitView.js').then((m) => m.AdmitView)
 const AdmissionWorkspaceView = () => import('./views/AdmissionWorkspaceView.js').then((m) => m.AdmissionWorkspaceView)
 const LaboratoryView = () => import('./views/LaboratoryView.js').then((m) => m.LaboratoryView)
 const LabNewOrderView = () => import('./views/LabNewOrderView.js').then((m) => m.LabNewOrderView)
@@ -30,7 +31,10 @@ const LabOrderView = () => import('./views/LabOrderView.js').then((m) => m.LabOr
 const LabResultView = () => import('./views/LabResultView.js').then((m) => m.LabResultView)
 const LabCatalogueView = () => import('./views/LabCatalogueView.js').then((m) => m.LabCatalogueView)
 const PharmacyView = () => import('./views/PharmacyView.js').then((m) => m.PharmacyView)
-const BillingView = () => import('./views/BillingView.js').then((m) => m.BillingView)
+const PharmacyDrugFormView = () => import('./views/PharmacyDrugFormView.js').then((m) => m.PharmacyDrugFormView)
+const PharmacyReceiveView = () => import('./views/PharmacyReceiveView.js').then((m) => m.PharmacyReceiveView)
+const PharmacyRequestView = () => import('./views/PharmacyRequestView.js').then((m) => m.PharmacyRequestView)
+const BillingView = () => import('./views/BillingView.jsx').then((m) => m.default)
 const InvoiceDetailView = () => import('./views/InvoiceDetailView.js').then((m) => m.InvoiceDetailView)
 const ReportsView = () => import('./views/ReportsView.js').then((m) => m.ReportsView)
 const AdminView = () => import('./views/AdminView.js').then((m) => m.AdminView)
@@ -47,6 +51,10 @@ registerRoute('/patients/:id', PatientDetailView, { auth: true })
 registerRoute('/patients/:id/edit', EditPatientView, { auth: true })
 registerRoute('/appointments', AppointmentsView, { auth: true })
 registerRoute('/consultations', ConsultationsView, { auth: true })
+// `/admissions/new` must be registered before `/admissions/:id` — the router
+// matches in registration order, and the wildcard would otherwise swallow
+// "new", opening the workspace with id "new" ("admission could not be loaded").
+registerRoute('/admissions/new', AdmitView, { auth: true })
 registerRoute('/admissions/:id', AdmissionWorkspaceView, { auth: true })
 registerRoute('/admissions', AdmissionsView, { auth: true })
 registerRoute('/laboratory', LaboratoryView, { auth: true })
@@ -56,6 +64,10 @@ registerRoute('/laboratory/catalogue/:id', LabCatalogueView, { auth: true })
 registerRoute('/laboratory/orders/:id/items/:itemId', LabResultView, { auth: true })
 registerRoute('/laboratory/orders/:id', LabOrderView, { auth: true })
 registerRoute('/pharmacy', PharmacyView, { auth: true })
+registerRoute('/pharmacy/drugs/new', PharmacyDrugFormView, { auth: true })
+registerRoute('/pharmacy/drugs/:id', PharmacyDrugFormView, { auth: true })
+registerRoute('/pharmacy/receive', PharmacyReceiveView, { auth: true })
+registerRoute('/pharmacy/requests/:id', PharmacyRequestView, { auth: true })
 registerRoute('/billing', BillingView, { auth: true })
 registerRoute('/billing/:id', InvoiceDetailView, { auth: true })
 registerRoute('/reports', ReportsView, { auth: true })
@@ -88,22 +100,38 @@ setGuard(checkAccess)
 
 // Re-route once auth state is ready (login persistence across reloads).
 let booted = false
-authStore.subscribe((s) => {
+authStore.subscribe(async (s) => {
   if (!s.ready || booted) return
   booted = true
-  // Wait for auth token to be fully ready (ID token refreshed) before
+  // Attempt offline login with last saved user if we are not already signed in.
+  // This allows the last logged-in user to use the app offline.
+  if (!s.user) {
+    const wasSignedIn = await attemptOfflineLogin()
+    if (wasSignedIn) {
+      // Refresh session after attempted auto-login
+      await refreshSession()
+    }
+  }
+  // Wait briefly for the auth token to be ready (ID token refreshed) before
   // priming payers — avoids "Missing or insufficient permissions" on the
-  // first read when the token hasn't propagated yet.
-  auth.currentUser?.getIdToken().then(() => {
+  // first read when the token hasn't propagated yet. Offline (or a dead
+  // connection) must not stall on this: race the refresh against a short
+  // timeout and prime either way — listPayers serves the localStorage
+  // snapshot when Firestore is unreachable.
+  const tokenReady = auth.currentUser?.getIdToken().catch(() => {})
+  if (tokenReady && navigator.onLine !== false) {
+    Promise.race([
+      tokenReady,
+      new Promise((resolve) => setTimeout(resolve, 2500)),
+    ]).then(() => primePayers()).catch(() => primePayers())
+  } else {
     primePayers()
-  }).catch(() => {
-    primePayers()
-  })
+  }
   const hash = (window.location.hash || '').replace(/^#/, '')
   if (!hash || hash === '/' || hash === '/welcome') {
     const target = s.user ? '/' : '/login'
     navigate(target)
-// navigate() only fires hashchange when the hash actually changes. If we
+    // navigate() only fires hashchange when the hash actually changes. If we
     // are already sitting on the target (e.g. cold load at #/ while signed in),
     // no event will arrive, so render here instead. Calling it unconditionally
     // would enter the same route twice and mount the view twice.

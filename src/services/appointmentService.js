@@ -9,6 +9,7 @@ import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
 import { runChunk } from './pagination.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const APPOINTMENTS = 'appointments'
 
@@ -22,6 +23,7 @@ export function myAppointmentCaps() {
   return {
     membership: me,
     canCreate: can(me, 'appointment.create'),
+    canUpdate: can(me, 'appointment.update'),
   }
 }
 
@@ -59,8 +61,8 @@ function mapAppointmentDoc(d) {
 function applyAppointmentFilters(rows, filters = {}) {
   if (filters.status) rows = rows.filter((r) => r.status === filters.status)
   if (filters.clinic) rows = rows.filter((r) => r.clinic === filters.clinic)
-  // Sort by time descending (newest first)
-  rows.sort((a, b) => b.createdAt - a.createdAt)
+  // Sort by appointment time ascending (earliest slot first)
+  rows.sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')))
   return rows
 }
 
@@ -78,7 +80,7 @@ export async function listOrgAppointmentsPage(orgId, { pageSize = APPOINTMENTS_P
   const base = query(
     collection(db, APPOINTMENTS),
     where('organization_id', '==', orgId),
-    orderBy('created_at', 'desc'),
+    orderBy('time', 'asc'),
   )
   const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
   return { rows: applyAppointmentFilters(docs.map(mapAppointmentDoc), filters), hasMore, cursor: next }
@@ -92,7 +94,7 @@ function buildOrgAppointmentsLiveQuery(orgId) {
   return query(
     collection(db, APPOINTMENTS),
     where('organization_id', '==', orgId),
-    orderBy('created_at', 'desc'),
+    orderBy('time', 'asc'),
     limit(LIVE_LIMIT),
   )
 }
@@ -120,6 +122,16 @@ export async function createAppointment(input) {
   if (!input.time) throw new Error('Date/time is required.')
   if (!input.clinic) throw new Error('Clinic/department is required.')
 
+  // Validate the appointment time is parseable and in the future
+  const apptTime = Date.parse(String(input.time))
+  if (isNaN(apptTime)) throw new Error('Invalid date/time — use the date picker.')
+  if (apptTime <= Date.now()) throw new Error('Appointment time must be in the future.')
+
+  // Prevent double-booking at the same slot
+  if (await checkAppointmentConflict(activeOrg, input.time)) {
+    throw new Error('An appointment is already booked at this time. Choose a different slot.')
+  }
+
   const pid = input.patient_id
   // Verify patient exists in this organization
   try {
@@ -145,7 +157,7 @@ export async function createAppointment(input) {
     status: 'scheduled',
     checkedIn: false,
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
   }
@@ -167,9 +179,9 @@ export async function updateAppointmentStatus(id, status) {
 
   const validStatuses = ['scheduled', 'checked-in', 'completed', 'cancelled', 'no-show']
   if (!validStatuses.includes(status)) throw new Error('Invalid appointment status: ' + status)
-  // Rules require `appointment.create` for appointment updates.
-  if (!can(myActiveMembership(), 'appointment.create')) {
-    throw new Error('Your role cannot update appointments (missing "appointment.create" capability). Ask an administrator to re-save your role.')
+  // Rules require `appointment.update` for appointment status changes.
+  if (!can(myActiveMembership(), 'appointment.update')) {
+    throw new Error('Your role cannot update appointments (missing "appointment.update" capability). Ask an administrator to re-save your role.')
   }
 
   await updateDoc(doc(db, APPOINTMENTS, id), {

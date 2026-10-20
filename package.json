@@ -7,7 +7,7 @@
   "description": "MediLog NG — EMR for Nigerian hospitals (offline-first web + Android + Electron desktop)",
   "scripts": {
     "smoke": "node scripts/smoke.mjs",
-    "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/lab.imaging.test.mjs && node scripts/test/lab.lims.test.mjs",
+    "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/administration.test.mjs && node scripts/test/lab.imaging.test.mjs && node scripts/test/lab.lims.test.mjs && node scripts/test/delete.service.test.mjs",
     "test": "node scripts/smoke.mjs && npm run test:services",
     "test:hub": "node scripts/test/hub.smoke.mjs",
     "hub": "node hub/server.js",

@@ -15,6 +15,7 @@ import {
   sanitizeComponent, sortComponents, snapshotTestConfig, starterTestToDoc,
   DEFAULT_CATEGORIES, DEFAULT_SPECIMEN_TYPES, STARTER_TESTS, RESULT_TYPES, RESULT_TYPE_VALUES,
 } from '../features/labs/domain.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const CATALOGUE = 'lab_test_catalogue'
 const SETTINGS = 'lab_settings'
@@ -129,7 +130,7 @@ export async function createTest(input) {
     sort_order: Number(input.sort_order) || 0,
     components,
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
   }
@@ -228,7 +229,7 @@ export async function seedStarterCatalogue() {
       organization_id: activeOrg,
       ...docIn,
       created_by: user?.uid || null,
-      created_by_name: user?.email || '',
+      created_by_name: currentStaffName(),
       created_at: now,
       updated_at: now,
     })
@@ -241,6 +242,82 @@ export async function seedStarterCatalogue() {
     })
   } catch (e) { console.warn('[lab-catalogue] audit append failed:', e?.message) }
   return created
+}
+
+// ---- apply standard reference ranges to existing tests ------------------------
+// Fills blank ref_low/ref_high/ref_text on existing catalogue components from
+// the standard STARTER_TESTS definitions. Never overwrites ranges already set.
+export async function applyStandardReferenceRanges() {
+  requireCatalogueManage()
+  const { activeOrg } = authStore.getState()
+  if (!activeOrg) throw new Error('No hospital selected.')
+
+  const tests = await listOrgTests(activeOrg)
+  if (!tests.length) throw new Error('No tests in catalogue to update.')
+
+  const standardByCode = {}
+  STARTER_TESTS.forEach((t) => {
+    standardByCode[t.code.toUpperCase()] = t
+  })
+
+  let updatedTests = 0
+  let updatedComponents = 0
+
+  for (const test of tests) {
+    const standard = standardByCode[test.code]
+    if (!standard) continue
+
+    const standardByName = {}
+    standard.components.forEach((c) => {
+      standardByName[c.name.toUpperCase()] = c
+    })
+
+    let testChanged = false
+    const components = [...(test.raw.components || [])]
+
+    for (let i = 0; i < components.length; i++) {
+      const comp = components[i]
+      const std = standardByName[comp.name.toUpperCase()]
+      if (!std) continue
+
+      const needsLow = comp.ref_low == null || comp.ref_low === ''
+      const needsHigh = comp.ref_high == null || comp.ref_high === ''
+      const needsText = comp.ref_text == null || comp.ref_text === ''
+
+      if (needsLow && std.ref_low != null) {
+        comp.ref_low = std.ref_low
+        testChanged = true
+        updatedComponents++
+      }
+      if (needsHigh && std.ref_high != null) {
+        comp.ref_high = std.ref_high
+        testChanged = true
+        updatedComponents++
+      }
+      if (needsText && std.ref_text != null && std.ref_text !== '') {
+        comp.ref_text = std.ref_text
+        testChanged = true
+        updatedComponents++
+      }
+    }
+
+    if (testChanged) {
+      const input = {
+        code: test.code,
+        name: test.name,
+        category: test.category,
+        specimen_type: test.specimen_type,
+        price_kobo: test.priceKobo,
+        turnaround_hours: test.turnaroundHours,
+        components,
+        sort_order: test.sortOrder,
+      }
+      await updateTest(test.id, input)
+      updatedTests++
+    }
+  }
+
+  return { updatedTests, updatedComponents }
 }
 
 // ---- laboratory settings ------------------------------------------------------

@@ -10,14 +10,16 @@ import {
   myAdminCaps, listMembers, approveMember, rejectMember, suspendMember,
   reactivateMember, updateMemberRole, updateMemberCapabilities, requirePasswordReset, listInvites,
   createInvite, revokeInvite, updateOrgProfile, registerThisDevice,
-  listOrgDevices, setDeviceStatus, listAudit, AUDIT_ACTIONS,
+  listOrgDevices, setDeviceStatus, listAudit, AUDIT_ACTIONS, updateMemberName,
   friendlyAdminError,
 } from '../services/adminService.js'
+import { staffLabel, staffNameForId } from '../lib/staffName.js'
 import { ROLE_OPTIONS, ALL_CAPS, capsForRole, normalizeCaps, isValidEmail } from '../features/admin/roles.js'
 import {
   listPayers, savePayer, setPayerActive, deletePayer, refreshCache,
   myPayerCaps, cachedPayers, PAYER_CATEGORIES,
 } from '../services/payerService.js'
+import { listOrgTests, getLabSettings, myLabAdminCaps } from '../services/labCatalogueService.js'
 import { isDevHost, hostName } from '../utils/env.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { esc } from '../utils/sanitize.js'
@@ -33,7 +35,8 @@ import {
 // staff never see the tab — they only ever read the cached list into the payer
 // dropdown on Register patient / Edit demographics / New invoice.
 const DATA_TAB = 'Data import / export'
-const TABS = ['Staff & roles', 'Organization', 'Devices', 'Audit trail', DATA_TAB]
+const LAB_TAB = 'Laboratory'
+const TABS = ['Staff & roles', 'Organization', 'Devices', 'Audit trail', LAB_TAB, DATA_TAB]
 const DEV_TAB = 'Payment types'
 const visibleTabs = () => (isDevHost() ? [...TABS, DEV_TAB] : TABS)
 
@@ -171,18 +174,22 @@ export async function AdminView(app) {
     if (canManageRoles) {
       if (m.status === 'pending') {
         actions = '<button class="btn sm" data-approve="' + esc(m.id) + '">Approve</button> ' +
-          '<button class="btn ghost sm" data-reject="' + esc(m.id) + '">Reject</button>'
+          '<button class="btn ghost sm" data-reject="' + esc(m.id) + '">Reject</button> ' +
+          '<button class="btn ghost sm" data-rename="' + esc(m.id) + '">Rename</button>'
       } else if (m.status === 'active') {
-        actions = (self ? '<span class="muted">you</span>'
+        actions = (self ? '<span class="muted">you</span> '
           : '<button class="btn ghost sm" data-saverole="' + esc(m.id) + '">Save role</button> ' +
             '<button class="btn ghost sm" data-editcaps="' + esc(m.id) + '">Edit caps</button> ' +
             '<button class="btn ghost sm" data-suspend="' + esc(m.id) + '">Suspend</button> ' +
-            '<button class="btn ghost sm" data-pwreset="' + esc(m.id) + '">' + (m.must_change_password ? 'Clear pw flag' : 'Require pw change') + '</button>')
+            '<button class="btn ghost sm" data-pwreset="' + esc(m.id) + '">' + (m.must_change_password ? 'Clear pw flag' : 'Require pw change') + '</button> ') +
+          '<button class="btn ghost sm" data-rename="' + esc(m.id) + '">Rename</button>'
       } else {
-        actions = '<button class="btn ghost sm" data-reactivate="' + esc(m.id) + '">Reactivate</button>'
+        actions = '<button class="btn ghost sm" data-reactivate="' + esc(m.id) + '">Reactivate</button> ' +
+          '<button class="btn ghost sm" data-rename="' + esc(m.id) + '">Rename</button>'
       }
     }
-    return '<tr><td><strong>' + esc(m.staff_name || '(no name)') + '</strong>' + flags + '</td>' +
+    return '<tr><td><strong>' + esc(m.staff_name || '(no name)') + '</strong>' +
+      (m.email ? '<div class="mut">' + esc(m.email) + '</div>' : '') + flags + '</td>' +
       '<td>' + roleSel + (m.requested_role && m.requested_role !== m.role ? '<div class="mut">requested: ' + esc(m.requested_role) + '</div>' : '') + '</td>' +
       '<td class="mut" title="' + esc((m.capabilities || []).join('\n')) + '">' + esc(capsOf(m)) + '</td><td>' + statusPill(m.status) + '</td><td>' + actions + '</td></tr>'
   }
@@ -198,17 +205,17 @@ export async function AdminView(app) {
         '<span class="sub">New staff: enter email + role + capabilities → they sign up themselves with that email + Org ID, then you approve.</span></div>' : '') +
       '<h3>Pending approvals (' + pending.length + ')</h3>' +
       (pending.length
-        ? '<div class="tblwrap"><table class="tbl"><tr><th>Staff</th><th>Role</th><th>Caps</th><th>Status</th><th></th></tr>' + pending.map(memberRow).join('') + '</table></div>'
+        ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Staff</th><th>Role</th><th>Caps</th><th>Status</th><th></th></tr></thead><tbody>' + pending.map(memberRow).join('') + '</tbody></table></div>'
         : '<p class="sub">No pending requests. Share the Org ID (top-right) with staff to let them join.</p>') +
       '<h3 style="margin-top:14px">Active (' + active.length + ')</h3>' +
-      '<div class="tblwrap"><table class="tbl"><tr><th>Staff</th><th>Role</th><th>Caps</th><th>Status</th><th></th></tr>' + (active.map(memberRow).join('') || '<tr><td colspan="5" class="muted">None</td></tr>') + '</table></div>' +
+      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Staff</th><th>Role</th><th>Caps</th><th>Status</th><th></th></tr></thead><tbody>' + (active.map(memberRow).join('') || '<tr><td colspan="5" class="muted">None</td></tr>') + '</tbody></table></div>' +
       (others.length ? '<h3 style="margin-top:14px">Suspended / rejected (' + others.length + ')</h3>' +
-        '<div class="tblwrap"><table class="tbl"><tr><th>Staff</th><th>Role</th><th>Caps</th><th>Status</th><th></th></tr>' + others.map(memberRow).join('') + '</table></div>' : '') +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>Staff</th><th>Role</th><th>Caps</th><th>Status</th><th></th></tr></thead><tbody>' + others.map(memberRow).join('') + '</tbody></table></div>' : '') +
       (canManageRoles ? '<h3 style="margin-top:14px">Pending invites (' + state.invites.length + ')</h3>' +
         (state.invites.length
-          ? '<div class="tblwrap"><table class="tbl"><tr><th>Email</th><th>Role</th><th></th></tr>' +
+          ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Email</th><th>Role</th><th></th></tr></thead><tbody>' +
             state.invites.map((v) => '<tr><td><strong>' + esc(v.email) + '</strong></td><td>' + esc(v.role) + '</td>' +
-              '<td><button class="btn ghost sm" data-revoke-inv="' + esc(v.id) + '">Revoke</button></td></tr>').join('') + '</table></div>'
+              '<td><button class="btn ghost sm" data-revoke-inv="' + esc(v.id) + '">Revoke</button></td></tr>').join('') + '</tbody></table></div>'
           : '<p class="sub">No open invites.</p>') : '')
     wireMemberButtons()
     const cs = document.getElementById('createStaff')
@@ -344,6 +351,37 @@ export async function AdminView(app) {
         }
       }
     })
+    pane.querySelectorAll('[data-rename]').forEach((b) => {
+      b.onclick = () => {
+        const m = find(b.getAttribute('data-rename'))
+        openModal('Rename staff',
+          '<p class="sub">Update the display name for <strong>' + esc(m.staff_name || m.email || m.user_id || '—') + '</strong>. ' +
+          'The name is what records, reports and printouts show instead of the sign-in email.</p>' +
+          '<div class="fgrid">' +
+          field('Staff name', '<input id="rnName" class="input" maxlength="80" value="' + esc(m.staff_name || '') + '" placeholder="e.g. Dr. A. Okafor" />').replace('class="fld"', 'class="fld full"') +
+          '</div><p id="rnErr" class="err"></p>' +
+          '<div class="mrow"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="rnGo">Save name</button></div>')
+        const input = document.getElementById('rnName')
+        const go = document.getElementById('rnGo')
+        input.focus()
+        input.select()
+        input.onkeydown = (ev) => { if (ev.key === 'Enter') go.click() }
+        go.onclick = async (e) => {
+          const name = input.value
+          if (!name.trim()) { document.getElementById('rnErr').textContent = 'Enter a name'; return }
+          e.target.disabled = true
+          try {
+            await updateMemberName(m, name)
+            closeModal()
+            toast('Name saved — records and reports now show it instead of the email.')
+            await reloadAndRender('Staff & roles')
+          } catch (err) {
+            document.getElementById('rnErr').textContent = friendlyAdminError(err)
+            e.target.disabled = false
+          }
+        }
+      }
+    })
     pane.querySelectorAll('[data-revoke-inv]').forEach((b) => {
       b.onclick = async () => {
         const v = state.invites.find((x) => x.id === b.getAttribute('data-revoke-inv'))
@@ -442,16 +480,16 @@ export async function AdminView(app) {
       'Only devices registered after this update appear here.</p>' +
       '<div class="toolbar"><button class="btn sm" id="regDev">+ Register this device</button></div>' +
       (devs.length
-        ? '<div class="tblwrap"><table class="tbl"><tr><th>Device</th><th>User</th><th>Last seen</th><th>Status</th><th></th></tr>' +
+        ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Device</th><th>User</th><th>Last seen</th><th>Status</th><th></th></tr></thead><tbody>' +
           devs.map((d) => '<tr><td><strong>' + esc(d.device_name || d.id) + '</strong><div class="mut">' + esc(d.platform || '') + ' · ' + esc(d.id) + '</div></td>' +
-            '<td class="mut">' + esc(d.user_email || '—') + '</td>' +
+            '<td class="mut">' + esc(staffNameForId(d.user_id) || staffLabel(d.user_name) || d.user_email || '—') + '</td>' +
             '<td class="mut">' + esc(d.last_seen?.toDate ? d.last_seen.toDate().toLocaleString() : '—') + '</td>' +
             '<td>' + statusPill(d.status || 'active') + '</td>' +
             '<td>' + (canManageDevices
               ? (d.status === 'revoked'
                 ? '<button class="btn ghost sm" data-unrev="' + esc(d.id) + '">Reactivate</button>'
                 : '<button class="btn ghost sm" data-rev="' + esc(d.id) + '">Revoke</button>')
-              : '') + '</td></tr>').join('') + '</table></div>'
+              : '') + '</td></tr>').join('') + '</tbody></table></div>'
         : '<p class="sub">No devices registered yet. Press “Register this device” on each hospital PC/tablet.</p>') +
       (revoked.length ? '<p class="sub" style="margin-top:8px">' + revoked.length + ' revoked device(s) are blocked by Rules.</p>' : '')
     document.getElementById('goStaff').onclick = (e) => { e.preventDefault(); render('Staff & roles'); syncTabs('Staff & roles') }
@@ -551,7 +589,7 @@ export async function AdminView(app) {
       '<button class="btn ghost sm" id="pySync">↻ Pull from cloud</button>' +
       '<span class="mut">' + (offline ? 'Offline copy: ' + offline.length + ' rows' : 'No offline copy yet') + '</span></div>' +
       (rows.length
-        ? '<div class="tblwrap"><table class="tbl"><tr><th>Payer</th><th>Category</th><th>Sort</th><th>Code</th><th>Status</th><th></th></tr>' +
+        ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Payer</th><th>Category</th><th>Sort</th><th>Code</th><th>Status</th><th></th></tr></thead><tbody>' +
           rows.map((r) =>
             '<tr><td><strong>' + esc(r.name) + '</strong>' + (r.fallback ? '<div class="mut">built-in default</div>' : '') + '</td>' +
             '<td>' + esc(r.category) + '</td><td class="mut">' + esc(r.sortOrder) + '</td><td class="mut">' + esc(r.code || '—') + '</td>' +
@@ -563,7 +601,7 @@ export async function AdminView(app) {
                   : '<button class="btn ghost sm" data-py-on="' + esc(r.id) + '">Activate</button>') +
                 ' <button class="btn ghost sm" data-py-del="' + esc(r.id) + '">Delete</button>'
               : (caps.canManage && r.fallback ? '<button class="btn ghost sm" data-py-save="' + esc(r.name) + '">Save to cloud</button>' : '')) +
-            '</td></tr>').join('') + '</table></div>'
+            '</td></tr>').join('') + '</tbody></table></div>'
         : '<p class="sub">No payers yet — add one to populate the dropdowns.</p>')
 
     const addBtn = document.getElementById('pyAdd')
@@ -618,18 +656,22 @@ export async function AdminView(app) {
 
     function paintAudit() {
       const q = state.auditUser.toLowerCase()
+      // Match the stored row *and* the resolved staff name, so filtering by a
+      // person works even where the row still holds their email.
       const shown = q
-        ? state.auditRows.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
+        ? state.auditRows.filter((r) =>
+          JSON.stringify(r).toLowerCase().includes(q) ||
+          (r.actor_name || staffNameForId(r.actor_user_id) || staffLabel(r.actor_email) || '').toLowerCase().includes(q))
         : state.auditRows
       if (!shown.length) {
         listEl.innerHTML = '<p class="sub">No audit events match.</p>'
         return
       }
       listEl.innerHTML =
-        '<div class="tblwrap"><table class="tbl"><tr><th>When</th><th>Action</th><th>By</th><th>Detail</th></tr>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>When</th><th>Action</th><th>By</th><th>Detail</th></tr></thead><tbody>' +
         shown.map((r) => '<tr><td class="mut">' + esc(fmtTs(r.occurredAt)) + '</td><td><strong>' + esc(r.action || '') + '</strong></td>' +
-          '<td class="mut">' + esc(r.actor_email || r.actor_user_id || '') + '</td><td>' + esc(r.details || '') + '</td></tr>').join('') +
-        '</table><div class="loadmore" data-loadmore="1"></div></div>'
+          '<td class="mut">' + esc(r.actor_name || staffNameForId(r.actor_user_id) || staffLabel(r.actor_email) || r.actor_user_id || '') + '</td><td>' + esc(r.details || '') + '</td></tr>').join('') +
+        '</tbody></table><div class="loadmore" data-loadmore="1"></div></div>'
       more.mount(listEl.querySelector('.tblwrap'))
     }
 
@@ -979,8 +1021,8 @@ export async function AdminView(app) {
             top.push(t)
           }
         }
-        byT.innerHTML = '<div class="tblwrap"><table class="tbl"><tr><th>Table</th><th>Total</th><th>Queued</th><th>Sending</th><th>Pending cloud</th><th>Synced</th><th>Failed</th></tr>' +
-          top.map((t) => queueRow(t, mirroredByParent.get(t.table))).join('') + '</table></div>' +
+        byT.innerHTML = '<div class="tblwrap"><table class="tbl"><thead><tr><th>Table</th><th>Total</th><th>Queued</th><th>Sending</th><th>Pending cloud</th><th>Synced</th><th>Failed</th></tr></thead><tbody>' +
+          top.map((t) => queueRow(t, mirroredByParent.get(t.table))).join('') + '</tbody></table></div>' +
           (mirroredByParent.size
             ? '<p class="sub" style="margin-top:6px">“auto” rows are mirror records the importer writes automatically for imported patients — not a second copy of the data.</p>'
             : '')
@@ -1062,12 +1104,49 @@ export async function AdminView(app) {
     if (ok) render(tab)
   }
 
+  // The laboratory tab is a summary + launch pad; the catalogue itself is
+  // managed on a dedicated full page (which carries the same capability gate).
+  async function renderLaboratory() {
+    pane.innerHTML = '<p class="muted">Loading…</p>'
+    const labCaps = myLabAdminCaps()
+    try {
+      const [tests, settings] = await Promise.all([
+        listOrgTests(activeOrg),
+        getLabSettings(activeOrg),
+      ])
+      const active = tests.filter((t) => t.active).length
+      const withComponents = tests.filter((t) => (t.components || []).length).length
+      pane.innerHTML =
+        '<div class="card-head"><h3>Laboratory</h3>' +
+        (labCaps.canManageCatalogue
+          ? '<a class="btn sm" href="#/laboratory/catalogue">Open test catalogue →</a>'
+          : '') + '</div>' +
+        '<p class="sub">The test catalogue drives order entry, result forms and printed reports. Ordered tests freeze a snapshot of the catalogue entry — editing a test never rewrites history.</p>' +
+        '<div class="grid4">' +
+        '<div class="stat"><em>Catalogue</em><strong>' + tests.length + '</strong><span>tests (' + active + ' active)</span></div>' +
+        '<div class="stat"><em>Structured</em><strong>' + withComponents + '</strong><span>with result components</span></div>' +
+        '<div class="stat"><em>Categories</em><strong>' + (settings.categories || []).length + '</strong><span>on order forms</span></div>' +
+        '<div class="stat"><em>Specimen types</em><strong>' + (settings.specimen_types || []).length + '</strong><span>configured</span></div>' +
+        '</div>' +
+        (labCaps.canManageCatalogue
+          ? '<div class="mrow" style="margin-top:12px">' +
+            '<a class="btn ghost" href="#/laboratory/catalogue">Manage tests & components</a>' +
+            '<a class="btn ghost" href="#/laboratory">Open laboratory worklist</a></div>'
+          : '<p class="sub">Your role can view this summary but only administrators with <code>lab.catalogue.manage</code> can edit the catalogue.</p>')
+    } catch (e) {
+      pane.innerHTML = '<h3>Could not load laboratory summary</h3><p class="err">' + esc(friendlyAdminError(e)) + '</p>' +
+        '<button class="btn ghost" id="labRetry">Retry</button>'
+      document.getElementById('labRetry').onclick = () => render(LAB_TAB)
+    }
+  }
+
   function render(tab) {
     stopStatusPoll()
     syncTabs(tab)
     if (tab === 'Staff & roles') renderStaff()
     else if (tab === 'Organization') renderOrg()
     else if (tab === 'Devices') renderDevices()
+    else if (tab === LAB_TAB) renderLaboratory()
     else if (tab === DATA_TAB) renderData()
     else if (tab === DEV_TAB) renderPayers()
     else renderAudit()

@@ -291,7 +291,7 @@ export const IMPORT_ORDER_TABLES = [
       { name: 'patient_name', type: 'text', note: 'Denormalised so the pharmacy queue does not need a patient join per row.' },
       { name: 'encounter_id', type: 'text', fk: { table: 'encounters', col: 'id' }, note: 'Prescriptions for one encounter form one script.' },
       { name: 'admission_session_id', type: 'text', note: 'Links to the admission session (doc id).' },
-      { name: 'items', type: 'json', note: 'The script. Each line: {line_id, drug_id, sku, medicine, unit, dosage, quantity, instructions, dispensed_qty, external}. external:true = bought outside the hospital; excluded from stock and dispensing.' },
+      { name: 'items', type: 'json', note: 'The script. Each line: {line_id, drug_id, sku, medicine, unit, dosage, quantity, instructions, dispensed_qty, administered_qty, external}. external:true = bought outside the hospital; excluded from stock and dispensing. administered_qty counts doses actually given to the patient.' },
       { name: 'status', type: 'text', note: "Requested | Partially dispensed | Dispensed | Declined | External (all lines external)." },
       { name: 'dispensed_at', type: 'ts', note: 'Set when the last line is issued.' },
       { name: 'created_by', type: 'text' },
@@ -369,6 +369,7 @@ export const IMPORT_ORDER_TABLES = [
     table: 'lab_settings', collection: 'lab_settings', label: 'Lab settings',
     scope: 'org', capability: 'lab.catalogue.manage',
     columns: [
+      { name: 'id', type: 'text', note: 'Document id = organization_id.' },
       { name: 'organization_id', type: 'text', note: 'Document id = organization_id. Required.' },
       { name: 'categories', type: 'json' },
       { name: 'specimen_types', type: 'json' },
@@ -442,7 +443,6 @@ export const IMPORT_ORDER_TABLES = [
     defaultStatus: 'order',
   },
   {
-    table: 'invoices', collection: 'invoices', label: 'Invoices',
     table: 'payments', collection: 'payments', label: 'Payments',
     scope: 'org', capability: 'billing.payment', appendOnly: true,
     note: 'Append-only in Firestore (no update). Rows with an existing id are reported as skipped rather than overwritten.',
@@ -479,6 +479,38 @@ export const IMPORT_ORDER_TABLES = [
     required: ['patient_id'],
     rulesRequired: ['patient_id'],
     defaultStatus: 'pending',
+  },
+  {
+    table: 'medication_administrations', collection: 'medication_administrations',
+    label: 'Medication administrations (doses given)',
+    scope: 'org', capability: 'medication.administer', appendOnly: true,
+    note: 'One doc per dose given to the patient — the bedside half of the medication chain (ordered → issued → given). Append-only: a mistake is corrected by a reversal event, never by rewriting what happened.',
+    columns: [
+      { name: 'id', type: 'text', note: 'Firestore document id; blank = auto-generate.' },
+      { name: 'patient_id', type: 'text', fk: { table: 'patients', col: 'id' }, note: 'Required.' },
+      { name: 'patient_name', type: 'text' },
+      { name: 'encounter_id', type: 'text', fk: { table: 'encounters', col: 'id' } },
+      { name: 'admission_session_id', type: 'text', note: 'Links to the admission session (doc id).' },
+      { name: 'medication_request_id', type: 'text', note: 'The prescription script this dose belongs to.' },
+      { name: 'line_id', type: 'text', note: 'Which line of the script was given.' },
+      { name: 'medicine', type: 'text', note: 'Snapshot from the line, so the trail reads without joining the script.' },
+      { name: 'unit', type: 'text' },
+      { name: 'dosage', type: 'text', note: 'Snapshot of the line dosage text.' },
+      { name: 'qty', type: 'int', note: 'Doses given in this event.' },
+      { name: 'route', type: 'text', note: 'oral | iv | im | sc | topical | other.' },
+      { name: 'site', type: 'text', note: 'Injection site, e.g. left deltoid.' },
+      { name: 'note', type: 'text' },
+      { name: 'type', type: 'text', note: "given | reversed. Reversals also carry reverses_id." },
+      { name: 'reverses_id', type: 'text' },
+      { name: 'administered_by', type: 'text', note: 'Uid of the person who gave the dose.' },
+      { name: 'administered_by_name', type: 'text' },
+      { name: 'administered_at', type: 'ts' },
+      { name: 'created_at', type: 'ts' },
+      { name: 'updated_at', type: 'ts' },
+    ],
+    required: ['patient_id', 'medicine', 'qty'],
+    rulesRequired: ['patient_id'],
+    defaultStatus: 'given',
   },
   {
     table: 'documents', collection: 'documents', label: 'Patient documents (metadata)',
@@ -530,12 +562,12 @@ export function tsColumns(entry) {
 
 export function buildCreateTableSql(entry) {
   const columnLines = entry.columns.map((c) =>
-    '"' + c.name + '" ' + (c.name === 'id' ? 'TEXT NOT NULL' : sqlType(c.type)),
+    '"' + c.name + '" ' + (c.name === 'id' ? 'TEXT NOT NULL PRIMARY KEY' : sqlType(c.type)),
   )
   const fkLines = entry.columns
     .filter((c) => c.fk)
     .map((c) => 'FOREIGN KEY ("' + c.name + '") REFERENCES "' + c.fk.table + '"("' + c.fk.col + '") ON DELETE SET NULL')
-  return 'CREATE TABLE IF NOT EXISTS "' + entry.table + '" (\n  ' + [...columnLines, 'PRIMARY KEY ("id")', ...fkLines].join(',\n  ') + '\n);'
+  return 'CREATE TABLE IF NOT EXISTS "' + entry.table + '" (\n  ' + [...columnLines, ...fkLines].join(',\n  ') + '\n);'
 }
 
 function sqlType(t) {

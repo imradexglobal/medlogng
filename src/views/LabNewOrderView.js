@@ -3,20 +3,31 @@
 // configuration snapshots taken at order time; free-text tests remain allowed
 // for anything not in the catalogue. Arrives with context via query params:
 //   #/laboratory/new?patient=<pid>&encounter=<eid>&session=<sid>
-import { shell, toast, wireToast } from '../components/shell.js'
+import { shell, toast, wireToast, wireSearchableSelect } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import { createLabOrder, myLabCaps } from '../services/laboratoryService.js'
 import { subscribeOrgTests, seedStarterCatalogue, myLabAdminCaps } from '../services/labCatalogueService.js'
 import { addLabOrder } from '../services/consultationService.js'
-import { listOrgPatientsPage, formatPhone, matchesPatient } from '../services/patientService.js'
+import { listOrgPatientsAll, formatPhone } from '../services/patientService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
 import { printDocument } from '../lib/print.js'
 import { labRequestStructuredHtml } from '../lib/labPrintTemplates.js'
-import { PRIORITIES } from '../features/labs/domain.js'
+import { PRIORITIES, buildAccessionNo } from '../features/labs/domain.js'
 
 const naira = (kobo) => '₦' + ((Number(kobo) || 0) / 100).toLocaleString('en-NG')
+
+function ageLabel(dob) {
+  if (!dob) return ''
+  const d = new Date(dob)
+  if (isNaN(d.getTime())) return ''
+  const ref = new Date()
+  let age = ref.getFullYear() - d.getFullYear()
+  const m = ref.getMonth() - d.getMonth()
+  if (m < 0 || (m === 0 && ref.getDate() < d.getDate())) age -= 1
+  return age + 'y'
+}
 
 export async function LabNewOrderView(app, params = {}) {
   const { activeOrg } = authStore.getState()
@@ -35,7 +46,6 @@ export async function LabNewOrderView(app, params = {}) {
 
   const state = {
     patient: null,
-    patientQuery: '',
     patients: [],
     patientLoadError: null,
     tests: [],
@@ -48,6 +58,8 @@ export async function LabNewOrderView(app, params = {}) {
     submitting: false,
     done: null,           // created order row after submit
     seeding: false,
+    turnaroundEstimate: 0,
+    submitHint: '',
   }
   let unsubs = []
 
@@ -66,8 +78,8 @@ export async function LabNewOrderView(app, params = {}) {
   // ---- data -----------------------------------------------------------------
   async function loadPatients() {
     try {
-      const r = await listOrgPatientsPage(activeOrg, { pageSize: 100 })
-      state.patients = r.rows
+      const r = await listOrgPatientsAll(activeOrg)
+      state.patients = r
       state.patientLoadError = null
     } catch (e) {
       state.patientLoadError = e
@@ -86,12 +98,6 @@ export async function LabNewOrderView(app, params = {}) {
   }
 
   // ---- derived ---------------------------------------------------------------
-  function filteredPatients() {
-    const q = state.patientQuery.toLowerCase()
-    if (!q) return state.patients.slice(0, 30)
-    return state.patients.filter((p) => matchesPatient(p, q)).slice(0, 30)
-  }
-
   function filteredTests() {
     const q = state.testQuery.toLowerCase()
     const active = state.tests.filter((t) => t.active)
@@ -118,11 +124,29 @@ export async function LabNewOrderView(app, params = {}) {
     return sum
   }
 
+  function turnaroundEstimate() {
+    let max = 0
+    for (const t of state.selected.values()) {
+      const h = Number(t.turnaround_hours) || 0
+      if (h > max) max = h
+    }
+    return max
+  }
+
+  function submitHint() {
+    if (!state.patient) return 'Select a patient.'
+    if (!state.selected.size && !state.adhoc.length) return 'Select at least one test.'
+    return ''
+  }
+
   // ---- render ----------------------------------------------------------------
   function render() {
     const root = document.getElementById('order-page')
     if (!root) return
     if (state.done) { renderDone(root); return }
+
+    state.turnaroundEstimate = turnaroundEstimate()
+    state.submitHint = submitHint()
 
     const selectedIds = new Set(state.selected.keys())
     const catBody = state.tests.length === 0
@@ -147,22 +171,28 @@ export async function LabNewOrderView(app, params = {}) {
     const patientPanel = state.patient
       ? '<div class="card sel-patient"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px">' +
         '<div><strong>' + esc(state.patient.name) + '</strong> <span class="mut">' + esc(state.patient.mrn || state.patient.pid) + '</span>' +
+        '<div class="mut" style="font-size:.82rem">' + esc(state.patient.sex || 'sex n/r') +
+        (state.patient.dob ? ' · ' + esc(ageLabel(state.patient.dob)) : '') + '</div>' +
         (state.patient.phone ? '<div class="mut" style="font-size:.82rem">' + esc(formatPhone(state.patient.phone, state.patient.phone_key)) + '</div>' : '') +
         '</div><button class="btn ghost sm" id="clearPatient">Change</button></div></div>'
-      : '<div class="card"><div class="search"><input class="input" id="patientSearch" placeholder="Search patient by name, ID or mobile…" value="' + esc(state.patientQuery) + '"></div>' +
+      : '<div class="card"><label class="fld full"><span>Patient</span>' +
+        '<input class="input" id="patientFilter" placeholder="Search patient by name, ID or mobile…" autocomplete="off" style="margin-bottom:6px">' +
+        '<select class="input" id="patientSel"><option value="">— Select patient —</option>' +
+        state.patients.map((p) => {
+          const label = p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key)
+          return '<option value="' + esc(p.pid) + '" data-label="' + esc(label) + '">' + esc(label) + '</option>'
+        }).join('') +
+        '</select></label>' +
         (state.patientLoadError ? '<p class="sub">Could not load patients: ' + esc(friendlyWriteError(state.patientLoadError)) + '</p>' : '') +
-        '<div id="patientHits">' + filteredPatients().map((p) =>
-          '<button class="hit" data-pid="' + esc(p.pid) + '"><strong>' + esc(p.name) + '</strong> <span class="mut">' + esc(p.mrn || p.pid) +
-          (p.phone ? ' · ' + esc(formatPhone(p.phone, p.phone_key)) : '') + '</span></button>').join('') +
         (state.patients.length === 0 && !state.patientLoadError ? '<p class="mut">No patients registered yet.</p>' : '') +
-        '</div></div>'
+        '</div>'
 
     root.innerHTML =
       patientPanel +
       '<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">' +
       '<h3>Tests</h3>' +
       '<div class="search" style="min-width:220px;flex:1;max-width:340px"><input class="input" id="testSearch" placeholder="Filter catalogue (name, code, category)…" value="' + esc(state.testQuery) + '"></div>' +
-      '</div>' + catBody +
+      '</div><div id="catBodyContainer">' + catBody + '</div>' +
       '<h4 class="cat-head" style="margin-top:12px">Other tests (not in catalogue)</h4>' +
       '<textarea class="input" id="adhocInput" rows="2" placeholder="One per line, or comma separated — e.g. Ferritin">' + esc(state.adhoc.join('\n')) + '</textarea>' +
       '</div>' +
@@ -177,29 +207,62 @@ export async function LabNewOrderView(app, params = {}) {
       '<label>Clinical note / indication<textarea class="input" id="noteInput" rows="2">' + esc(state.note) + '</textarea></label>' +
       '<div class="order-sum">' +
       '<span><strong>' + (state.selected.size + state.adhoc.length) + '</strong> test(s) selected · catalogue subtotal <strong>' + naira(totalKobo()) + '</strong>' +
+      (state.turnaroundEstimate ? ' · est. turnaround ' + state.turnaroundEstimate + 'h' : '') +
       (state.adhoc.length ? ' <span class="mut">(free-text tests are priced at billing)</span>' : '') + '</span>' +
+      (state.submitHint ? '<span class="mut" style="color:var(--emr-bad);font-size:.8rem;margin-left:8px">' + esc(state.submitHint) + '</span>' : '') +
       '<button class="btn" id="submitBtn"' + ((state.patient && (state.selected.size || state.adhoc.length)) ? '' : ' disabled') + '>' +
       (state.submitting ? 'Placing order…' : 'Place order →') + '</button>' +
+      '<button class="btn ghost" id="draftBtn"' + ((state.patient && (state.selected.size || state.adhoc.length)) ? '' : ' disabled') + '>' +
+      (state.submitting ? '…' : 'Save draft') + '</button>' +
       '</div></div>'
 
     wire(root)
   }
 
-  function wire(root) {
-    const ps = root.querySelector('#patientSearch')
-    if (ps) {
-      let t
-      ps.oninput = () => {
-        clearTimeout(t)
-        t = setTimeout(() => { state.patientQuery = ps.value.trim(); render(); document.getElementById('patientSearch')?.focus() }, 220)
-      }
-    }
-    root.querySelectorAll('[data-pid]').forEach((b) => {
-      b.onclick = () => {
-        state.patient = state.patients.find((p) => p.pid === b.getAttribute('data-pid')) || null
+  function renderCatalogue() {
+    const container = document.getElementById('catBodyContainer')
+    if (!container) return
+    const selectedIds = new Set(state.selected.keys())
+    const catBody = state.tests.length === 0
+      ? '<p class="mut">No catalogue tests yet. ' +
+        (adminCaps.canManageCatalogue
+          ? '<button class="btn ghost sm" id="seedBtn"' + (state.seeding ? ' disabled' : '') + '>' + (state.seeding ? 'Loading…' : 'Load standard starter tests') + '</button>'
+          : 'Ask an administrator to set up the test catalogue — you can still enter tests as free text below.') +
+        '</p>'
+      : groupedTests().map(([cat, list]) =>
+        '<div class="cat-group"><h4 class="cat-head">' + esc(cat) + '</h4>' +
+        list.map((t) => {
+          const on = selectedIds.has(t.id)
+          return '<label class="cat-row' + (on ? ' on' : '') + '">' +
+            '<input type="checkbox" data-test="' + esc(t.id) + '"' + (on ? ' checked' : '') + '>' +
+            '<span class="cat-name"><strong>' + esc(t.name) + '</strong> ' + (t.code ? '<span class="mut">' + esc(t.code) + '</span>' : '') +
+            (t.specimenType ? '<div class="mut" style="font-size:.78rem">' + esc(t.specimenType) + (t.componentCount ? ' · ' + t.componentCount + ' analyte(s)' : '') + '</div>' : '') +
+            '</span>' +
+            '<span class="cat-price">' + (t.priceKobo ? naira(t.priceKobo) : '—') + '</span>' +
+            '</label>'
+        }).join('') + '</div>').join('')
+    container.innerHTML = catBody
+    container.querySelectorAll('[data-test]').forEach((cb) => {
+      cb.onchange = () => {
+        const id = cb.getAttribute('data-test')
+        const row = state.tests.find((x) => x.id === id)
+        if (cb.checked && row) state.selected.set(id, row)
+        else state.selected.delete(id)
         render()
       }
     })
+  }
+
+  function wire(root) {
+    const sel = root.querySelector('#patientSel')
+    if (sel) {
+      wireSearchableSelect(root.querySelector('#patientFilter'), sel)
+      sel.onchange = () => {
+        state.patient = state.patients.find((p) => p.pid === sel.value) || null
+        render()
+      }
+    }
+
     const cp = root.querySelector('#clearPatient')
     if (cp) cp.onclick = () => { state.patient = null; render() }
 
@@ -208,7 +271,7 @@ export async function LabNewOrderView(app, params = {}) {
       let t
       ts.oninput = () => {
         clearTimeout(t)
-        t = setTimeout(() => { state.testQuery = ts.value.trim(); render(); document.getElementById('testSearch')?.focus() }, 220)
+        t = setTimeout(() => { state.testQuery = ts.value.trim(); renderCatalogue() }, 500)
       }
     }
     root.querySelectorAll('[data-test]').forEach((cb) => {
@@ -223,7 +286,15 @@ export async function LabNewOrderView(app, params = {}) {
     const ad = root.querySelector('#adhocInput')
     if (ad) {
       ad.onchange = () => {
-        state.adhoc = ad.value.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
+        const names = ad.value.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean)
+        // Dedupe (case-insensitive), preserve order.
+        const seen = new Set()
+        state.adhoc = names.filter((n) => {
+          const k = n.toLowerCase()
+          if (seen.has(k)) return false
+          seen.add(k)
+          return true
+        })
         render()
       }
     }
@@ -249,10 +320,12 @@ export async function LabNewOrderView(app, params = {}) {
     }
 
     const submit = root.querySelector('#submitBtn')
-    if (submit) submit.onclick = onSubmit
+    if (submit) submit.onclick = () => onSubmit(false)
+    const draftBtn = root.querySelector('#draftBtn')
+    if (draftBtn) draftBtn.onclick = () => onSubmit(true)
   }
 
-  async function onSubmit() {
+  async function onSubmit(draft) {
     if (!state.patient) { toast('Select a patient first.'); return }
     if (!state.selected.size && !state.adhoc.length) { toast('Select at least one test.'); return }
     if (state.submitting) return
@@ -295,7 +368,7 @@ export async function LabNewOrderView(app, params = {}) {
       const row = await import('../services/laboratoryService.js').then((m) => m.getLabOrder(created.id))
       state.done = row || { ...created, id: created.id, items: created.items, orderNo: created.order_no }
       state.submitting = false
-      toast('Lab order placed')
+      toast(draft ? 'Draft saved' : 'Lab order placed')
       render()
     } catch (e) {
       state.submitting = false

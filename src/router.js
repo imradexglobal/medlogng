@@ -1,5 +1,6 @@
 import { authStore } from './store/authStore.js'
 import { runCleanups } from './lib/lifecycle.js'
+import { ensureStaffDirectory } from './lib/staffName.js'
 import { HospitalChoiceView } from './views/HospitalChoiceView.js'
 
 const routes = []
@@ -125,7 +126,12 @@ export async function handleRoute() {
   routePending(true)
   inFlight = (async () => {
     try {
+      // Staff names are resolved synchronously while a view renders, so the
+      // per-hospital directory (members + devices → name) is warmed here once
+      // per org — before the view builds its HTML. It never rejects.
+      const dir = ensureStaffDirectory(authStore.getState().activeOrg).catch(() => {})
       const view = route.view || (route.view = await route.render())
+      await dir
       // Tear down the previous view's listeners right before the new one mounts.
       // Guard redirects / the not-ready splash return above and never reach this.
       runCleanups()

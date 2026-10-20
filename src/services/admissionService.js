@@ -7,8 +7,8 @@
 // no chance of the two documents disagreeing. Reverse lookups query by
 // `encounter_id` (see the composite index in firestore.indexes.json).
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, orderBy, limit,
-  startAfter,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, deleteDoc, serverTimestamp, orderBy, limit,
+  startAfter, runTransaction,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
@@ -22,9 +22,10 @@ import {
   normalizeAdmission, normalizeAdmissions, occupancySummary, wardOccupancy,
   activeAdmissionForPatient, activeAdmissionForEncounter, indexAdmissionsByEncounter,
   admissionsForEncounter, validateAdmissionInput, validateDischargeInput,
-  occupiedInWard, validateWardCapacity,
+  occupiedInWard, validateWardCapacity, tsMillis,
 } from '../features/admissions/domain.js'
 import { watchQuery } from './live.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const ADMISSIONS = 'admissions'
 
@@ -165,6 +166,18 @@ export async function findActiveAdmissionForEncounter(orgId, encounterId) {
   return activeAdmissionForEncounter(indexAdmissionsByEncounter(await listAdmissionsByEncounter(orgId, encounterId)), encounterId)
 }
 
+// Bed claim documents prevent double-booking: one doc per (org, ward, bed),
+// created atomically alongside the admission inside a Firestore transaction.
+// If another clerk admits to the same bed between our read and write, the
+// transaction retries or aborts with "bed already taken".
+const BED_CLAIMS = 'bed_claims'
+
+function bedClaimKey(orgId, wardName, bedNumber) {
+  return String(orgId || '') + '_' + String(wardName || '').trim().toLowerCase() + '_' + String(bedNumber || '').trim().toLowerCase()
+}
+
+export { bedClaimKey }
+
 // ---- create ---------------------------------------------------------------
 export async function createAdmission(input) {
   const { activeOrg, user } = authStore.getState()
@@ -197,12 +210,10 @@ export async function createAdmission(input) {
     if (encOrg && encOrg !== activeOrg) throw new Error('The linked encounter belongs to a different hospital.')
   }
 
-  // Bed availability is re-checked here, against fresh reads, so a stale page
-  // cannot write an over-capacity or double-booked admission.
-  const [wards, admissions] = await Promise.all([
-    listOrgWards(activeOrg).catch(() => []),
-    listOrgAdmissions(activeOrg).catch(() => []),
-  ])
+  // Ward + capacity validation against fresh reads. The final bed-level atomic
+  // claim happens inside the transaction below.
+  const wards = await listOrgWards(activeOrg).catch(() => [])
+  const admissions = await listOrgAdmissions(activeOrg).catch(() => [])
   const invalid = validateAdmissionInput(
     { patient_id: pid, ward_name: input.ward_name, bed_number: input.bed_number, encounter_id: encounterId },
     { wards, admissions, encounter },
@@ -211,6 +222,8 @@ export async function createAdmission(input) {
 
   const admissionId = doc(collection(db, ADMISSIONS)).id
   const now = serverTimestamp()
+  const wardName = String(input.ward_name || '').trim()
+  const bedNumber = String(input.bed_number || '').trim()
   const admission = {
     patient_id: pid,
     patient_name: input.patient_name || patient.name || '',
@@ -218,19 +231,44 @@ export async function createAdmission(input) {
     // One-way link back to the encounter that triggered this admission ('' when
     // the patient walked in without one).
     encounter_id: encounterId,
-    ward_name: String(input.ward_name || '').trim(),
-    bed_number: String(input.bed_number || '').trim(),
+    ward_name: wardName,
+    bed_number: bedNumber,
     admission_type: input.admission_type || '',
     admission_reason: input.admission_reason || '',
     attending_provider: input.attending_provider || '',
     status: ADMISSION_ACTIVE,
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
   }
 
-  await setDoc(doc(db, ADMISSIONS, admissionId), admission)
+  // Atomic bed claim: read the bed claim doc; if it already points to an active
+  // admission, abort. Otherwise write both the admission and the claim in one
+  // transaction so two clerks can never book the same bed.
+  const bedClaimRef = doc(db, BED_CLAIMS, bedClaimKey(activeOrg, wardName, bedNumber))
+  const admissionRef = doc(db, ADMISSIONS, admissionId)
+  try {
+    await runTransaction(db, async (tx) => {
+      const claimSnap = await tx.get(bedClaimRef)
+      if (claimSnap.exists()) {
+        const existing = claimSnap.data()
+        throw new Error('Bed ' + bedNumber + ' in ' + wardName + ' was just taken by another admission. Please refresh and pick another bed.')
+      }
+      tx.set(admissionRef, admission)
+      tx.set(bedClaimRef, {
+        organization_id: activeOrg,
+        ward_name: wardName,
+        bed_number: bedNumber,
+        admission_id: admissionId,
+        patient_id: pid,
+        created_at: now,
+      })
+    })
+  } catch (e) {
+    if (e?.message && e.message.includes('was just taken')) throw e
+    throw new Error('Could not admit — bed may already be taken. ' + (e?.message || ''))
+  }
 
   try {
     await logAudit({
@@ -265,17 +303,27 @@ export async function dischargeAdmission(admissionId, dischargeInput) {
   }
 
   const now = serverTimestamp()
+  const dischargeType = String(dischargeInput.dischargeType || 'discharged').trim().toLowerCase()
+  const dischargeDate = dischargeInput.dischargeDate ? tsMillis(dischargeInput.dischargeDate) : now
   const dischargeData = {
     status: ADMISSION_DISCHARGED,
-    discharge_date: now,
+    discharge_date: dischargeDate,
+    discharge_type: dischargeType,
     discharge_reason: String(dischargeInput.reason || '').trim(),
     discharge_notes: String(dischargeInput.notes || '').trim(),
     discharged_by: user?.uid || null,
-    discharged_by_name: user?.email || '',
+    discharged_by_name: currentStaffName(),
     updated_at: now,
   }
 
   await updateDoc(doc(db, ADMISSIONS, admissionId), dischargeData)
+
+  // Release the bed claim so the bed can be reused by another admission.
+  try {
+    await deleteDoc(doc(db, BED_CLAIMS, bedClaimKey(activeOrg, adm.wardName, adm.bedNumber)))
+  } catch (e) {
+    console.warn('[admissions] bed claim cleanup failed:', e?.message)
+  }
 
   try {
     await logAudit({

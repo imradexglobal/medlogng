@@ -15,6 +15,7 @@ import { ENCOUNTER_STATUS_FLOW, furtherStatus, stageForTrigger, ENCOUNTER_STATUS
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
 import { runChunk } from './pagination.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const ENCOUNTERS = 'encounters'
 
@@ -232,7 +233,7 @@ export async function createEncounter(input) {
     prescription: input.prescription || {},
     lab_orders: input.lab_orders || [],
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: now,
     updated_at: now,
   }

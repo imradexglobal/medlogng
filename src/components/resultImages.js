@@ -10,6 +10,7 @@ import {
   listResultImages, addResultImage, getResultImageBlob, myResultImageCaps, MAX_IMAGE_BYTES, MAX_PDF_BYTES,
 } from '../services/resultImageService.js'
 import { friendlyWriteError } from '../utils/errors.js'
+import { staffLabel } from '../lib/staffName.js'
 
 function fmtBytes(n) {
   const b = Number(n || 0)
@@ -83,7 +84,7 @@ async function render(container, opts) {
           '<div style="flex:1;min-width:0"><strong>' + esc(r.caption || 'Result document') + '</strong>' +
           (/application\/pdf/i.test(r.content_type || '') ? ' <span class="pill">PDF</span>' : '') +
           '<div class="mut" style="font-size:.75rem">' + esc(fmtWhen(r.created_at)) + ' · ' + esc(fmtBytes(r.size_bytes)) +
-          (r.created_by_name ? ' · ' + esc(r.created_by_name) : '') + '</div></div>' +
+          (r.created_by_name ? ' · ' + esc(staffLabel(r.created_by_name)) : '') + '</div></div>' +
           '<button class="btn ghost sm" data-view-image="' + esc(r.id) + '" data-caption="' + esc(r.caption || '') + '">View</button>' +
           '</div>').join('')
       : '<p class="mut" style="padding:6px 0">No result documents attached.</p>'

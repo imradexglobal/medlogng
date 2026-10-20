@@ -4,6 +4,7 @@ import { authStore } from '../store/authStore.js'
 import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
   myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META,
+  ENCOUNTER_TYPES, createEncounter, findOpenEncounterForPatient,
 } from '../services/consultationService.js'
 import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
@@ -11,8 +12,11 @@ import {
 } from '../services/admissionService.js'
 import { myLabCaps } from '../services/laboratoryService.js'
 import { listOrgDrugs, findOpenRequest, listRequestsForEncounter, updateRequestItems } from '../services/pharmacyService.js'
+import { getClinicalStaff } from '../services/authService.js'
+import { administerDose, myAdminCaps } from '../services/medicationAdminService.js'
 import { openPrescriptionModal } from '../features/pharmacy/prescriptionModal.js'
 import * as R from '../features/pharmacy/requests.js'
+import * as A from '../features/pharmacy/administration.js'
 import { printDocument } from '../lib/print.js'
 import { prescriptionHtml } from '../lib/prescriptionPrint.js'
 import { myBillingCaps } from '../services/billingService.js'
@@ -23,6 +27,12 @@ import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
+import { staffLabel } from '../lib/staffName.js'
+import { fmtDate, fmtDateTime } from '../utils/format.js'
+import { confirmDelete } from './deleteUi.js'
+import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
+import { canDeleteRecords } from '../services/deleteService.js'
+import { deleteEncounter } from '../services/deleteService.js'
 
 // Encounter statuses are stored lowercase, so the shared statusBadge() (whose
 // keys are capitalised) rendered them as bare uncoloured pills. The label +
@@ -48,12 +58,6 @@ function txt(v, fallback = '—') {
 
 // Firestore timestamps arrive as Timestamps, plain numbers or null (a write
 // still sitting in the local cache), so one reader covers all three.
-function when(t) {
-  const ms = t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : 0)
-  if (!ms) return '—'
-  return new Date(ms).toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' })
-}
-
 function waitedFor(ts, endTs) {
   if (!ts) return '—'
   const end = endTs || Date.now()
@@ -66,6 +70,13 @@ function waitedFor(ts, endTs) {
   if (h) return h + 'h:' + m + 'm:' + s + 's'
   if (m) return m + 'm:' + s + 's'
   return s + 's'
+}
+
+// Colour band for the waited cell so long waits are visible at a glance.
+function waitTone(secs) {
+  if (secs <= 900) return 'ok'      // <= 15 min
+  if (secs <= 1800) return 'warn'   // 15-30 min
+  return 'bad'                      // > 30 min
 }
 
 export async function ConsultationsView(app, params = {}) {
@@ -125,20 +136,21 @@ export async function ConsultationsView(app, params = {}) {
   shell(app, {
     active: '/consultations',
     title: 'Consultations',
-    subtitle: 'Arrival → Encounter → Vitals → Consultation → Diagnosis → Plan → Close',
+    subtitle: 'Arrival → Vitals → Consultation → Diagnosis → Plan → Close',
     actions:
+      '<button class="btn" id="newEncB">+ New encounter</button>' +
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>',
     body:
       // Both panels are viewport-height on desktop (.consult-grid): the queue
       // scrolls in its own box and the workspace scrolls between its tab strip
       // and its fixed action bar, so neither drags the whole page around.
       '<div class="grid2x consult-grid"><div class="card"><div class="card-head"><h3>Encounter queue</h3><span class="pill info" id="enc-count">0 open</span></div>' +
-      '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="qSearch" placeholder="Search patient, MRN or mobile…" style="max-width:240px">' +
+      '<div class="toolbar" style="margin:0 0 8px"><div style="position:relative;display:inline-block"><input class="input" id="qSearch" placeholder="Search patient, MRN or mobile…" style="max-width:240px"><button type="button" id="qClear" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--emr-muted);cursor:pointer;font-size:1.2rem;line-height:1;padding:0" hidden>✕</button></div>' +
       '<select class="input" id="qStatus" style="max-width:170px"><option value="open" selected>Open encounters</option><option value="closed">Closed</option><option value="all">All</option>' +
       STATUS_FLOW.map((s) => '<option value="' + s.key + '">' + esc(s.label) + '</option>').join('') + '</select></div>' +
-      '<div class="tblwrap"><table class="tbl" id="enc-tbl"><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr>' +
+      '<div class="tblwrap"><table class="tbl" id="enc-tbl"><thead><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr></thead><tbody>' +
       '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
-      '</table><div class="loadmore" data-loadmore="1"></div></div></div>' +
+      '</tbody></table><div class="loadmore" data-loadmore="1"></div></div></div>' +
       '<div class="card enc-ws">' +
       '<div class="enc-ws-head">' +
       '<div class="card-head"><h3 id="encTitle">No encounter selected</h3><span id="encStatus">—</span></div>' +
@@ -180,6 +192,7 @@ export async function ConsultationsView(app, params = {}) {
       // Fixed action bar: never scrolls away, whatever tab is showing.
       '<div class="toolbar enc-ws-bar"><button class="btn ghost sm" id="vitalsB">+ Vitals</button><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="planB">+ Plan</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
       (caps.canEdit ? '<button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm" id="closeEncB">Close encounter →</button>' : '') +
+      '<span id="delEncSlot"></span>' +
       (bedCaps.canAdmit ? '<button class="btn sm" id="admitFromEncB">Admit patient</button>' : '') + '</div>' +
       '</div></div>',
   })
@@ -237,12 +250,13 @@ export async function ConsultationsView(app, params = {}) {
   // Re-point the selected encounter at its freshest row (or pick one when none
   // is selected yet). Shared by loadMore() and the live encounter subscription.
   function refreshSelectedEncounter() {
-    if (!selectedEncounter && encounters.length) {
-      selectedEncounter = (wantEnc && encounters.find((e) => e.id === wantEnc)) || encounters.find((e) => e.status !== 'closed') || encounters[0]
+    if (!selectedEncounter) {
+      selectedEncounter = wantEnc && encounters.find((e) => e.id === wantEnc)
     }
     if (selectedEncounter) {
       const fresh = encounters.find((e) => e.id === selectedEncounter.id)
       if (fresh) selectedEncounter = fresh
+      else selectedEncounter = null
     }
   }
 
@@ -339,12 +353,13 @@ export async function ConsultationsView(app, params = {}) {
     const openN = encounters.filter((e) => e.status !== 'closed').length
     if (cnt) cnt.textContent = openN + ' open'
     if (!tbl) return
-    const head = '<tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr>'
+    const head = '<thead><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr></thead>'
     const shown = visibleEncounters()
     const rows = shown.map((e) => {
       const m = patientMeta(e)
       const who = [m.age !== '' && m.age != null ? m.age + 'y' : '', m.sex].filter(Boolean).join(' · ')
       const b = patientBed(e)
+      const waited = e.createdAt ? Math.max(0, Math.floor(((e.status === 'closed' ? e.updatedAt : Date.now()) - e.createdAt) / 1000)) : 0
       // Bed badge lives inside the status cell so the table keeps its four
       // columns — the "Waited" clock ticks r.cells[2].
       const bedBadge = b
@@ -355,10 +370,10 @@ export async function ConsultationsView(app, params = {}) {
         '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
         '<td><div>' + esc(m.mrn) + '</div><div class="mut">' + esc(who || 'No demographics on file') + '</div>' +
         (m.phone ? '<div class="mut">' + esc(m.phone) + '</div>' : '') + '</td>' +
-        '<td class="mut">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
+        '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
         '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
     }).join('')
-    tbl.innerHTML = head + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter</td></tr>')
+    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
       r.onclick = () => {
@@ -411,6 +426,8 @@ export async function ConsultationsView(app, params = {}) {
       paintBadges()
       const admitBtn0 = document.getElementById('admitFromEncB')
       if (admitBtn0) admitBtn0.style.display = 'none'
+      const delSlot0 = document.getElementById('delEncSlot')
+      if (delSlot0) delSlot0.innerHTML = ''
       paintFlow(-1)
       return
     }
@@ -474,6 +491,22 @@ export async function ConsultationsView(app, params = {}) {
       const nextStep = STATUS_FLOW[ni]
       advBtn.textContent = nextStep && e.status !== 'closed' ? 'Advance → ' + nextStep.label : 'Advance →'
     }
+    // Delete is only offered once the encounter is closed (the service refuses
+    // open ones) and only for data.delete holders. Repainted on every selection
+    // change because the action bar itself is static shell markup.
+    const delSlot = document.getElementById('delEncSlot')
+    if (delSlot) {
+      delSlot.innerHTML = e.status === 'closed'
+        ? kebabCell({ rowId: e.id, items: [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] }) : ''
+      wireKebabs(delSlot, async (rowId, action) => {
+        if (action === 'delete') {
+          confirmDelete('this closed encounter', () => deleteEncounter(rowId), () => {
+            selectedEncounter = null
+            reload()
+          })
+        }
+      })
+    }
     const vitals = e.vitals || {}
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || '—' }
     set('v-bp', vitals.BP); set('v-pulse', vitals.Pulse); set('v-temp', vitals.Temp); set('v-spo2', vitals.SpO2)
@@ -490,7 +523,7 @@ export async function ConsultationsView(app, params = {}) {
           '</div>'
         : ''
     }
-    if (noteEl && document.activeElement !== noteEl) noteEl.value = e.chiefComplaint || e.diagnosis || ''
+    if (noteEl && document.activeElement !== noteEl) noteEl.value = e.chiefComplaint ? 'S: ' + e.chiefComplaint : ''
     // The saved plan is data, not an editor — show it read-only when present so
     // "Plan set" is backed by something the prescriber can actually read back.
     const planBox = document.getElementById('planBox')
@@ -545,14 +578,13 @@ export async function ConsultationsView(app, params = {}) {
       return
     }
     el.innerHTML =
-      '<div class="tblwrap"><table class="tbl">' +
-      '<tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr>' +
+      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr></thead><tbody>' +
       orders.map((o) =>
-        '<tr><td><strong>' + esc(txt(o.lab_order_id || o.id)) + '</strong></td>' +
+        '<tr><td><a href="#/laboratory/orders/' + esc(txt(o.lab_order_id || o.id)) + '"><strong>' + esc(txt(o.lab_order_id || o.id)) + '</strong></a></td>' +
         '<td>' + esc(txt(o.test_panel || (Array.isArray(o.tests) ? o.tests.join(', ') : ''))) + '</td>' +
         '<td>' + esc(txt(o.priority, 'Routine')) + '</td>' +
-        '<td class="mut">' + esc(when(o.ordered_at)) + '</td></tr>').join('') +
-      '</table></div>' +
+        '<td class="mut">' + esc(fmtDateTime(o.ordered_at)) + '</td></tr>').join('') +
+      '</tbody></table></div>' +
       '<p class="sub" style="margin-top:8px">Snapshot copied onto this encounter when the order was placed — the live result trail stays in Laboratory.</p>'
   }
 
@@ -594,6 +626,50 @@ export async function ConsultationsView(app, params = {}) {
     return esc(names.slice(0, 2).join(', ') || '—') + (names.length > 2 ? ' <span class="mut">+' + (names.length - 2) + ' more</span>' : '')
   }
 
+  // Record one dose against one script line: qty, route, site, note. The hard
+  // stop (never more than the prescriber ordered) is enforced in the service;
+  // the issued-stock shortfall is only a warning here, because ward stock can
+  // bridge it and external lines were never issued at all.
+  function openGiveDoseModal(r, l) {
+    if (!canAdminDose) { toast('Your role cannot record medication administration — ask an administrator for the "medication.administer" capability.'); return }
+    const remaining = A.lineRemainingToGive(l)
+    if (remaining <= 0) { toast(`"${l.medicine}" has already been given in full (${R.toQty(l.quantity, 1)} of ${R.toQty(l.quantity, 1)}).`); return }
+    formModal({
+      title: `Give ${l.medicine || 'dose'}`,
+      fields: [
+        { name: 'dose_line', label: 'Medicine', preview: `${l.medicine || '—'}${l.dosage ? ' · ' + l.dosage : ''} — ${remaining} of ${R.toQty(l.quantity, 1)} left to give` },
+        { name: 'qty', label: 'Doses to give now', type: 'number', value: 1, required: true, hint: true },
+        { name: 'route', label: 'Route', type: 'select', value: 'oral', options: A.ADMIN_ROUTES.map((x) => ({ value: x, label: x.toUpperCase() })) },
+        { name: 'site', label: 'Site (for injections)', placeholder: 'e.g. left deltoid' },
+        { name: 'note', label: 'Note', type: 'textarea', placeholder: 'optional — anything worth recording about this dose' },
+      ],
+      submitLabel: 'Record dose',
+      onInput: (vals) => {
+        const hint = document.querySelector('#fmFields [data-hint="qty"]')
+        if (!hint) return
+        const q = Number(vals.qty)
+        if (!q || q <= 0) { hint.hidden = true; return }
+        if (A.overIssuedWarn(l, q)) {
+          const issued = R.toQty(l.dispensed_qty, 0)
+          hint.textContent = `⚠ pharmacy issued ${issued} — this dose reaches beyond that. Fine if ward stock covers it; otherwise check the issue first.`
+          hint.hidden = false
+        } else {
+          hint.hidden = true
+        }
+      },
+      onSubmit: async (v) => {
+        const qty = Number(v.qty)
+        if (!Number.isFinite(qty) || qty <= 0) throw new Error('Dose quantity must be greater than zero.')
+        if (A.exceedsOrder(l, qty)) throw new Error(`Only ${remaining} left to give on "${l.medicine}" (ordered ${R.toQty(l.quantity, 1)}, given ${A.lineGiven(l)}).`)
+        const res = await administerDose({ requestId: r.id, lineId: l.line_id, qty, route: v.route, site: v.site, note: v.note })
+        closeModal()
+        toast(`${l.medicine}: given ${qty} — ${res.remaining} left to give`)
+        await loadEncRx(true)
+        showWsTab('rx')
+      },
+    })
+  }
+
   function renderEncRx() {
     const el = document.getElementById('encRx')
     if (!el) return
@@ -607,36 +683,50 @@ export async function ConsultationsView(app, params = {}) {
       const expanded = rxExpanded.has(r.id)
       const lines = r.items.map((l) => {
         const issued = R.toQty(l.dispensed_qty, 0)
+        const given = A.lineGiven(l)
+        const left = A.lineRemainingToGive(l)
+        const unit = l.unit ? ' ' + esc(l.unit) : ''
         return '<tr>' +
           '<td><strong>' + esc(l.medicine || '—') + '</strong>' + (l.external ? ' <span class="pill info">external</span>' : '') +
           (l.sku ? '<div class="mut">' + esc(l.sku) + '</div>' : '') + '</td>' +
           '<td>' + esc(l.dosage || '—') + '</td>' +
-          '<td>' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') + '</td>' +
+          '<td>' + esc(R.toQty(l.quantity, 0)) + unit + '</td>' +
           '<td>' + (issued ? esc(issued) : '<span class="mut">—</span>') + '</td>' +
-          '<td class="mut">' + esc(l.instructions || '—') + '</td></tr>'
+          '<td>' + (given ? '<strong>' + esc(given) + '</strong>' : '<span class="mut">—</span>') + '</td>' +
+          '<td>' + (left > 0 ? '<span class="pill warn">' + esc(left) + ' to go</span>' : '<span class="pill ok">done</span>') + '</td>' +
+          '<td class="mut">' + esc(l.instructions || '—') + '</td>' +
+          '<td style="white-space:nowrap">' + kebabCell({ rowId: r.id + '|' + l.line_id, items: (canAdminDose && left > 0
+            ? [{ label: 'Give', dataAction: 'give' }]
+            : []) }) + '</td></tr>'
       }).join('')
+      // Script-level dose progress rides in the summary row so "how much of
+      // this script has the patient actually taken" is readable without opening
+      // it — the number the front desk quotes when a patient asks.
+      const doseBit = (r.given > 0 || r.toGive > 0)
+        ? '<div class="mut" style="font-size:.72rem">Given ' + esc(r.given) + ' of ' + esc(r.given + r.toGive) + ' · ' + esc(r.toGive) + ' to go</div>'
+        : ''
       return '<tr class="clickable' + (expanded ? ' sel' : '') + '" data-rx-row="' + esc(r.id) + '">' +
         '<td><span class="mut" data-rx-caret>' + (expanded ? '▾' : '▸') + '</span> ' + rxSummary(r) +
-        (r.prescribedBy ? '<div class="mut">' + esc(r.prescribedBy) + '</div>' : '') + '</td>' +
+        (r.prescribedBy ? '<div class="mut">' + esc(staffLabel(r.prescribedBy) || r.prescribedBy) + '</div>' : '') + doseBit + '</td>' +
         '<td>' + esc(r.lineCount) + '</td>' +
         '<td>' + statusBadge(r.status) + '</td>' +
-        '<td class="mut">' + esc(when(r.raw?.created_at)) + '</td>' +
-        '<td style="white-space:nowrap">' +
-          '<button class="btn ghost sm" data-rx-print="' + esc(r.id) + '">🖨 Print</button>' +
-          (canRx && open ? '<button class="btn ghost sm" data-rx-adjust="' + esc(r.id) + '">Adjust</button>' : '') +
-        '</td></tr>' +
+        '<td class="mut">' + esc(fmtDateTime(r.raw?.created_at)) + '</td>' +
+        '<td style="white-space:nowrap">' + kebabCell({ rowId: r.id, items: [
+          { label: '🖨 Print', dataAction: 'print' },
+          ...(canRx && open ? [{ label: 'Adjust', dataAction: 'adjust' }] : [])
+        ] }) + '</td></tr>' +
         '<tr data-rx-detail="' + esc(r.id) + '" style="' + (expanded ? '' : 'display:none') + '">' +
         '<td colspan="5" style="background:#f8fafc">' +
           (lines
-            ? '<div class="tblwrap"><table class="tbl" style="margin:6px 0"><tr><th>Medicine</th><th>Dosage</th><th>Prescribed</th><th>Issued</th><th>Instructions</th></tr>' + lines + '</table></div>'
+            ? '<div class="tblwrap"><table class="tbl" style="margin:6px 0"><thead><tr><th>Medicine</th><th>Dosage</th><th>Ordered</th><th>Issued</th><th>Given</th><th></th><th>Instructions</th><th></th></tr></thead><tbody>' + lines + '</tbody></table></div>'
             : '<p class="sub" style="margin:8px 0">No medicines on this prescription.</p>') +
         '</td></tr>'
     }).join('')
     el.innerHTML =
-      '<div class="tblwrap"><table class="tbl">' +
-        '<tr><th>Medicines</th><th>Lines</th><th>Status</th><th>Written</th><th></th></tr>' + rows +
-      '</table></div>' +
-      '<p class="sub" style="margin-top:8px">One row per prescription for this encounter — click a row to read the whole script.</p>'
+      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Medicines</th><th>Lines</th><th>Status</th><th>Written</th><th style="width:100px">Actions</th></tr></thead><tbody>' +
+        rows +
+      '</tbody></table></div>' +
+      '<p class="sub" style="margin-top:8px">One row per prescription for this encounter — click a row to read the whole script and give doses.</p>'
     paintBadges()
 
     el.querySelectorAll('[data-rx-row]').forEach((row) => {
@@ -649,16 +739,18 @@ export async function ConsultationsView(app, params = {}) {
         renderEncRx()
       }
     })
-    el.querySelectorAll('[data-rx-print]').forEach((b) => {
-      b.onclick = () => {
-        const r = rxScripts.find((x) => x.id === b.getAttribute('data-rx-print'))
-        if (r) printScript(r)
-      }
+    wireKebabs(el, (rowId, action) => {
+      const r = rxScripts.find((x) => x.id === rowId)
+      if (!r) return
+      if (action === 'print') printScript(r)
+      if (action === 'adjust') adjustScript(r)
     })
-    el.querySelectorAll('[data-rx-adjust]').forEach((b) => {
-      b.onclick = async () => {
-        const r = rxScripts.find((x) => x.id === b.getAttribute('data-rx-adjust'))
-        if (r) await adjustScript(r)
+    wireKebabs(el, (rowId, action) => {
+      if (action === 'give') {
+        const [rid, lineId] = rowId.split('|')
+        const r = rxScripts.find((x) => x.id === rid)
+        const l = r && r.items.find((x) => x.line_id === lineId)
+        if (r && l) openGiveDoseModal(r, l)
       }
     })
   }
@@ -693,6 +785,10 @@ export async function ConsultationsView(app, params = {}) {
   const me = myActiveMembership()
   const canDx = caps.canEdit && can(me, 'diagnosis.create')
   const canRx = caps.canEdit && can(me, 'prescription.create')
+  // Giving a dose is a bedside act with its own capability — deliberately NOT
+  // chained to encounter.edit, because a nurse records doses but never edits
+  // the clinical note.
+  const canAdminDose = myAdminCaps().canAdminister
   const labCaps = myLabCaps()
   const canLab = caps.canEdit && labCaps.canOrder
   function hideIfNoCap(id, ok) {
@@ -724,6 +820,90 @@ export async function ConsultationsView(app, params = {}) {
       enc: selectedEncounter.id,
     })
     navigate('/billing?' + q.toString())
+  }
+
+  // ---- start a new encounter from the queue page ---------------------------
+  // Same modal shape as PatientsView / PatientDetailView, but reached without
+  // leaving the worklist: pick the patient, clinician, type and complaint, then
+  // deep-link straight into the new encounter's workspace.
+  async function openNewEncounter() {
+    const { activeOrg } = authStore.getState()
+    if (!activeOrg) { toast('No hospital selected'); return }
+    if (!caps.canCreate) { toast('Your role cannot create encounters (missing "encounter.create").'); return }
+
+    // Patients for the picker: labels carry MRN + phone so the searchable
+    // select can match name, ID or mobile — the same haystack the patient page
+    // uses. One bounded page is enough for the picker; a new patient is
+    // registered on the Patients page first.
+    let patientOpts = []
+    try {
+      const pats = await listOrgPatientsPage(activeOrg, { pageSize: 200 }).then((r) => r.rows)
+      patientOpts = pats.map((p) => ({
+        value: p.pid,
+        label: p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key),
+      }))
+    } catch (e) {
+      console.warn('[consultations] patient picker load failed:', e?.message)
+    }
+    if (!patientOpts.length) { toast('No patients registered yet — add one on the Patients page first.'); return }
+
+    // Clinical staff for the clinician dropdown, with a free-text fallback so
+    // an encounter is never blocked by incomplete staff records.
+    let staff = []
+    try { staff = await getClinicalStaff(activeOrg) } catch (e) { console.warn('[consultations] staff load failed:', e?.message) }
+    const clinicianField = staff.length
+      ? { name: 'clinician', label: 'Clinician', type: 'select', options: staff, required: true, searchable: staff.length > 1, searchPlaceholder: 'Name or role…' }
+      : { name: 'clinician', label: 'Clinician (no staff on file — type a name)', required: true, placeholder: 'e.g. Dr. N. Eze' }
+
+    formModal({
+      title: 'Start encounter',
+      submitLabel: 'Open encounter →',
+      fields: [
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, searchable: patientOpts.length > 1, searchPlaceholder: 'Name, MRN or mobile…' },
+        { name: 'type', label: 'Type', type: 'select', options: ENCOUNTER_TYPES, required: true },
+        clinicianField,
+        { name: 'chief_complaint', label: 'Chief complaint', full: true, required: true, placeholder: 'e.g. Fever, headache, chest pain…' },
+      ],
+      onSubmit: async (v) => {
+        const pid = String(v.patient_id || '').trim()
+        if (!pid) throw new Error('Select a patient.')
+        const patient = patientOpts.find((o) => o.value === pid)
+        const pName = patient ? patient.label.split(' · ')[0] : ''
+
+        // Duplicate guard before write: spare the user a rejected submission.
+        try {
+          const existing = await findOpenEncounterForPatient(pid, activeOrg)
+          if (existing) {
+            openModal('Open encounter already exists',
+              '<p class="sub"><strong>' + esc(pName) + '</strong> already has an open encounter' +
+              (existing.id ? ' (' + String(existing.id).slice(0, 8) + '…)' : '') +
+              ' · ' + esc(existing.status || 'Open') + '. Close it before opening a new one.</p>' +
+              '<div class="mrow"><button class="btn ghost" data-close>Cancel</button>' +
+              '<a class="btn" href="#/consultations?enc=' + encodeURIComponent(existing.id) + '" data-close>Go to encounter →</a></div>')
+            document.querySelectorAll('#modalBody [data-close]').forEach((b) => { b.onclick = closeModal })
+            return
+          }
+        } catch (e) {
+          console.warn('[consultations] open-encounter pre-check failed:', e?.message)
+        }
+
+        try {
+          const created = await createEncounter({
+            patient_id: pid,
+            patient_name: pName,
+            status: 'arrived',
+            type: v.type || '',
+            clinician: v.clinician || '',
+            chief_complaint: v.chief_complaint || '',
+          })
+          closeModal()
+          toast('Encounter opened for ' + esc(pName))
+          navigate('/consultations?enc=' + encodeURIComponent(created.id))
+        } catch (e) {
+          throw new Error(friendlyWriteError(e))
+        }
+      },
+    })
   }
 
   function openDiagnosisForm() {
@@ -941,6 +1121,7 @@ export async function ConsultationsView(app, params = {}) {
   // Refresh is the one action that closes the open encounter — a full re-read
   // may no longer contain it.
   document.getElementById('refreshBtn').onclick = () => { selectedEncounter = null; reload() }
+  document.getElementById('newEncB').onclick = openNewEncounter
   document.getElementById('vitalsB').onclick = openVitalsForm
   document.getElementById('dxB').onclick = openDiagnosisForm
   document.getElementById('rxB').onclick = openMedicineForm
@@ -957,8 +1138,8 @@ export async function ConsultationsView(app, params = {}) {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
     if (!selectedEncounter.patientId) { toast('This encounter is not linked to a patient.'); return }
     if (patientBed(selectedEncounter)) { toast('This patient already holds a bed — discharge them first.'); return }
-    const q = new URLSearchParams({ enc: selectedEncounter.id, new: '1' })
-    navigate('/admissions?' + q.toString())
+    const q = new URLSearchParams({ enc: selectedEncounter.id })
+    navigate('/admissions/new?' + q.toString())
   }
   const advB = document.getElementById('advB')
   if (advB) advB.onclick = async () => {
@@ -994,12 +1175,25 @@ export async function ConsultationsView(app, params = {}) {
     if (st) st.textContent = 'Unsaved changes'
   })
   const qSearch = document.getElementById('qSearch')
-  if (qSearch) qSearch.addEventListener('input', renderQueue)
+  if (qSearch) {
+    let qDebounce
+    qSearch.addEventListener('input', () => {
+      clearTimeout(qDebounce)
+      qDebounce = setTimeout(() => {
+        const cb = document.getElementById('qClear')
+        if (cb) cb.hidden = !qSearch.value.trim()
+        renderQueue()
+      }, 500)
+    })
+    const qClear = document.getElementById('qClear')
+    if (qClear) qClear.onclick = () => { qSearch.value = ''; qClear.hidden = true; renderQueue() }
+  }
   const qStatus = document.getElementById('qStatus')
   if (qStatus) qStatus.addEventListener('change', renderQueue)
   const closeB = document.getElementById('closeEncB')
   if (closeB) closeB.onclick = async () => {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
+    if (!window.confirm('Close this encounter? A closed encounter cannot be reopened.')) return
     try {
       await updateEncounterStatus(selectedEncounter.id, 'closed')
       toast('Encounter closed')

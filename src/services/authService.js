@@ -11,6 +11,7 @@ import { validateNewPassword } from '../features/admin/roles.js'
 import { generateOrgId, normalizeOrgId } from '../features/orgs/domain.js'
 import { findInviteFor, acceptInvite, logAudit } from './adminService.js'
 import { navigate } from '../router.js'
+import { getDocsTolerant, getDocTolerant, isOffline } from '../lib/offlineRead.js'
 
 export { authErrorMessage, registrationErrorMessage }
 
@@ -18,7 +19,7 @@ export { authErrorMessage, registrationErrorMessage }
 
 export async function loadMemberships(uid) {
   const q = query(collection(db, 'organization_memberships'), where('user_id', '==', uid))
-  const snap = await getDocs(q)
+  const snap = await getDocsTolerant(q)
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
 }
 
@@ -30,7 +31,7 @@ export function myMembershipForOrg(memberships, orgId) {
 export async function loadOrganization(orgId) {
   if (!orgId) return null
   try {
-    const snap = await getDoc(doc(db, 'organizations', orgId))
+    const snap = await getDocTolerant(doc(db, 'organizations', orgId))
     return snap.exists() ? { id: snap.id, ...snap.data() } : null
   } catch {
     return null
@@ -41,7 +42,28 @@ export async function loadOrganization(orgId) {
 
 export async function loginEmail(email, password) {
   await signInWithEmailAndPassword(auth, email.trim(), password)
+  await saveLastLogin(email)
   // onAuthStateChanged listener refreshes store + memberships.
+}
+
+export async function saveLastLogin(email) {
+  try {
+    localStorage.setItem('medilogng.lastLoggedInUser', email)
+  } catch {}
+}
+
+export async function clearLastLogin() {
+  try {
+    localStorage.removeItem('medilogng.lastLoggedInUser')
+  } catch {}
+}
+
+export async function attemptOfflineLogin() {
+  // If user is already signed in (from browserLocalPersistence cache), they're handled
+  // by the authStore subscription above which checks !s.user before calling this.
+  // If we get here, there's no cached user, so we cannot auto-sign in without a password.
+  // Just return false - the login form will show with the email pre-filled.
+  return false
 }
 
 // Password reset by email — the path a signed-OUT user takes from the login
@@ -172,6 +194,7 @@ export async function registerNewHospital({ name, email, password, orgName, orgT
   const mship = {
     organization_id: orgRef.id,
     user_id: uid,
+    email: email.trim(),
     staff_name: name.trim(),
     role: 'hospital_admin',
     status: 'active',
@@ -224,6 +247,7 @@ export async function registerJoinHospital({ name, email, password, organization
   await setDoc(doc(db, 'organization_memberships', mshipId), {
     organization_id: orgId,
     user_id: uid,
+    email: email.trim(),
     staff_name: name.trim(),
     requested_role: role,
     role: invite?.role || role,
@@ -378,6 +402,9 @@ export function startAccessWatch() {
   async function poll() {
     const u = auth.currentUser
     if (!u || loggingOut) return
+    // Offline: skip the round-trip entirely — the cached memberships are
+    // already in the store, and a forced-logout check needs the server.
+    if (isOffline()) return
     let memberships = []
     try {
       memberships = await loadMemberships(u.uid)

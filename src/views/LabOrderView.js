@@ -16,18 +16,14 @@ import { can } from '../features/admin/roles.js'
 import { myActiveMembership } from '../services/authService.js'
 import { esc } from '../utils/sanitize.js'
 import { friendlyWriteError } from '../utils/errors.js'
+import { fmtDate } from '../utils/format.js'
+import { ITEM_STATUS, ITEM_STATUS_META } from '../features/labs/domain.js'
 import { printDocument } from '../lib/print.js'
 import { labReportHtml, labRequestStructuredHtml } from '../lib/labPrintTemplates.js'
 import { mountResultImages } from '../components/resultImages.js'
+import { staffLabel } from '../lib/staffName.js'
 
 const naira = (kobo) => '₦' + ((Number(kobo) || 0) / 100).toLocaleString('en-NG')
-
-function fmtDate(ts) {
-  if (!ts) return '—'
-  const d = new Date(ts)
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' ' +
-    d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-}
 
 function priorityPill(p) {
   const cls = p === 'STAT' ? 'bad' : p === 'Urgent' ? 'warn' : ''
@@ -35,18 +31,24 @@ function priorityPill(p) {
 }
 
 const ORDER_STATUS_META = {
-  order: ['Placed', 'warn'],
-  accepted: ['Accepted', 'info'],
-  'specimen-collected': ['Specimen collected', 'info'],
-  processing: ['Processing', 'info'],
-  completed: ['Completed', 'ok'],
-  verified: ['Verified / released', 'ok'],
-  cancelled: ['Cancelled', 'bad'],
+  order: { label: 'Placed', cls: 'warn' },
+  accepted: { label: 'Accepted', cls: 'info' },
+  'specimen-collected': { label: 'Specimen collected', cls: 'info' },
+  processing: { label: 'Processing', cls: 'info' },
+  completed: { label: 'Completed', cls: 'ok' },
+  verified: { label: 'Verified / released', cls: 'ok' },
+  rejected: { label: 'Rejected', cls: 'bad' },
+  cancelled: { label: 'Cancelled', cls: 'bad' },
 }
 
 function orderBadge(s) {
-  const m = ORDER_STATUS_META[s] || [s, '']
-  return '<span class="pill ' + m[1] + '">' + esc(m[0]) + '</span>'
+  const m = ORDER_STATUS_META[s] || { label: s, cls: '' }
+  return '<span class="pill ' + esc(m.cls) + '">' + esc(m.label) + '</span>'
+}
+
+function itemStatusLabel(s) {
+  const m = ITEM_STATUS_META[s] || { label: s, cls: '' }
+  return { label: m.label, cls: m.cls }
 }
 
 export async function LabOrderView(app, params = {}) {
@@ -84,6 +86,14 @@ export async function LabOrderView(app, params = {}) {
   function itemActions(it) {
     const btn = (act, label, cls = 'ghost sm') => '<button class="btn ' + cls + '" data-act="' + act + '" data-item="' + esc(it.item_id) + '">' + esc(label) + '</button>'
     const bits = []
+    const statusOrder = [ITEM_STATUS.ORDERED, ITEM_STATUS.SAMPLE_COLLECTED, ITEM_STATUS.RECEIVED, ITEM_STATUS.RESULT_ENTERED, ITEM_STATUS.VALIDATED, ITEM_STATUS.RELEASED]
+    const cur = statusOrder.indexOf(it.status)
+    const stepper = statusOrder.map((st, i) => {
+      let cls = 'step'
+      if (i < cur) cls += ' done'
+      else if (i === cur) cls += ' now'
+      return '<span class="' + cls + '">' + esc(st.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())) + '</span>'
+    }).join('<span class="arro">›</span>')
     if (it.status === 'ordered') {
       if (caps.canCollect) bits.push(btn('collect', 'Mark collected'))
       bits.push(btn('cancel-item', 'Cancel test'))
@@ -104,7 +114,7 @@ export async function LabOrderView(app, params = {}) {
     } else if (it.status === 'rejected') {
       if (caps.canCollect) bits.push(btn('recollect', 'Send for recollection', 'sm'))
     }
-    return bits.join(' ')
+    return '<div class="item-stepper" style="font-size:.7rem;color:var(--emr-muted);margin:6px 0 2px">' + stepper + '</div>' + bits.join(' ')
   }
 
   function render() {
@@ -135,12 +145,14 @@ export async function LabOrderView(app, params = {}) {
       '<div style="text-align:right">' + orderBadge(order.status) + ' ' + priorityPill(order.priority) +
       (order.facility === 'external' ? ' <span class="pill info">External</span>' : '') +
       (order.billingStatus === 'invoiced' ? ' <span class="pill ok">Invoiced</span>' : ' <span class="pill warn">Unbilled</span>') +
-      '<div class="mut" style="font-size:.8rem;margin-top:4px">' + fmtDate(order.orderedAt) + ' · ' + esc(order.orderedByName || '') + '</div>' +
+      '<div class="mut" style="font-size:.8rem;margin-top:4px">' + fmtDate(order.orderedAt) + (staffLabel(order.orderedByName) ? ' · ' + esc(staffLabel(order.orderedByName)) : '') + '</div>' +
       '</div></div>' +
       (order.note ? '<p style="margin:10px 0 0"><span class="mut">Clinical note:</span> ' + esc(order.note) + '</p>' : '') +
       '<div class="mrow" style="margin-top:12px">' +
       '<button class="btn ghost" id="printReqBtn">🖨 Request slip</button>' +
-      (items.some((it) => it.status === 'released') ? '<button class="btn ghost" id="printReportBtn">🖨 Report</button>' : '') +
+      (items.some((it) => it.status === 'released')
+        ? '<button class="btn" id="printReportBtn">🖨 Report</button>'
+        : '<button class="btn ghost" id="printReportBtn" disabled>🖨 Report</button>') +
       billBtn +
       (allValidated && caps.canVerify ? '<button class="btn" id="releaseAllBtn">Release all validated</button>' : '') +
       '</div>' +
@@ -160,8 +172,8 @@ export async function LabOrderView(app, params = {}) {
         '</div>' +
         (it.collection && it.collection.reject_reason ? '<p class="sub" style="color:#b91c1c;margin:6px 0 0">Rejected: ' + esc(it.collection.reject_reason) + '</p>' : '') +
         (it.resultText ? '<div class="result-line">' + esc(it.resultText) + (it.result && it.result.draft ? ' <span class="pill warn">draft</span>' : '') + '</div>' : '') +
-        (it.result && it.result.validated_by_name ? '<div class="mut" style="font-size:.78rem;margin-top:4px">Validated by ' + esc(it.result.validated_by_name) + ' · ' + fmtDate(it.result.validated_at) + '</div>' : '') +
-        (it.result && it.result.released_by_name ? '<div class="mut" style="font-size:.78rem">Released by ' + esc(it.result.released_by_name) + ' · ' + fmtDate(it.result.released_at) + '</div>' : '') +
+        (it.result && it.result.validated_by_name ? '<div class="mut" style="font-size:.78rem;margin-top:4px">Validated by ' + esc(staffLabel(it.result.validated_by_name)) + ' · ' + fmtDate(it.result.validated_at) + '</div>' : '') +
+        (it.result && it.result.released_by_name ? '<div class="mut" style="font-size:.78rem">Released by ' + esc(staffLabel(it.result.released_by_name)) + ' · ' + fmtDate(it.result.released_at) + '</div>' : '') +
         '</div>').join('') +
       (items.length ? '' : '<p class="mut">No individual tests recorded (legacy order).</p>') +
       '</div>' +
@@ -235,9 +247,20 @@ export async function LabOrderView(app, params = {}) {
   function openRejectDialog(itemId) {
     openModal('Reject sample',
       '<p>A rejection returns the test to the collection queue with a recorded reason (audit trail).</p>' +
+      '<div class="mut" style="margin-bottom:8px">Common reasons:</div>' +
+      '<div class="reject-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">' +
+      ['Clotted sample', 'Insufficient volume', 'Mislabelled', 'Haemolysed', 'Wrong tube', 'Other'].map((r) =>
+        '<button class="btn ghost sm reject-chip" data-reason="' + esc(r) + '">' + esc(r) + '</button>').join('') +
+      '</div>' +
       '<label>Reason<textarea class="input" id="rejectReason" rows="2" placeholder="e.g. clotted sample, insufficient volume, mislabelled"></textarea></label>' +
       '<div class="mrow"><button class="btn ghost" data-close>Keep sample</button>' +
       '<button class="btn" id="rejectYes" style="background:var(--emr-bad)">Reject</button></div>')
+    document.querySelectorAll('.reject-chip').forEach((b) => {
+      b.onclick = () => {
+        document.getElementById('rejectReason').value = b.getAttribute('data-reason') === 'Other' ? '' : b.getAttribute('data-reason')
+        document.getElementById('rejectReason')?.focus()
+      }
+    })
     document.getElementById('rejectYes').onclick = async () => {
       const reason = document.getElementById('rejectReason').value.trim()
       if (!reason) { toast('A reason is required.'); return }

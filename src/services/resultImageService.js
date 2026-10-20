@@ -14,6 +14,7 @@ import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const RESULT_IMAGES = 'result_images'
 const BLOB_DOC = 'blob'
@@ -160,7 +161,7 @@ export async function addResultImage({ kind, orderId, patientId, file, caption =
     width,
     height,
     created_by: user?.uid || null,
-    created_by_name: user?.email || '',
+    created_by_name: currentStaffName(),
     created_at: serverTimestamp(),
   }
   const buffer = await blob.arrayBuffer()

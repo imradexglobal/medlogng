@@ -12,6 +12,7 @@ import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const IMAGING_ORDERS = 'imaging_orders'
 
@@ -181,7 +182,7 @@ export async function createImagingOrder(input) {
     status: 'order',
     indication: input.indication || '',
     ordered_by: user?.uid || null,
-    ordered_by_name: user?.email || '',
+    ordered_by_name: currentStaffName(),
     ordered_at: now,
   }
 
@@ -237,7 +238,7 @@ export async function verifyImagingOrder(iid, verifiedByName) {
   await updateDoc(doc(db, IMAGING_ORDERS, iid), {
     status: 'verified',
     verified_by: user?.uid || null,
-    verified_by_name: String(verifiedByName || user?.email || '').trim(),
+    verified_by_name: String(verifiedByName || currentStaffName()).trim(),
     verified_at: serverTimestamp(),
     updated_at: serverTimestamp(),
   })

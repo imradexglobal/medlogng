@@ -2,10 +2,10 @@ import { initializeApp } from 'firebase/app'
 import { getAnalytics, isSupported } from 'firebase/analytics'
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, query, where, getDocs, getCountFromServer, onSnapshot,
+  collection, query, where, getDocs, getDocsFromCache, getCountFromServer, onSnapshot,
   runTransaction, writeBatch, serverTimestamp, Timestamp,
   waitForPendingWrites,
-  doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
+  doc, getDoc, getDocFromCache, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
 } from 'firebase/firestore'
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword,
@@ -50,11 +50,17 @@ export const app = initializeApp(firebaseConfig)
 
 // Analytics: initialize only when a measurement id is present (real deploy)
 // and the environment supports it. Skipped silently on unsupported hosts
-// (e.g. Capacitor/Electron) so it can never break startup.
+// (e.g. Capacitor/Electron) so it can never break startup. When the device
+// is offline the gtag script cannot load — defer until connectivity returns
+// instead of stalling on the external request at boot.
 if (measurementId) {
-  isSupported()
-    .then((supported) => { if (supported) getAnalytics(app) })
-    .catch(() => {})
+  const initAnalytics = () => {
+    isSupported()
+      .then((supported) => { if (supported) getAnalytics(app) })
+      .catch(() => {})
+  }
+  if (typeof navigator === 'undefined' || navigator.onLine !== false) initAnalytics()
+  else window.addEventListener('online', initAnalytics, { once: true })
 }
 
 // Offline-first: keep a persistent IndexedDB cache so reads and writes work
@@ -70,9 +76,9 @@ export const googleProvider = new GoogleAuthProvider()
 setPersistence(auth, browserLocalPersistence).catch(() => {})
 
 export {
-  collection, query, where, getDocs, getCountFromServer, onSnapshot, runTransaction, writeBatch,
-  serverTimestamp, Timestamp, waitForPendingWrites,
-  doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
+  collection, query, where, getDocs, getDocsFromCache, getCountFromServer, onSnapshot,
+  runTransaction, writeBatch, serverTimestamp, Timestamp, waitForPendingWrites,
+  doc, getDoc, getDocFromCache, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
   signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword,
   signOut, onAuthStateChanged, updatePassword, sendEmailVerification,
   sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset,

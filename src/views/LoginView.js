@@ -2,6 +2,7 @@ import { loginEmail, loginGoogle, authErrorMessage, registerNewHospital, registe
 import { markActivity } from '../services/idleService.js'
 import { authStore } from '../store/authStore.js'
 import { navigate } from '../router.js'
+import { attemptOfflineLogin, saveLastLogin } from '../services/authService.js'
 import { openModal, closeModal } from '../components/shell.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { esc } from '../utils/sanitize.js'
@@ -13,24 +14,24 @@ import { validateNewPassword } from '../features/admin/roles.js'
 // Right side: full-bleed Nigerian-healthcare imagery + glass benefit card.
 const SLIDES = [
   {
-    img: 'https://images.unsplash.com/photo-1622253692010-333f2da6031d?rect=400,1850,2780,2628&q=80&w=1400&auto=format&fit=crop',
-    alt: 'Doctor in scrubs with stethoscope',
+    img: 'https://plus.unsplash.com/premium_photo-1661440025428-b0fdaae239d6?fm=jpg&q=60&w=1400&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
+    alt: 'Silhouette of female healthcare worker in clinic',
     badge: 'Built for Nigeria',
     title: 'Admit in minutes, not hours',
     body: 'Paperless intake, vitals and encounter notes in one flow — for hospitals, clinics, diagnostic centres and pharmacies.',
     stat: 'EMR + Pharmacy + Billing in one workspace',
   },
   {
-    img: 'https://images.unsplash.com/photo-1576091160399-112ba8d25d1d?q=80&w=1400&auto=format&fit=crop',
-    alt: 'Doctor reviewing digital patient records on a tablet',
+    img: 'https://plus.unsplash.com/premium_photo-1661627310268-630597da657a?fm=jpg&q=60&w=1400&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
+    alt: 'Medical worker hands in sterile gloves',
     badge: 'Secure & reliable',
     title: 'Patient records you can trust',
     body: 'Role-based access per hospital, audit-friendly history and cloud backup — no missing folders, ever.',
     stat: 'Role-based access · Cloud backup · Audit trail',
   },
   {
-    img: 'https://images.unsplash.com/photo-1538108149393-fbbd81895907?q=80&w=1400&auto=format&fit=crop',
-    alt: 'Modern hospital corridor',
+    img: 'https://plus.unsplash.com/premium_photo-1661443829938-684d3c1e57b9?fm=jpg&q=60&w=1400&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D',
+    alt: 'Practitioner in sterile gloves close up',
     badge: 'For every care team',
     title: 'One workspace per hospital',
     body: 'Create a hospital to go live immediately as admin — or join your team and start once your admin approves.',
@@ -290,11 +291,12 @@ export async function LoginView(app, params = {}) {
 
   // ---------- LOGIN ----------
   function renderLogin() {
+    const lastUserEmail = authStore.getState().user?.email || localStorage.getItem('medilogng.lastLoggedInUser') || ''
     pane.innerHTML =
       subline('Welcome Back', createOrJoinLinks) +
       '<div id="loginFields">' +
       '<label class="fn-label" for="em">Email</label>' +
-      '<input id="em" class="input fn-input" type="email" autocomplete="username" placeholder="you@hospital.ng" />' +
+      '<input id="em" class="input fn-input" type="email" autocomplete="username" placeholder="you@hospital.ng" value="' + lastUserEmail + '" />' +
       renderPasswordField('pw', 'Password', 'current-password', 'Enter your password', 'password', '<button id="forgotLink" class="fn-linkbtn fn-forgot">Forgot password?</button>') +
       '<button id="b1" class="fn-primary">Log in</button>' +
       '<div class="fn-or"><span></span><em>Or</em><span></span></div>' +

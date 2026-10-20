@@ -58,6 +58,10 @@ export function toLine(raw, index = 0) {
     // How much has actually been issued. Absent on new lines, and on every
     // legacy row, which is exactly the "nothing issued yet" case.
     dispensed_qty: toQty(source.dispensed_qty, 0),
+    // How many of those units have actually reached the patient (see
+    // features/pharmacy/administration.js). Absent until the first dose is
+    // recorded, exactly like dispensed_qty before the first issue.
+    administered_qty: toQty(source.administered_qty, 0),
     // External lines are sourced from an outside pharmacy: the prescriber can
     // write them without the drug being in the in-house catalogue, and they are
     // excluded from every stock/issue calculation.
@@ -98,6 +102,7 @@ export function toRequestItems(doc) {
     instructions: doc.instructions,
     quantity: doc.quantity,
     dispensed_qty: doc.dispensed_qty,
+    administered_qty: doc.administered_qty,
   }, 0)]
 }
 
@@ -120,6 +125,16 @@ export function normalizeRequest(doc) {
         : (progress.dispensed > 0 ? REQUEST_STATUS.PARTIAL : REQUEST_STATUS.REQUESTED)
     }
   }
+  // Dose progress (given vs the ordered course) rides along on the same row so
+  // every surface that already renders a script can show "given 1 of 3" without
+  // a second fetch. Computed here rather than imported from administration.js
+  // to keep this module free of cycles — administration.js imports from here.
+  let given = 0
+  let ordered = 0
+  for (const l of items) {
+    ordered += toQty(l?.quantity, 1)
+    given += Math.min(toQty(l?.administered_qty, 0), toQty(l?.quantity, 1))
+  }
   return {
     id: doc?.id || '',
     patientId: doc?.patient_id || '',
@@ -129,6 +144,8 @@ export function normalizeRequest(doc) {
     status,
     items,
     ...progress,
+    given,
+    toGive: Math.max(0, ordered - given),
     raw: doc,
   }
 }
@@ -232,4 +249,22 @@ export function statusForProgress(progress) {
   if (progress.outstanding === 0) return REQUEST_STATUS.DISPENSED
   if (progress.dispensed > 0) return REQUEST_STATUS.PARTIAL
   return REQUEST_STATUS.REQUESTED
+}
+
+// Converts a pharmacy request line into an invoice line shape accepted by
+// billingService.createInvoiceFromLines. Prices are not stored on pharmacy
+// lines, so unit_price_kobo is 0 — the caller must price the line (from the
+// drug catalogue) before creating the invoice. Additive: existing readers are
+// unaffected.
+export function toInvoiceLine(line) {
+  const l = toLine(line)
+  const label = l.medicine + (l.dosage ? ' · ' + l.dosage : '')
+  return {
+    label,
+    category: 'Pharmacy',
+    unit_price_kobo: 0,
+    qty: l.quantity,
+    ref_type: 'pharmacy_request_line',
+    ref_id: l.line_id,
+  }
 }

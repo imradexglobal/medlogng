@@ -18,11 +18,19 @@ export const ALL_CAPS = [
   'beds.manage',
   'documents.upload',
   'prescription.dispense',
+  'medication.administer',
   'billing.invoice',
   'billing.payment',
   'encounter.status.advance',
   'admin.roles.manage',
   'admin.devices.manage',
+  // Hard-delete of clinical/administrative records. NOT part of any default
+  // role preset — admins (who hold '*') have it; anyone else must be granted
+  // it individually. Firestore Rules additionally pin the delete to the doc's
+  // own organization_id, so a holder can never delete another hospital's data.
+  // Append-only ledgers (payments, dispensations, audit, stock movements,
+  // result images) stay undeletable regardless of this capability.
+  'data.delete',
 ]
 
 export const ROLE_CAPS = {
@@ -35,9 +43,13 @@ export const ROLE_CAPS = {
     'vitals.create',
     'diagnosis.create',
     'prescription.create',
+    // Recording a dose at the bedside is a clinical act, so a doctor may do
+    // it too — the counter lives on the prescription they wrote.
+    'medication.administer',
     'lab.order',
     'lab.result.enter',
     'appointment.create',
+    'appointment.update',
     'beds.manage',
     'documents.upload',
   ],
@@ -49,7 +61,12 @@ export const ROLE_CAPS = {
     // write `status`/`updated_at` on the encounter (see firestore.rules),
     // never vitals, notes, diagnosis or plan.
     'encounter.status.advance',
+    // The bedside half of the medication chain: the nurse records what was
+    // actually given. Only bumps administered_qty on a script line — never
+    // the ordered quantities, status, or patient (see firestore.rules).
+    'medication.administer',
     'appointment.create',
+    'appointment.update',
     'beds.manage',
     'documents.upload',
   ],
@@ -66,6 +83,7 @@ export const ROLE_CAPS = {
   receptionist: [
     'patient.create',
     'appointment.create',
+    'appointment.update',
     'billing.invoice',
     'billing.payment',
   ],
@@ -77,6 +95,7 @@ export const ROLE_CAPS = {
     'patient.create',
     'patient.demographics.update',
     'appointment.create',
+    'appointment.update',
     'documents.upload',
   ],
 }

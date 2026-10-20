@@ -2,6 +2,8 @@
 // The form is rendered from the item's FROZEN configuration snapshot — never
 // from the live catalogue — so what is entered always matches what was ordered
 // and what will print. Flags (L/H) preview live from the snapshot reference.
+// Layout: one row per component — analyte, editable result cell, SI unit,
+// acceptable range, flag, remark — mirroring a paper result sheet.
 // Route: #/laboratory/orders/:id/items/:itemId
 import { shell, toast, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
@@ -76,30 +78,60 @@ export async function LabResultView(app, params = {}) {
     return comp.ref_text || ''
   }
 
-  function componentField(comp) {
+  function resultCell(comp, locked) {
     const cur = values[comp.id] || { value: '', remark: '' }
     const id = 'comp_' + comp.id
-    let control = ''
+    if (locked) {
+      return esc(cur.value || '—')
+    }
     if (comp.result_type === 'qualitative' || comp.result_type === 'selection') {
-      control = '<select class="input" id="' + id + '"><option value=""></option>' +
+      return '<select class="input" id="' + id + '" style="min-width:130px"><option value=""></option>' +
         (comp.options || []).map((o) => '<option' + (o === cur.value ? ' selected' : '') + '>' + esc(o) + '</option>').join('') +
         '</select>'
-    } else if (comp.result_type === 'text') {
-      control = '<textarea class="input" id="' + id + '" rows="2">' + esc(cur.value) + '</textarea>'
-    } else {
-      control = '<input class="input" id="' + id + '" inputmode="decimal" value="' + esc(cur.value) + '" placeholder="—">'
     }
+    if (comp.result_type === 'text') {
+      return '<textarea class="input" id="' + id + '" rows="2" style="min-width:220px">' + esc(cur.value) + '</textarea>'
+    }
+    const { ref } = flagFor(comp)
+    let bar = ''
+    if (ref && (ref.low != null || ref.high != null) && cur.value) {
+      const n = Number(cur.value)
+      const low = ref.low != null ? ref.low : 0
+      const high = ref.high != null ? ref.high : 100
+      const span = Math.max(high - low, 1)
+      const pct = Math.min(Math.max((n - low) / span, 0), 1) * 100
+      bar = '<div class="range-bar"><div class="range-track"><div class="range-fill" style="left:' + pct + '%"></div></div>' +
+        '<div class="range-labels"><span style="font-size:.65rem;color:var(--emr-muted)">' + esc(String(ref.low)) + '</span>' +
+        '<span style="font-size:.65rem;color:var(--emr-muted);float:right">' + esc(String(ref.high)) + '</span></div></div>'
+    }
+    return '<input class="input" id="' + id + '" inputmode="decimal" style="min-width:90px" value="' + esc(cur.value) + '" placeholder="—">' + bar
+  }
+
+  function flagCell(comp) {
+    if (comp.result_type !== 'numeric') return '<span class="mut">—</span>'
     const { flag } = flagFor(comp)
-    const unit = comp.unit ? ' <span class="mut">' + esc(comp.unit) + '</span>' : ''
-    const ref = refDisplay(comp)
-    return '<div class="comp-field">' +
-      '<div class="comp-label"><strong>' + esc(comp.display_name || comp.name) + '</strong>' + unit +
-      (ref ? ' <span class="mut" style="font-size:.8rem">ref ' + esc(ref) + '</span>' : '') +
-      (flag ? ' <span class="pill ' + (flag === 'L' ? 'warn' : 'bad') + '" title="' + esc(FLAG_LABELS[flag] || flag) + '">' + flag + '</span>' : '') +
-      (comp.required ? ' <span class="mut" title="Required">*</span>' : '') +
-      '</div>' + control +
-      '<input class="input comp-remark" data-remark="' + esc(comp.id) + '" placeholder="Remark (optional)" value="' + esc(cur.remark) + '">' +
-      '</div>'
+    if (!flag) return '<span class="flag-cell mut" data-flag="' + esc(comp.id) + '">—</span>'
+    const isCrit = flag.startsWith('critical')
+    return '<span class="pill ' + (isCrit ? 'bad' : (flag === 'L' ? 'warn' : 'bad')) + ' flag-cell" data-flag="' + esc(comp.id) +
+      '" title="' + esc(FLAG_LABELS[flag] || flag) + '">' + (isCrit ? '!' : flag) + '</span>'
+  }
+
+  function componentsTable(comps, locked) {
+    return '<div class="tblwrap"><table class="tbl res-tbl"><thead><tr><th style="width:26%">Test</th><th>Result</th><th style="width:90px">SI unit</th><th style="width:130px">Acceptable range</th><th style="width:56px">Flag</th><th style="width:22%">Remark</th></tr></thead><tbody>' +
+      comps.map((c) =>
+        '<tr data-row="' + esc(c.id) + '">' +
+        '<td><strong>' + esc(c.display_name || c.name) + '</strong>' +
+        (c.required ? ' <span class="mut" title="Required">*</span>' : '') + '</td>' +
+        '<td>' + resultCell(c, locked) + '</td>' +
+        '<td class="mut">' + (c.unit ? esc(c.unit) : '—') + '</td>' +
+        '<td class="mut">' + (refDisplay(c) ? esc(refDisplay(c)) : '—') + '</td>' +
+        '<td>' + flagCell(c) + '</td>' +
+        '<td>' + (locked
+          ? esc((values[c.id] && values[c.id].remark) || '')
+          : '<input class="input" data-remark="' + esc(c.id) + '" placeholder="optional" value="' + esc((values[c.id] && values[c.id].remark) || '') + '">') +
+        '</td>' +
+        '</tr>').join('') +
+      '</tbody></table></div>'
   }
 
   function render() {
@@ -127,10 +159,14 @@ export async function LabResultView(app, params = {}) {
       (item.accession_no ? ' · accession ' + esc(item.accession_no) : '') +
       (snap.specimen_type ? ' · ' + esc(snap.specimen_type) : '') +
       ' · <span class="pill ' + esc(item.statusCls) + '">' + esc(item.statusLabel) + '</span>' +
+      (patient ? ' · ' + esc(String(patient.sex || 'sex n/r')) + (patient.dob ? ', DOB ' + esc(patient.dob) : '') : '') +
       '</p>' +
-      (locked ? '<p class="sub" style="color:#b91c1c">This result has been released and is locked. A correction must be audited.</p>' : '') +
+      (locked ? '<p class="sub" style="color:#b91c1c"><span style="margin-right:6px">🔒</span>This result has been released and is locked. A correction must be audited.</p>' : '') +
+      '</div>' +
+
+      '<div class="card">' +
       (comps.length
-        ? comps.map(componentField).join('')
+        ? componentsTable(comps, locked)
         : '<p class="mut">This test has no structured components — use the free-text field.</p>' +
           '<label>Result<textarea class="input" id="legacyText" rows="3"' + (locked ? ' disabled' : '') + '>' + esc(item.result?.legacy_text || '') + '</textarea></label>') +
       '<label style="margin-top:10px">Result note (optional)<input class="input" id="resultNote" value="' + esc(item.result?.note || '') + '"' + (locked ? ' disabled' : '') + '></label>' +
@@ -138,6 +174,7 @@ export async function LabResultView(app, params = {}) {
         '<div class="mrow" style="margin-top:14px">' +
         '<button class="btn" id="saveBtn">Save result</button>' +
         '<button class="btn ghost" id="draftBtn">Save draft</button>' +
+        '<button class="btn ghost" id="normalBtn">Mark all normal</button>' +
         '<a class="btn ghost" href="#/laboratory/orders/' + esc(lid) + '">Cancel</a>' +
         '</div>') +
       '</div>'
@@ -145,8 +182,10 @@ export async function LabResultView(app, params = {}) {
     if (locked) return
     comps.forEach((c) => {
       const el = root.querySelector('#comp_' + CSS.escape(c.id))
-      if (el) el.oninput = () => { collectValues(comps); rerenderFlags(comps) }
-      if (el) el.onchange = () => { collectValues(comps); rerenderFlags(comps) }
+      if (el) {
+        el.oninput = () => { collectValues(comps); refreshFlag(c) }
+        el.onchange = () => { collectValues(comps); refreshFlag(c) }
+      }
     })
     root.querySelectorAll('[data-remark]').forEach((el) => {
       el.oninput = () => collectValues(comps)
@@ -155,6 +194,25 @@ export async function LabResultView(app, params = {}) {
     if (save) save.onclick = () => doSave(comps, false)
     const draft = root.querySelector('#draftBtn')
     if (draft) draft.onclick = () => doSave(comps, true)
+    const normal = root.querySelector('#normalBtn')
+    if (normal) normal.onclick = () => {
+      for (const c of comps) {
+        const el = document.getElementById('comp_' + CSS.escape(c.id))
+        if (!el) continue
+        if (c.result_type === 'numeric') {
+          const { ref } = flagFor(c)
+          let mid = ''
+          if (ref && ref.low != null && ref.high != null) mid = String(((Number(ref.low) + Number(ref.high)) / 2))
+          else if (ref && ref.low != null) mid = String(Number(ref.low))
+          else if (ref && ref.high != null) mid = String(Number(ref.high))
+          if (mid !== '') el.value = mid
+        } else if (c.result_type === 'qualitative' || c.result_type === 'selection') {
+          if (c.options && c.options.length) el.value = c.options[0]
+        }
+      }
+      collectValues(comps)
+      comps.forEach((c) => refreshFlag(c))
+    }
   }
 
   function collectValues(comps) {
@@ -168,24 +226,22 @@ export async function LabResultView(app, params = {}) {
     }
   }
 
-  // Live flag badges without a full re-render (keeps focus in the field).
-  function rerenderFlags(comps) {
-    comps.forEach((c) => {
-      const field = document.getElementById('comp_' + c.id)?.closest('.comp-field')
-      if (!field) return
-      const pill = field.querySelector('.pill')
-      if (c.result_type !== 'numeric') { if (pill) pill.remove(); return }
-      const { flag } = flagFor(c)
-      if (pill) {
-        if (!flag) pill.remove()
-        else { pill.textContent = flag; pill.className = 'pill ' + (flag === 'L' ? 'warn' : 'bad') }
-      } else if (flag) {
-        const span = document.createElement('span')
-        span.className = 'pill ' + (flag === 'L' ? 'warn' : 'bad')
-        span.textContent = flag
-        field.querySelector('.comp-label')?.appendChild(span)
-      }
-    })
+  // Live flag update in the row's flag cell — no full re-render, so focus
+  // stays in the cell being typed.
+  function refreshFlag(comp) {
+    const cell = document.querySelector('[data-flag="' + comp.id + '"]')
+    if (!cell || comp.result_type !== 'numeric') return
+    const { flag } = flagFor(comp)
+    if (!flag) {
+      cell.textContent = '—'
+      cell.className = 'flag-cell mut'
+      cell.removeAttribute('title')
+    } else {
+      const isCrit = flag.startsWith('critical')
+      cell.textContent = isCrit ? '!' : flag
+      cell.className = 'pill ' + (isCrit ? 'bad' : (flag === 'L' ? 'warn' : 'bad')) + ' flag-cell'
+      cell.title = FLAG_LABELS[flag] || flag
+    }
   }
 
   async function doSave(comps, draft) {

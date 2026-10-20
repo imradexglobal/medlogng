@@ -32,7 +32,7 @@ export async function DashboardView(app) {
       '</div>' +
       '<div class="grid2x">' +
         '<div class="card"><div class="card-head"><h3>Checked-in queue</h3><a class="btn ghost sm" href="#/consultations">Open queue →</a></div>' +
-          '<div class="tblwrap"><table class="tbl" id="dash-queue-tbl"><tr><th>Time</th><th>Patient</th><th>Clinic</th><th>Status</th></tr></table></div></div>' +
+          '<div class="tblwrap"><table class="tbl" id="dash-queue-tbl"><thead><tr><th>Time</th><th>Patient</th><th>Clinic</th><th>Status</th></tr></thead><tbody></tbody></table></div></div>' +
         '<div>' +
           '<div class="card"><div class="card-head"><h3>Bed occupancy</h3><a class="btn ghost sm" href="#/admissions">Wards →</a></div>' +
             '<div class="kv"><div><em>Active admissions</em><strong id="dash-adm">…</strong></div><div><em>Discharged</em><strong id="dash-dis">…</strong></div></div></div>' +
@@ -40,7 +40,7 @@ export async function DashboardView(app) {
         '</div>' +
       '</div>' +
       '<div class="card"><div class="card-head"><h3>Recent billing</h3><a class="btn ghost sm" href="#/billing">Billing →</a></div>' +
-        '<div class="tblwrap"><table class="tbl" id="dash-bill-tbl"><tr><th>Invoice</th><th>Patient</th><th>Total</th><th>Status</th></tr></table></div></div>',
+        '<div class="tblwrap"><table class="tbl" id="dash-bill-tbl"><thead><tr><th>Invoice</th><th>Patient</th><th>Total</th><th>Status</th></tr></thead><tbody></tbody></table></div></div>',
   })
 
   if (!activeOrg) return
@@ -90,11 +90,11 @@ export async function DashboardView(app) {
 
     const qtbl = document.getElementById('dash-queue-tbl')
     if (qtbl) {
-      const head = '<tr><th>Time</th><th>Patient</th><th>Clinic</th><th>Status</th></tr>'
+      const head = '<thead><tr><th>Time</th><th>Patient</th><th>Clinic</th><th>Status</th></tr></thead>'
       const rows = queued.slice(0, 5).map((q) =>
         '<tr><td>' + esc(q.time) + '</td><td><strong>' + esc(q.patientName) + '</strong></td><td>' + esc(q.clinic) + '</td><td>' + statusBadge(q.status) + '</td></tr>'
       ).join('')
-      qtbl.innerHTML = head + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">Queue is empty</td></tr>')
+      qtbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">Queue is empty</td></tr>') + '</tbody>'
     }
     const alerts = document.getElementById('dash-alerts')
     if (alerts) {
@@ -104,11 +104,11 @@ export async function DashboardView(app) {
     }
     const bt = document.getElementById('dash-bill-tbl')
     if (bt) {
-      const head = '<tr><th>Invoice</th><th>Patient</th><th>Total</th><th>Status</th></tr>'
+      const head = '<thead><tr><th>Invoice</th><th>Patient</th><th>Total</th><th>Status</th></tr></thead>'
       const rows = invoices.slice(0, 4).map((i) =>
         '<tr><td><strong>' + esc(i.invoiceId.slice(0, 8)) + '</strong></td><td>' + esc(i.patientName) + '</td><td><strong>' + esc(naira(i.total)) + '</strong></td><td>' + statusBadge(i.status) + '</td></tr>'
       ).join('')
-      bt.innerHTML = head + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No invoices yet</td></tr>')
+      bt.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No invoices yet</td></tr>') + '</tbody>'
     }
   }
 

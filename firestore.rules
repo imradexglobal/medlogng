@@ -25,6 +25,15 @@ service cloud.firestore {
         && (cap in myMship(orgId).capabilities || '*' in myMship(orgId).capabilities)
       ));
     }
+    // Hard-delete gate. The orgId passed in is always the EXISTING doc's
+    // organization_id (resource.data), never a value the client supplies, so
+    // a holder of data.delete can only ever delete records owned by a hospital
+    // where their own membership carries the capability. Append-only ledgers
+    // (payments, dispensations, stock movements, audit events, result images)
+    // do not use this — their delete rules stay `if false`.
+    function canDelete(orgId) {
+      return hasCap(orgId, 'data.delete');
+    }
 
     match /platform_admins/{id} {
       allow read, write: if false;
@@ -69,6 +78,15 @@ service cloud.firestore {
           && (mship != resource.data.organization_id + '_' + uid()
             || request.resource.data.diff(resource.data).changedKeys().hasOnly(['updated_at']))))
           && request.resource.data.status in ['pending', 'active', 'rejected', 'suspended'])
+        // Self path: a member may rename themselves — `staff_name` is the
+        // display name shown on records and reports (admins rename anyone
+        // through the admin path above). Nothing else may change.
+        || (mship == resource.data.organization_id + '_' + uid()
+          && resource.data.user_id == uid()
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['staff_name', 'updated_at'])
+          && request.resource.data.staff_name is string
+          && request.resource.data.staff_name.size() > 0
+          && request.resource.data.staff_name.size() <= 80)
         // Self path: a member may only clear their own must_change_password
         // flag after changing password — nothing else may change.
         || (mship == resource.data.organization_id + '_' + uid()
@@ -121,7 +139,10 @@ service cloud.firestore {
         && request.resource.data.status == 'active';
       allow update: if signedIn()
         && !(resource.data.status == 'merged_into' && request.resource.data.merged_into != resource.data.merged_into);
-      allow delete: if false;
+      // Patients are a global registry stamped with the org that FIRST
+      // registered them — only that hospital's data.delete holders can remove
+      // one (client additionally refuses when clinical history exists).
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /patient_identifiers/{id} {
       allow read, write: if false;
@@ -130,7 +151,7 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'patient.create');
       allow update: if hasCap(resource.data.organization_id, 'patient.demographics.update');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /patient_consents/{id} {
       allow read: if signedIn();
@@ -170,31 +191,33 @@ service cloud.firestore {
       allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
         || (hasCap(resource.data.organization_id, 'encounter.status.advance')
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at']));
-      allow delete: if false;
+      // Client restricts this to CLOSED encounters and cascades the
+      // encounter-scoped vitals/diagnoses/notes rows.
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /vitals/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'vitals.create');
       allow update: if hasCap(resource.data.organization_id, 'vitals.create');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /allergies/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'diagnosis.create');
       allow update: if hasCap(resource.data.organization_id, 'diagnosis.create');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /diagnoses/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'diagnosis.create');
       allow update: if hasCap(resource.data.organization_id, 'diagnosis.create');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /clinical_notes/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'encounter.create');
       allow update: if hasCap(resource.data.organization_id, 'encounter.edit');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /medication_requests/{id} {
       allow read: if signedIn();
@@ -207,8 +230,23 @@ service cloud.firestore {
       allow update: if hasCap(resource.data.organization_id, 'prescription.create')
                     || (hasCap(resource.data.organization_id, 'prescription.dispense')
                         && request.resource.data.diff(resource.data).changedKeys()
-                             .hasOnly(['status', 'reason', 'items', 'dispensed_at', 'updated_at']));
-      allow delete: if false;
+                             .hasOnly(['status', 'reason', 'items', 'dispensed_at', 'updated_at']))
+      // Nurses/doctors recording a dose may only bump the
+      // administered_qty counters inside items — never the
+      // ordered quantities, status, dispensed_at or patient.
+      || (hasCap(resource.data.organization_id, 'medication.administer')
+          && request.resource.data.diff(resource.data).changedKeys()
+               .hasOnly(['items', 'updated_at']));
+      // Client refuses when any line has been partly or fully dispensed.
+      allow delete: if canDelete(resource.data.organization_id);
+    }
+    // One doc per dose actually given to the patient (who, what, when, route,
+    // site). Append-only, like dispensations: a mistake is corrected by a
+    // reversal event, never by rewriting the record of care that happened.
+    match /medication_administrations/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'medication.administer');
+      allow update, delete: if false;
     }
     match /dispensations/{id} {
       allow read: if signedIn();
@@ -220,7 +258,8 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
       allow update: if hasCap(resource.data.organization_id, 'prescription.dispense');
-      allow delete: if false;
+      // Client refuses while stock > 0 so the movement ledger stays balanced.
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /stock_movements/{id} {
       allow read: if signedIn();
@@ -240,7 +279,8 @@ service cloud.firestore {
           || hasCap(resource.data.organization_id, 'lab.sample.collect')
           || hasCap(resource.data.organization_id, 'lab.result.enter')
           || hasCap(resource.data.organization_id, 'lab.result.verify'));
-      allow delete: if false;
+      // Client refuses invoiced orders and orders carrying released results.
+      allow delete: if canDelete(resource.data.organization_id);
     }
     // Test catalogue: org-scoped definitions. Readable by any signed-in user
     // (order forms need it); writable only by lab.catalogue.manage.
@@ -249,7 +289,9 @@ service cloud.firestore {
       allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
       allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
         && resource.data.organization_id == request.resource.data.organization_id;
-      allow delete: if false;
+      // Safe at any time: live orders carry frozen snapshots of the test
+      // configuration, so removing the catalogue entry never rewrites history.
+      allow delete: if canDelete(resource.data.organization_id);
     }
     // Laboratory settings (categories, specimen types, report header).
     match /lab_settings/{id} {
@@ -277,9 +319,9 @@ service cloud.firestore {
       // Check resource.data (the doc as it exists) and forbid the change.
       allow update: if resource.data.organization_id == request.resource.data.organization_id
         && hasCap(resource.data.organization_id, 'beds.manage');
-      // An admission is never deleted — discharge is the only way out, so the
-      // bed history stays auditable.
-      allow delete: if false;
+      // Discharge is still the normal way out; delete exists for correcting
+      // a mistaken admission AFTER discharge (client enforces that order).
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /admission_plan_items/{id} {
       allow read: if signedIn();
@@ -303,7 +345,8 @@ service cloud.firestore {
           'verified_at', 'verified_by', 'verified_by_name',
           'updated_at', 'updated_by_name', 'updated_by',
         ]);
-      allow delete: if false;
+      // Client refuses verified orders and orders carrying findings.
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /beds/{id} {
       allow read: if signedIn();
@@ -331,31 +374,45 @@ service cloud.firestore {
       allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
       allow update, delete: if false;
     }
+    // Bed claim documents prevent double-booking: one per (org, ward, bed).
+    // Created atomically with the admission inside a transaction; released on
+    // discharge. Gated by beds.manage on the claim's own organization.
+    match /bed_claims/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
+      allow update: if resource.data.organization_id == request.resource.data.organization_id
+        && hasCap(resource.data.organization_id, 'beds.manage');
+      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
+    }
     match /appointments/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'appointment.create');
       allow update: if hasCap(resource.data.organization_id, 'appointment.create');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /invoices/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
       allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
-      allow delete: if false;
+      // Client refuses invoices with money received (paid_kobo > 0).
+      allow delete: if canDelete(resource.data.organization_id);
     }
     match /payments/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'billing.payment')
         && request.resource.data.amount_kobo is int
         && request.resource.data.amount_kobo > 0;
-      allow update: if false;
+      allow update: if hasCap(resource.data.organization_id, 'billing.payment')
+        && resource.data.organization_id == request.resource.data.organization_id
+        && request.resource.data.amount_kobo is int
+        && request.resource.data.amount_kobo >= 0;
       allow delete: if false;
     }
     match /documents/{id} {
       allow read: if signedIn();
       allow create: if hasCap(request.resource.data.organization_id, 'documents.upload');
       allow update: if hasCap(resource.data.organization_id, 'documents.upload');
-      allow delete: if false;
+      allow delete: if canDelete(resource.data.organization_id);
     }
     // Result images for lab / imaging orders, stored as Firestore Bytes (no
     // Storage). One metadata doc per image; the binary lives in the `blob`
@@ -381,6 +438,15 @@ service cloud.firestore {
     match /payers/{id} {
       allow read: if signedIn();
       allow create, update: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+      allow delete: if hasCap(resource.data.organization_id, 'billing.invoice');
+    }
+    // Per-hospital price catalogue (service items + prices used on invoices).
+    match /price_catalogue/{id} {
+      allow read: if signedIn();
+      allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice')
+        && request.resource.data.organization_id is string;
+      allow update: if hasCap(request.resource.data.organization_id, 'billing.invoice')
+        && resource.data.organization_id == request.resource.data.organization_id;
       allow delete: if hasCap(resource.data.organization_id, 'billing.invoice');
     }
     match /plans/{id} {

@@ -14,6 +14,7 @@ import {
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
+import { listOrgTests } from './labCatalogueService.js'
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
 import {
@@ -21,6 +22,7 @@ import {
   deriveOrderStatus, orderStatusFromItemsOrLegacy, buildOrderNo, buildAccessionNo,
   validateResultValues, flagValues, formatItemResultText, sanitizeComponent,
 } from '../features/labs/domain.js'
+import { currentStaffName } from '../lib/staffName.js'
 
 const LABS = 'lab_orders'
 
@@ -228,6 +230,80 @@ export async function getLabOrder(lid) {
   return toLabRow({ ...snap.data(), id: snap.id })
 }
 
+// ---- refresh frozen order snapshots from live catalogue --------------------
+// Back-fills blank ref_low/ref_high/ref_text on existing order item snapshots
+// from the current catalogue. Never overwrites ranges already set on an order.
+export async function refreshOrderSnapshotsFromCatalogue() {
+  const me = myActiveMembership()
+  if (!can(me, 'lab.catalogue.manage')) {
+    throw new Error('Your role cannot manage the laboratory catalogue (missing "lab.catalogue.manage" capability).')
+  }
+  const { activeOrg } = authStore.getState()
+  if (!activeOrg) throw new Error('No hospital selected.')
+
+  const orders = await listOrgLabs(activeOrg)
+  if (!orders.length) throw new Error('No lab orders found.')
+
+  const catalogue = await listOrgTests(activeOrg, { includeInactive: false })
+  const byId = new Map(catalogue.map((t) => [t.id, t]))
+
+  let updatedOrders = 0
+  let updatedItems = 0
+  let updatedComponents = 0
+
+  for (const order of orders) {
+    const raw = order.raw
+    const items = Array.isArray(raw.items) ? [...raw.items] : []
+    let orderChanged = false
+
+    for (const it of items) {
+      if (!it.test_id) continue // skip adhoc / free-text items
+      const test = byId.get(it.test_id)
+      if (!test) continue
+
+      const snap = it.snapshot || {}
+      const snapComps = Array.isArray(snap.components) ? [...snap.components] : []
+      const catComps = Array.isArray(test.raw?.components) ? test.raw.components : []
+      let itemChanged = false
+
+      for (const sc of snapComps) {
+        const catComp = catComps.find((c) => c.id === sc.id) ||
+          catComps.find((c) => String(c.name || '').toUpperCase() === String(sc.name || '').toUpperCase())
+        if (!catComp) continue
+
+        if ((sc.ref_low == null || sc.ref_low === '') && catComp.ref_low != null) {
+          sc.ref_low = catComp.ref_low
+          itemChanged = true
+          updatedComponents++
+        }
+        if ((sc.ref_high == null || sc.ref_high === '') && catComp.ref_high != null) {
+          sc.ref_high = catComp.ref_high
+          itemChanged = true
+          updatedComponents++
+        }
+        if ((sc.ref_text == null || sc.ref_text === '') && catComp.ref_text != null && String(catComp.ref_text).trim() !== '') {
+          sc.ref_text = catComp.ref_text
+          itemChanged = true
+          updatedComponents++
+        }
+      }
+
+      if (itemChanged) {
+        it.snapshot = { ...snap, components: snapComps }
+        updatedItems++
+        orderChanged = true
+      }
+    }
+
+    if (orderChanged) {
+      await updateDoc(doc(db, LABS, order.id), { items, updated_at: serverTimestamp() })
+      updatedOrders++
+    }
+  }
+
+  return { updatedOrders, updatedItems, updatedComponents }
+}
+
 // Raw patient doc for flag interpretation (sex, dob). Read is open by rules.
 async function getPatientForFlags(pid) {
   try {
@@ -322,7 +398,7 @@ export async function createLabOrder(input) {
     priority: input.priority || 'Routine',
     status: 'order',
     ordered_by: user?.uid || null,
-    ordered_by_name: user?.email || '',
+    ordered_by_name: currentStaffName(),
     ordered_at: now,
   }
 
@@ -434,7 +510,7 @@ export async function updateLabStatus(labId, status) {
     return true
   }
 
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const at = Date.now()
     for (const it of items) {
@@ -499,7 +575,7 @@ export async function collectItems(labId, itemIds = [], note = '') {
   if (!caps.canCollect) throw new Error('Your role cannot collect samples (missing "lab.sample.collect" or "lab.order" capability).')
   const { user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items, raw) => {
     const targets = items.filter((it) => (!itemIds.length || itemIds.includes(it.item_id)) && it.status === ITEM_STATUS.ORDERED)
     if (!targets.length) throw new Error('No tests are awaiting collection for that selection.')
@@ -525,7 +601,7 @@ export async function receiveItems(labId, itemIds = []) {
   requireLabUpdate()
   const { user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const targets = items.filter((it) => (!itemIds.length || itemIds.includes(it.item_id)) && it.status === ITEM_STATUS.SAMPLE_COLLECTED)
     if (!targets.length) throw new Error('No collected samples waiting to be received.')
@@ -553,7 +629,7 @@ export async function rejectItem(labId, itemId, reason) {
   if (!clean) throw new Error('A rejection / recollection reason is required.')
   const { user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const it = items.find((x) => x.item_id === itemId)
     if (!it) throw new Error('Test not found on this order.')
@@ -574,7 +650,7 @@ export async function recollectItem(labId, itemId) {
   requireLabUpdate()
   const { user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const it = items.find((x) => x.item_id === itemId)
     if (!it) throw new Error('Test not found on this order.')
@@ -594,7 +670,7 @@ export async function cancelItem(labId, itemId, reason = '') {
   requireLabUpdate()
   const { user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const it = items.find((x) => x.item_id === itemId)
     if (!it) throw new Error('Test not found on this order.')
@@ -644,7 +720,7 @@ export async function saveItemResult(labId, itemId, { values = {}, note = '', dr
   const flagged = flagValues(check.values, snapshot, { ...patient, resultNow: Date.now() })
 
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   const prior = existing.result && !existing.result.draft ? existing.result : null
   await mutateOrder(labId, (items) => {
     const it = items.find((x) => x.item_id === itemId)
@@ -695,7 +771,7 @@ export async function validateItem(labId, itemId) {
   }
   const { activeOrg, user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const it = items.find((x) => x.item_id === itemId)
     if (!it) throw new Error('Test not found on this order.')
@@ -727,7 +803,7 @@ export async function releaseItem(labId, itemId) {
   }
   const { activeOrg, user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   await mutateOrder(labId, (items) => {
     const it = items.find((x) => x.item_id === itemId)
     if (!it) throw new Error('Test not found on this order.')
@@ -779,7 +855,7 @@ export async function addLabResult(labId, resultData) {
   }
   const { user } = authStore.getState()
   const at = Date.now()
-  const who = { by: user?.uid || '', byName: user?.email || '' }
+  const who = { by: user?.uid || '', byName: currentStaffName() }
   const map = (resultData && typeof resultData === 'object' && !Array.isArray(resultData)) ? resultData : null
   await mutateOrder(labId, (items, raw) => {
     for (const it of items) {
@@ -824,7 +900,7 @@ export async function addLabVerification(labId, verifiedById, verifiedByName) {
   const at = Date.now()
   const who = {
     by: verifiedById || user?.uid || '',
-    byName: verifiedByName || user?.email || '',
+    byName: verifiedByName || currentStaffName(),
   }
   await mutateOrder(labId, (items) => {
     for (const it of items) {
@@ -862,6 +938,18 @@ export async function stampLabInvoice(labId, invoiceId) {
   await updateDoc(doc(db, LABS, labId), {
     invoice_id: invoiceId,
     billing_status: 'invoiced',
+    updated_at: serverTimestamp(),
+  })
+  return true
+}
+
+// ---- billing unstamp ------------------------------------------------------------
+// Reverses stampLabInvoice: clears the invoice tie from a lab order so it
+// can be deleted later. Safe to call even if the order was never stamped.
+export async function unstampLabInvoice(labId) {
+  await updateDoc(doc(db, LABS, labId), {
+    invoice_id: '',
+    billing_status: 'unbilled',
     updated_at: serverTimestamp(),
   })
   return true

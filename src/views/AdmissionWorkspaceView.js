@@ -18,20 +18,27 @@ import {
 import {
   listSessionMedicationRequests, requestMedicationLines, listOrgDrugs,
 } from '../services/pharmacyService.js'
+import { administerDose, myAdminCaps, listSessionAdministrations } from '../services/medicationAdminService.js'
 import { openPrescriptionModal } from '../features/pharmacy/prescriptionModal.js'
+import * as R from '../features/pharmacy/requests.js'
+import * as A from '../features/pharmacy/administration.js'
 import {
-  listSessionInvoices, createInvoice, myBillingCaps,
+  listSessionInvoices, createInvoice, createInvoiceFromLines, myBillingCaps,
 } from '../services/billingService.js'
 import { getAdmission, dischargeAdmission } from '../services/admissionService.js'
-import { ADMISSION_ACTIVE } from '../features/admissions/domain.js'
+import { ADMISSION_ACTIVE, DISCHARGE_TYPES } from '../features/admissions/domain.js'
 import { planStatus, isPlanRemoved, PLAN_TYPES } from '../features/admissions/plan.js'
 import { MODALITIES } from '../features/admissions/imaging.js'
 import { esc } from '../utils/sanitize.js'
+import { fmtDate, fmtDateTime } from '../utils/format.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { mountResultImages } from '../components/resultImages.js'
 import { enqueue } from '../services/clinicalOutbox.js'
 import { printDocument } from '../lib/print.js'
 import { labRequestHtml, labResultHtml, imagingRequestHtml, imagingResultHtml } from '../lib/labPrintTemplates.js'
+import { listPrices, catalogueItems, priceFor } from '../services/priceCatalogueService.js'
+import { dischargeSummaryHtml } from '../lib/dischargeSummaryHtml.js'
+import { staffLabel, currentStaffName } from '../lib/staffName.js'
 
 export async function AdmissionWorkspaceView(app, params = {}) {
   const { activeOrg } = authStore.getState()
@@ -50,6 +57,9 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   const labCaps = myLabCaps()
   const imagingCaps = myImagingCaps()
   const billingCaps = myBillingCaps()
+  // The bedside capability: a nurse (or doctor) records doses given during the
+  // stay. Independent of canPrescribe — giving is not prescribing.
+  const adminCaps = myAdminCaps()
 
   // Load admission record
   const admission = await getAdmission(sid)
@@ -64,26 +74,19 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   }
 
   // Load all session-scoped collections
-  let [planItems, labs, imaging, meds, invoices] = await Promise.all([
+  let [planItems, labs, imaging, meds, invoices, doses] = await Promise.all([
     listSessionPlanItems(sid),
     listSessionLabs(sid),
     listSessionImaging(sid),
     listSessionMedicationRequests(sid),
     listSessionInvoices(sid),
+    listSessionAdministrations(sid),
   ])
 
   // Pharmacy catalogue, loaded lazily the first time the prescription form opens.
   let drugs = null
-
-  // Helper: format Date from millis
-  function fmt(ms) { return ms ? new Date(ms).toLocaleDateString('en-NG', { weekday: 'short', month: 'short', day: 'numeric' }) : '—' }
-
-  function fmtDateTime(ms) {
-    if (!ms) return '—'
-    const d = new Date(ms)
-    return d.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }) +
-      ' · ' + d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })
-  }
+  let prices = null
+  prices = await listPrices(activeOrg).catch(() => [])
 
   // Firestore Timestamps (raw session docs) or plain millis -> millis.
   function msOf(t) {
@@ -112,12 +115,13 @@ export async function AdmissionWorkspaceView(app, params = {}) {
 
   // Re-load session data after a write, then re-render.
   async function reload() {
-    ;[planItems, labs, imaging, meds, invoices] = await Promise.all([
+    ;[planItems, labs, imaging, meds, invoices, doses] = await Promise.all([
       listSessionPlanItems(sid),
       listSessionLabs(sid),
       listSessionImaging(sid),
       listSessionMedicationRequests(sid),
       listSessionInvoices(sid),
+      listSessionAdministrations(sid),
     ])
     render()
   }
@@ -134,6 +138,7 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     const canOrderLabs = labCaps.canOrder
     const canOrderImaging = imagingCaps.canOrder
     const canPrescribe = caps.canPrescribe
+    const canGiveDose = adminCaps.canAdminister
     const canBill = billingCaps.canInvoice
 
     // --- Overview card ---
@@ -145,11 +150,11 @@ export async function AdmissionWorkspaceView(app, params = {}) {
           '<div><em>Patient</em><strong>' + esc(admission.patientName || '—') + '</strong></div>' +
           '<div><em>Ward · Bed</em><strong>' + esc(admission.wardName || '—') + ' · ' + esc(admission.bedNumber || '—') + '</strong></div>' +
           '<div><em>Admission type</em><strong>' + esc(admission.admissionType || '—') + '</strong></div>' +
-          '<div><em>Admitted</em><strong>' + fmt(admission.admissionDate) + '</strong></div>' +
+          '<div><em>Admitted</em><strong>' + fmtDate(admission.admissionDate) + '</strong></div>' +
           '<div><em>Attending</em><strong>' + esc(admission.attendingProvider || '—') + '</strong></div>' +
           '<div><em>Reason</em><strong>' + esc(admission.admissionReason || '—') + '</strong></div>' +
           (admission.dischargeDate
-            ? '<div><em>Discharged</em><strong>' + fmt(admission.dischargeDate) + '</strong></div>' +
+            ? '<div><em>Discharged</em><strong>' + fmtDate(admission.dischargeDate) + '</strong></div>' +
               '<div><em>Discharge reason</em><strong>' + esc(admission.dischargeReason || '—') + '</strong></div>'
             : '') +
         '</div>' +
@@ -194,10 +199,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       '<div class="card">' +
         '<div class="card-head"><h3>Clinical plan</h3>' +
           (canEditPlan ? '<button class="btn sm" id="addPlanBtn">+ Add plan item</button>' : '') + '</div>' +
-        '<div class="tblwrap"><table class="tbl">' +
-          '<tr><th>Type · Round</th><th>Item</th><th>Status</th><th></th></tr>' +
-          (planRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No plan items yet.</td></tr>') +
-        '</table></div>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>Type · Round</th><th>Item</th><th>Status</th><th></th></tr></thead><tbody>' +
+          (planRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No plan items yet.</td></tr>') + '</tbody></table></div>' +
       '</div>'
 
     // --- Labs card ---
@@ -220,10 +223,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       '<div class="card">' +
         '<div class="card-head"><h3>Laboratory</h3>' +
           (canOrderLabs ? '<button class="btn sm" id="addLabBtn">+ Order lab</button>' : '') + '</div>' +
-        '<div class="tblwrap"><table class="tbl">' +
-          '<tr><th>Tests</th><th>Priority</th><th>Status</th><th>Ordered</th><th></th></tr>' +
-          (labsRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No lab orders.</td></tr>') +
-        '</table></div>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>Tests</th><th>Priority</th><th>Status</th><th>Ordered</th><th></th></tr></thead><tbody>' +
+          (labsRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No lab orders.</td></tr>') + '</tbody></table></div>' +
       '</div>'
 
     // --- Imaging card ---
@@ -248,21 +249,32 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       '<div class="card">' +
         '<div class="card-head"><h3>Imaging</h3>' +
           (canOrderImaging ? '<button class="btn sm" id="addImagingBtn">+ Order imaging</button>' : '') + '</div>' +
-        '<div class="tblwrap"><table class="tbl">' +
-          '<tr><th>Modality · Study</th><th>Priority</th><th>Status</th><th>Ordered</th><th></th></tr>' +
-          (imagingRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No imaging orders.</td></tr>') +
-        '</table></div>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>Modality · Study</th><th>Priority</th><th>Status</th><th>Ordered</th><th></th></tr></thead><tbody>' +
+          (imagingRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No imaging orders.</td></tr>') + '</tbody></table></div>' +
       '</div>'
 
     // --- Medications card ---
     function medRow(m) {
-      // medication_requests store items as an array of line objects
-      const items = Array.isArray(m.items) ? m.items : []
-      const lines = items.map((ln) => {
-        const name = ln.medicine || ln.drug_id || '—'
-        const dose = ln.dosage ? ' · ' + ln.dosage : ''
-        const qty = ln.qty ? ' × ' + ln.qty : ''
-        return '<div>' + esc(name) + dose + qty + '</div>'
+      // Raw session docs are normalised so every line carries the same
+      // quantity/given maths the rest of the app uses — the ward must see
+      // "given 1 of 3 · 2 to go" exactly as the consultation screen does.
+      const r = R.normalizeRequest(m)
+      const lines = r.items.map((l) => {
+        const given = A.lineGiven(l)
+        const left = A.lineRemainingToGive(l)
+        return '<div style="margin:4px 0">' +
+          '<strong>' + esc(l.medicine || '—') + '</strong>' +
+          (l.dosage ? ' <span class="mut">' + esc(l.dosage) + '</span>' : '') +
+          ' · ' + esc(R.toQty(l.quantity, 0)) + (l.unit ? ' ' + esc(l.unit) : '') +
+          (l.external ? ' <span class="pill info">external</span>' : '') +
+          '<div style="font-size:.74rem;margin-top:2px">Given ' + esc(given) + ' · ' +
+            (left > 0
+              ? '<span class="pill warn">' + esc(left) + ' to go</span>'
+              : '<span class="pill ok">complete</span>') + '</div>' +
+          (canGiveDose && left > 0
+            ? '<button class="btn ghost sm" data-give-dose="' + esc(r.id) + '|' + esc(l.line_id) + '" style="margin-top:4px">Give</button>'
+            : '') +
+        '</div>'
       }).join('') || '<div class="mut">' + esc(m.line || m.medicine || '—') + '</div>'
       return '<tr>' +
         '<td>' + lines + '</td>' +
@@ -270,14 +282,33 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<td class="mut">' + fmtDateTime(m.created_at) + '</td></tr>'
     }
     const medsRows = (meds || []).map(medRow).join('')
+    // The bedside trail: every dose given during this stay, newest first, with
+    // who gave it and how it reached the patient.
+    const doseLog = (doses || []).slice(0, 10).map((d) => {
+      const reversed = d.type === 'reversed'
+      return '<div class="titem">' +
+        '<strong>' + (reversed ? '↩ ' : '') + esc(d.medicine || '—') + '</strong> ' +
+        (reversed
+          ? '<span class="pill warn">reversed</span>'
+          : '<span class="pill ok">' + esc(String(d.qty || 1)) + ' given</span>') +
+        (d.route ? ' <span class="mut">' + esc(String(d.route).toUpperCase()) + (d.site ? ' · ' + esc(d.site) : '') + '</span>' : '') +
+        '<div class="mut" style="font-size:.74rem">' + esc(staffLabel(d.administered_by_name) || '—') + ' · ' +
+          fmtDateTime(msOf(d.administered_at) || msOf(d.created_at)) +
+          (d.note ? ' · ' + esc(d.note) : '') + '</div>' +
+      '</div>'
+    }).join('')
     const medsCard =
       '<div class="card">' +
         '<div class="card-head"><h3>Medications</h3>' +
           (canPrescribe ? '<button class="btn sm" id="addMedBtn">+ Prescribe</button>' : '') + '</div>' +
-        '<div class="tblwrap"><table class="tbl">' +
-          '<tr><th>Medicine</th><th>Status</th><th>Requested</th></tr>' +
-          (medsRows || '<tr><td colspan="3" class="mut" style="text-align:center;padding:22px 8px">No prescriptions.</td></tr>') +
-        '</table></div>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>Medicine</th><th>Status</th><th>Requested</th></tr></thead><tbody>' +
+          (medsRows || '<tr><td colspan="3" class="mut" style="text-align:center;padding:22px 8px">No prescriptions.</td></tr>') + '</tbody></table></div>' +
+        (doses && doses.length
+          ? '<div class="card-head" style="margin-top:14px"><h3>Doses given</h3>' +
+              '<span class="pill info">' + esc(String(doses.length)) + '</span></div>' +
+            '<div class="timeline">' + doseLog + '</div>' +
+            (doses.length > 10 ? '<p class="sub">Showing the 10 most recent of ' + esc(String(doses.length)) + ' doses.</p>' : '')
+          : '') +
       '</div>'
 
     // --- Billing card ---
@@ -287,17 +318,15 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<td><strong>' + esc(inv.items || inv.item || '—') + '</strong></td>' +
         '<td>₦' + total.toLocaleString('en-NG') + '</td>' +
         '<td style="white-space:nowrap">' + badge(inv.status || 'unpaid') + '</td>' +
-        '<td class="mut">' + fmt(inv.created_at) + '</td></tr>'
+        '<td class="mut">' + fmtDate(inv.created_at) + '</td></tr>'
     }
     const invRows = (invoices || []).map(invRow).join('')
     const billingCard =
       '<div class="card">' +
         '<div class="card-head"><h3>Billing</h3>' +
           (canBill ? '<button class="btn sm" id="addInvBtn">+ Add charge</button>' : '') + '</div>' +
-        '<div class="tblwrap"><table class="tbl">' +
-          '<tr><th>Item</th><th>Amount</th><th>Status</th><th>Date</th></tr>' +
-          (invRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No charges.</td></tr>') +
-        '</table></div>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr><th>Item</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead><tbody>' +
+          (invRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No charges.</td></tr>') + '</tbody></table></div>' +
       '</div>'
 
     // --- Discharge card ---
@@ -305,14 +334,17 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       ? '<div class="card">' +
           '<div class="card-head"><h3>Discharge</h3></div>' +
           (canDischarge
-            ? '<label class="fld full"><span>Discharge reason</span>' +
-                '<input type="text" id="dischargeReason" class="input" placeholder="e.g. Recovered"></label>' +
-              '<div class="mrow"><button class="btn" id="confirmDischarge">Discharge patient</button></div>' +
-              '<p class="sub" style="margin-top:8px">This will release the bed and mark the admission as discharged.</p>'
+            ? '<div class="mrow"><button class="btn" id="openDischargeBtn">Discharge patient</button></div>' +
+              '<p class="sub" style="margin-top:8px">Releases the bed and marks the admission as discharged.</p>'
             : '<p class="sub">You do not have permission to discharge patients.</p>') +
         '</div>'
-      : '<div class="card"><div class="card-head"><h3>Discharge</h3><span class="pill ok">discharged</span></div>' +
-          '<p class="sub">This admission is already discharged.</p></div>'
+      : '<div class="card">' +
+          '<div class="card-head"><h3>Discharge</h3><span class="pill ok">' + esc(admission.dischargeType || 'discharged') + '</span></div>' +
+          '<p class="sub">Discharged ' + fmtDate(admission.dischargeDate) + ' — ' + esc(admission.dischargeReason || '—') + '</p>' +
+          (canDischarge || billingCaps.canInvoice
+            ? '<div class="mrow"><button class="btn ghost sm" id="printDischargeBtn">🖨 Print discharge summary</button></div>'
+            : '') +
+        '</div>'
 
     // --- History timeline ---
     function timelineRowHTML(row) {
@@ -400,11 +432,26 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     const addMedBtn = document.getElementById('addMedBtn')
     if (addMedBtn) addMedBtn.onclick = openAddMedForm
 
+    // Give a dose against a script line (the bedside half of the chain).
+    document.querySelectorAll('[data-give-dose]').forEach((b) => {
+      b.onclick = () => {
+        const [rid, lineId] = b.getAttribute('data-give-dose').split('|')
+        const m = (meds || []).find((x) => x.id === rid)
+        if (!m) return
+        const r = R.normalizeRequest(m)
+        const l = r.items.find((x) => x.line_id === lineId)
+        if (r && l) openGiveDoseModal(r, l)
+      }
+    })
+
     const addInvBtn = document.getElementById('addInvBtn')
     if (addInvBtn) addInvBtn.onclick = openAddInvoiceForm
 
-    const dischargeBtn = document.getElementById('confirmDischarge')
-    if (dischargeBtn) dischargeBtn.onclick = doDischarge
+    const openDischargeBtn = document.getElementById('openDischargeBtn')
+    if (openDischargeBtn) openDischargeBtn.onclick = openDischargeModal
+
+    const printDischargeBtn = document.getElementById('printDischargeBtn')
+    if (printDischargeBtn) printDischargeBtn.onclick = printDischargeSummary
   }
 
   // ---------------------------------------------------------------
@@ -601,6 +648,7 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       '<h4 style="margin:14px 0 6px">Result documents</h4><div id="wspLabImages"></div>' +
       '<div class="mrow"><button class="btn ghost" id="wspPrintLabReq">🖨 Request</button>' +
       (l.result ? '<button class="btn ghost" id="wspPrintLabRes">🖨 Result</button>' : '') +
+      '<a class="btn ghost" href="#/laboratory/orders/' + esc(l.id) + '" data-close>Open in laboratory →</a>' +
       '<button class="btn ghost" data-close>Close</button></div>')
 
     mountResultImages(document.getElementById('wspLabImages'), { kind: 'lab', orderId: l.id, patientId: admission.patientId })
@@ -630,8 +678,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     const studies = items.map((it) => it.study).filter(Boolean)
     const external = i.facility === 'external'
     const pairsHtml = items.length
-      ? '<table class="tbl" style="margin-top:2px"><tr><th>Modality</th><th>Study / body part</th></tr>' +
-        items.map((it) => '<tr><td>' + esc(it.modality || '—') + '</td><td>' + esc(it.study || '—') + '</td></tr>').join('') + '</table>'
+      ? '<table class="tbl" style="margin-top:2px"><thead><tr><th>Modality</th><th>Study / body part</th></tr></thead><tbody>' +
+        items.map((it) => '<tr><td>' + esc(it.modality || '—') + '</td><td>' + esc(it.study || '—') + '</td></tr>').join('') + '</tbody></table>'
       : '<span class="mut">—</span>'
     openModal('Imaging order ' + esc(String(i.id).slice(0, 8)),
       '<div style="font-size:.88rem">' +
@@ -672,7 +720,7 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     const verifyBtn = document.getElementById('wspImgVerifyBtn')
     if (verifyBtn) verifyBtn.onclick = async () => {
       try {
-        await verifyImagingOrder(i.id, authStore.getState().user?.email || '')
+        await verifyImagingOrder(i.id, currentStaffName())
         closeModal()
         toast('Imaging report verified')
         reload()
@@ -706,6 +754,55 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   // ---------------------------------------------------------------
   //  CRUD: Medications
   // ---------------------------------------------------------------
+  // Record one dose against one script line. The hard stop (never more than
+  // the ordered course) lives in the service; the issued-stock shortfall is
+  // only a warning here — ward stock can bridge it, and external lines were
+  // never issued at all.
+  function openGiveDoseModal(r, l) {
+    if (!adminCaps.canAdminister) {
+      toast('Your role cannot record medication administration — ask an administrator for the "medication.administer" capability.')
+      return
+    }
+    const remaining = A.lineRemainingToGive(l)
+    if (remaining <= 0) {
+      toast(`"${l.medicine}" has already been given in full (${R.toQty(l.quantity, 1)} of ${R.toQty(l.quantity, 1)}).`)
+      return
+    }
+    formModal({
+      title: `Give ${l.medicine || 'dose'}`,
+      fields: [
+        { name: 'dose_line', label: 'Medicine', preview: `${l.medicine || '—'}${l.dosage ? ' · ' + l.dosage : ''} — ${remaining} of ${R.toQty(l.quantity, 1)} left to give` },
+        { name: 'qty', label: 'Doses to give now', type: 'number', value: 1, required: true, hint: true },
+        { name: 'route', label: 'Route', type: 'select', value: 'oral', options: A.ADMIN_ROUTES.map((x) => ({ value: x, label: x.toUpperCase() })) },
+        { name: 'site', label: 'Site (for injections)', placeholder: 'e.g. left deltoid' },
+        { name: 'note', label: 'Note', type: 'textarea', placeholder: 'optional — anything worth recording about this dose' },
+      ],
+      submitLabel: 'Record dose',
+      onInput: (vals) => {
+        const hint = document.querySelector('#fmFields [data-hint="qty"]')
+        if (!hint) return
+        const q = Number(vals.qty)
+        if (!q || q <= 0) { hint.hidden = true; return }
+        if (A.overIssuedWarn(l, q)) {
+          const issued = R.toQty(l.dispensed_qty, 0)
+          hint.textContent = `⚠ pharmacy issued ${issued} — this dose reaches beyond that. Fine if ward stock covers it; otherwise check the issue first.`
+          hint.hidden = false
+        } else {
+          hint.hidden = true
+        }
+      },
+      onSubmit: async (v) => {
+        const qty = Number(v.qty)
+        if (!Number.isFinite(qty) || qty <= 0) throw new Error('Dose quantity must be greater than zero.')
+        if (A.exceedsOrder(l, qty)) throw new Error(`Only ${remaining} left to give on "${l.medicine}" (ordered ${R.toQty(l.quantity, 1)}, given ${A.lineGiven(l)}).`)
+        const res = await administerDose({ requestId: r.id, lineId: l.line_id, qty, route: v.route, site: v.site, note: v.note })
+        closeModal()
+        toast(`${l.medicine}: given ${qty} — ${res.remaining} left to give`)
+        await reload()
+      },
+    })
+  }
+
   async function ensureDrugs() {
     if (drugs) return drugs
     drugs = await listOrgDrugs(activeOrg)
@@ -765,22 +862,29 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       title: 'Add charge',
       submitLabel: 'Add charge',
       fields: [
-        { name: 'item', label: 'Item / service', required: true, full: true, placeholder: 'e.g. Ward bed (per day)' },
+        { name: 'item', label: 'Item / service', type: 'select', options: catalogueItems(prices || []), required: true, full: true },
         { name: 'qty', label: 'Quantity', type: 'number', required: true, value: '1' },
+        { name: 'price', label: 'Unit price (₦)', type: 'number', step: '0.01', min: '0', required: true, full: true },
         { name: 'payer', label: 'Payer', type: 'select', options: ['Self-pay', 'NHIA', 'HMO'] },
       ],
       onSubmit: async (v) => {
-        if (!v.item) throw new Error('Item is required.')
         const qty = Number(v.qty)
+        const priceNaira = Number(v.price)
         if (!Number.isFinite(qty) || qty <= 0) throw new Error('Quantity must be greater than zero.')
+        if (!Number.isFinite(priceNaira) || priceNaira < 0) throw new Error('Price must be zero or greater.')
+        const priceKobo = Math.round(priceNaira * 100)
+        const item = v.item
+        // Default price from settings when the field is left at 0
+        const finalKobo = priceKobo || priceFor((prices || []), item)
         try {
-          await createInvoice({
+          await createInvoiceFromLines({
             patient_id: admission.patientId,
             patient_name: admission.patientName,
             admission_session_id: sid,
-            item: v.item,
-            qty: qty,
             payer: v.payer || 'Self-pay',
+            source_type: 'admission',
+            source_id: sid,
+            lines: [{ label: item, category: 'Service', unit_price_kobo: finalKobo, qty }],
           })
         } catch (e) { throw new Error(friendlyWriteError(e)) }
         closeModal()
@@ -793,22 +897,47 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   // ---------------------------------------------------------------
   //  Discharge
   // ---------------------------------------------------------------
-  async function doDischarge() {
-    const reasonEl = document.getElementById('dischargeReason')
-    const reason = reasonEl ? reasonEl.value.trim() : ''
-    if (!reason) { toast('Discharge reason is required.'); return }
+  function openDischargeModal() {
+    formModal({
+      title: 'Discharge — ' + admission.patientName,
+      submitLabel: 'Discharge patient',
+      fields: [
+        { name: 'reason', label: 'Discharge reason *', required: true, full: true, placeholder: 'e.g. Recovered' },
+        { name: 'notes', label: 'Discharge notes', full: true, placeholder: 'Follow-up instructions…' },
+        { name: 'discharge_type', label: 'Discharge type', type: 'select', options: DISCHARGE_TYPES.map((t) => ({ value: t.value, label: t.label })), value: 'discharged', required: true },
+      ],
+      onSubmit: async (v) => {
+        try {
+          await dischargeAdmission(sid, { reason: v.reason, notes: v.notes, dischargeType: v.discharge_type })
+        } catch (e) {
+          throw new Error(friendlyWriteError(e))
+        }
+        closeModal()
+        toast('Patient discharged — bed released')
+        reload()
+      },
+    })
+  }
+
+  async function printDischargeSummary() {
     try {
-      await dischargeAdmission(sid, { reason })
+      printDocument('Discharge summary', dischargeSummaryHtml({
+        hospitalName: authStore.getState().activeOrgName || 'Hospital',
+        patientName: admission.patientName || '—',
+        mrn: admission.mrn || '',
+        ward: admission.wardName || '—',
+        bed: admission.bedNumber || '—',
+        admissionType: admission.admissionType || '—',
+        admittedAt: admission.admissionDate,
+        dischargedAt: admission.dischargeDate,
+        dischargeType: admission.dischargeType || 'discharged',
+        dischargeReason: admission.dischargeReason || '—',
+        dischargeNotes: admission.dischargeNotes || '',
+        attendingProvider: admission.attendingProvider || '—',
+      }))
     } catch (e) {
-      toast(friendlyWriteError(e, 'Discharge failed'))
-      return
+      toast('Could not print discharge summary: ' + friendlyWriteError(e))
     }
-    toast('Patient discharged — bed released')
-    // Refresh admission status in memory
-    admission.status = 'discharged'
-    admission.dischargeDate = Date.now()
-    admission.dischargeReason = reason
-    reload()
   }
 
   render()

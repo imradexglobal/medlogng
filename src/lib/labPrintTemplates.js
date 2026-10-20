@@ -3,14 +3,8 @@
 // unit-tested without a DOM.
 import { esc } from '../utils/sanitize.js'
 import { formatTestResult } from '../services/laboratoryService.js'
-
-function fmtDate(ms) {
-  if (!ms) return '—'
-  const d = new Date(ms)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) +
-    ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-}
+import { fmtDateTime } from '../utils/format.js'
+import { staffLabel } from './staffName.js'
 
 function metaTable(rows) {
   return '<table class="p-meta">' + rows
@@ -80,8 +74,8 @@ export function labRequestHtml(o) {
     ['Order no.', String(o.orderId || '').slice(0, 8).toUpperCase()],
     facilityRow(o.facility),
     ['Priority', o.priority || 'Routine'],
-    ['Ordered by', o.orderedByName],
-    ['Date', fmtDate(o.orderedAt)],
+    ['Ordered by', staffLabel(o.orderedByName)],
+    ['Date', fmtDateTime(o.orderedAt)],
   ]
   return shell({
     hospitalName: o.hospitalName,
@@ -100,10 +94,10 @@ export function labResultHtml(o) {
     ['Patient', o.patientName],
     ['MRN', o.mrn],
     ['Order no.', String(o.orderId || '').slice(0, 8).toUpperCase()],
-    ['Ordered by', o.orderedByName],
-    ['Ordered', fmtDate(o.orderedAt)],
-    ['Verified by', o.verifiedBy],
-    ['Verified', fmtDate(o.verifiedAt)],
+    ['Ordered by', staffLabel(o.orderedByName)],
+    ['Ordered', fmtDateTime(o.orderedAt)],
+    ['Verified by', staffLabel(o.verifiedBy)],
+    ['Verified', fmtDateTime(o.verifiedAt)],
   ]
   return shell({
     hospitalName: o.hospitalName,
@@ -123,8 +117,8 @@ export function imagingRequestHtml(o) {
     ['Modality', o.modality || [...new Set(items.map((it) => it.modality).filter(Boolean))].join(', ')],
     facilityRow(o.facility),
     ['Priority', o.priority || 'Routine'],
-    ['Ordered by', o.orderedByName],
-    ['Date', fmtDate(o.orderedAt)],
+    ['Ordered by', staffLabel(o.orderedByName)],
+    ['Date', fmtDateTime(o.orderedAt)],
   ]
   return shell({
     hospitalName: o.hospitalName,
@@ -148,9 +142,9 @@ export function imagingResultHtml(o) {
     ['Order no.', String(o.orderId || '').slice(0, 8).toUpperCase()],
     ['Modality', o.modality || [...new Set(items.map((it) => it.modality).filter(Boolean))].join(', ')],
     facilityRow(o.facility),
-    ['Ordered by', o.orderedByName],
-    ['Ordered', fmtDate(o.orderedAt)],
-    ['Verified by', o.verifiedBy],
+    ['Ordered by', staffLabel(o.orderedByName)],
+    ['Ordered', fmtDateTime(o.orderedAt)],
+    ['Verified by', staffLabel(o.verifiedBy)],
   ]
   const report = formatTestResult(o.result) || 'No report text recorded.'
   return shell({
@@ -252,19 +246,19 @@ export function labReportHtml(order, opts = {}) {
     ['Order no.', order.orderNo || String(order.id || '').slice(0, 8).toUpperCase()],
     ['Accession(s)', items.map((it) => it.accession_no).filter(Boolean).join(', ')],
     ['Priority', order.priority || 'Routine'],
-    ['Ordered by', order.orderedByName],
-    ['Ordered', fmtDate(order.orderedAt)],
-    (released.length && order.verifiedAt) ? ['Released', fmtDate(order.verifiedAt)] : null,
+    ['Ordered by', staffLabel(order.orderedByName)],
+    ['Ordered', fmtDateTime(order.orderedAt)],
+    (released.length && order.verifiedAt) ? ['Released', fmtDateTime(order.verifiedAt)] : null,
   ]
 
   // Every ordered test appears; unreleased ones are explicitly marked pending
   // so a partial print can never be mistaken for a complete report.
   const bodyHtml = items.map((it) => itemBlock(it)).join('')
 
-  const signName = report.signatory_name || order.verifiedByName || order.verifiedBy || ''
+  const signName = report.signatory_name || staffLabel(order.verifiedByName) || staffLabel(order.verifiedBy) || ''
   const signTitle = report.signatory_title || 'Verified by'
   const signatures = '<div class="p-sign">' +
-    '<div><div class="p-line"></div><div class="p-cap">Requested by: ' + esc(order.orderedByName || '') + '</div></div>' +
+    '<div><div class="p-line"></div><div class="p-cap">Requested by: ' + esc(staffLabel(order.orderedByName) || '') + '</div></div>' +
     '<div><div class="p-line"></div><div class="p-cap">' + esc(signTitle) + ': ' + esc(signName) + '</div></div>' +
     '</div>'
 
@@ -291,8 +285,8 @@ export function labRequestStructuredHtml(order, opts = {}) {
     ['MRN', patient.mrn || ''],
     ['Order no.', order.orderNo || String(order.id || '').slice(0, 8).toUpperCase()],
     ['Priority', order.priority || 'Routine'],
-    ['Ordered by', order.orderedByName],
-    ['Date', fmtDate(order.orderedAt)],
+    ['Ordered by', staffLabel(order.orderedByName)],
+    ['Date', fmtDateTime(order.orderedAt)],
     order.facility === 'external' ? ['Facility', 'External facility'] : null,
   ]
   const bodyHtml =
