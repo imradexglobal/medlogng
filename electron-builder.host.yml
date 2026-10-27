@@ -21,13 +21,15 @@ directories:
 
 asar: true
 
-# The hub (ESM), the pure rules it imports, and the web app must live on real
-# disk inside the install so Node's module loader and the static file server
-# reach them reliably.
+# The hub (ESM), the pure rules it imports, the web app, and node_modules must
+# live on real disk inside the install so Node's native ESM module loader and
+# the static file server reach them reliably without failing on ASAR virtual paths.
 asarUnpack:
   - hub/**/*
   - dist/**/*
   - src/features/pharmacy/requests.js
+  - node_modules/**/*
+  - package.json
 
 files:
   - dist/**/*
@@ -41,11 +43,13 @@ files:
   - '!node_modules/@capacitor/cli/**/*'
 
 win:
+  icon: public/icon.ico
   target:
     - target: nsis
       arch: [x64]
   publisherName: Imradex Global
   requestedExecutionLevel: asInvoker
+  signAndEditExecutable: false
 
 nsis:
   oneClick: false
@@ -59,6 +63,9 @@ nsis:
   deleteAppDataOnUninstall: true
   differentialPackage: false
 
-# Host updates are installed by re-running the installer (kept off the
-# desktop app's auto-update channel so the building's server is never
-# replaced out from under it mid-shift).
+# Auto-update channel for Host builds
+publish:
+  provider: github
+  owner: imradexglobal
+  repo: medlogng
+  channel: host

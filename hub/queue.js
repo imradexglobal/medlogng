@@ -15,6 +15,12 @@
 // clientOpKey is the idempotency key the browser device sends. Accepting the
 // same op twice (lost HTTP response, device retry) is safe: `add` returns
 // duplicate instead of storing it again.
+//
+// queueKey is the hub's storage key. It is `<orgId>:<clientOpKey>`, so two
+// devices that happen to generate the same legacy `v1:<kind>:<rowid>` key in
+// different hospitals can never overwrite each other's queued op. Old queue
+// files (written before queueKey existed) still load: their clientOpKey is
+// used as the storage key.
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -24,6 +30,17 @@ const DELIVERED_KEEP_MS = 7 * 24 * 3600 * 1000 // prune delivered/error after 7 
 
 function freshState() {
   return { version: 1, savedAt: 0, ops: {} }
+}
+
+// Only ever persist the three identity fields the hub itself verified. A
+// malformed or oversized actor object must not bloat (or poison) queue.json.
+function cleanActor(actor) {
+  if (!actor || typeof actor !== 'object') return null
+  const out = {}
+  if (typeof actor.uid === 'string' && actor.uid) out.uid = actor.uid.slice(0, 128)
+  if (typeof actor.email === 'string' && actor.email) out.email = actor.email.slice(0, 200)
+  if (typeof actor.name === 'string' && actor.name) out.name = actor.name.slice(0, 120)
+  return Object.keys(out).length ? out : null
 }
 
 export function createQueue(file) {
@@ -67,14 +84,16 @@ export function createQueue(file) {
     // Returns { accepted: true } for a new op, { duplicate: true } for a
     // replay of one we already hold (or already delivered).
     add(op) {
-      const key = op.clientOpKey
+      const key = op.queueKey || op.clientOpKey
       if (state.ops[key]) return { duplicate: true }
       state.ops[key] = {
-        clientOpKey: key,
+        queueKey: key,
+        clientOpKey: op.clientOpKey,
         kind: op.kind,
         args: op.args,
         orgId: op.orgId,
-        actor: op.actor || null,
+        actor: cleanActor(op.actor),
+        authVersion: Number(op.authVersion) || 0,
         createdAt: op.createdAt || '',
         status: 'queued',
         attempts: 0,

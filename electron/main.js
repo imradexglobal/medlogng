@@ -60,12 +60,20 @@ function setZoom(z) {
   return currentZoom;
 }
 
+function appIconPath() {
+  const ico = path.join(__dirname, '..', 'public', 'icon.ico');
+  if (fs.existsSync(ico)) return ico;
+  const png = path.join(__dirname, '..', 'public', 'logo.png');
+  if (fs.existsSync(png)) return png;
+  return null;
+}
+
 function createWindow(startUrl) {
-  const iconPath = path.join(__dirname, '..', 'public', 'logo.svg');
+  const winIcon = appIconPath();
   const winOpts = {
     width: 1280,
     height: 800,
-    title: 'MedLogNg',
+    title: 'MediLog NG',
     backgroundColor: '#0f172a',
     show: false,
     webPreferences: {
@@ -74,7 +82,7 @@ function createWindow(startUrl) {
       nodeIntegration: false,
     },
   };
-  try { if (fs.existsSync(iconPath)) winOpts.icon = iconPath; } catch (e) {}
+  if (winIcon) winOpts.icon = winIcon;
   mainWindow = new BrowserWindow(winOpts);
 
   mainWindow.once('ready-to-show', () => {
@@ -178,7 +186,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('auto-check-updates', async () => {
     if (!autoUpdater) return { error: 'autoUpdater not available' };
     try {
-      // Manual flow: check only, UI decides when to download.
+      if (host.isHostMode()) {
+        try { autoUpdater.channel = 'host'; } catch (e) {}
+      }
       await autoUpdater.checkForUpdates();
       return { success: true };
     } catch (e) {
@@ -218,15 +228,16 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 
-// Auto-update (GitHub releases) — manual download flow so the renderer can
-// show progress + an "Update now" button. Listeners are registered BEFORE
-// the first check so no event is missed.
+// Auto-update (GitHub releases)
   try {
-    // Host builds are updated by re-running their installer (separate channel
-    // from the normal desktop app) — never auto-update a server out from
-    // under the whole building.
-    if (autoUpdater && !START_URL && !host.isHostMode()) {
-      autoUpdater.autoDownload = false;
+    if (autoUpdater && !START_URL) {
+      const isHost = host.isHostMode();
+      if (isHost) {
+        // Host builds use the 'host' channel so they check host.yml instead of latest.yml
+        try { autoUpdater.channel = 'host'; } catch (e) {}
+      }
+      // Automatically download updates
+      autoUpdater.autoDownload = true;
       autoUpdater.autoInstallOnAppQuit = true;
 
       autoUpdater.on('checking-for-update', () => {
@@ -245,6 +256,9 @@ app.whenReady().then(async () => {
           version: info?.version,
           releaseNotes: info?.releaseNotes,
         });
+        if (isHost) {
+          host.updateTrayStatus('Downloading update v' + (info?.version || '') + '…');
+        }
       });
 
       autoUpdater.on('update-not-available', (info) => {
@@ -269,6 +283,9 @@ app.whenReady().then(async () => {
           transferred: progressObj?.transferred || 0,
           total: progressObj?.total || 0,
         });
+        if (isHost) {
+          host.updateTrayStatus('Downloading update: ' + updateProgress + '%');
+        }
       });
 
       // electron-updater <6 emits `progress`, >=6 emits `download-progress`. Keep both.
@@ -293,6 +310,11 @@ app.whenReady().then(async () => {
           version: info?.version,
           releaseNotes: info?.releaseNotes,
         });
+        if (isHost) {
+          host.setUpdateReady(info?.version, () => {
+            autoUpdater.quitAndInstall(false, true);
+          });
+        }
       });
 
       autoUpdater.on('error', (err) => {

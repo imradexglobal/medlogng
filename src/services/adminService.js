@@ -346,4 +346,5 @@ export const AUDIT_ACTIONS = [
   'invite.revoked', 'invite.accepted', 'org.updated', 'device.revoked',
   'device.reactivated', 'password.changed', 'email.verified',
   'data.template', 'data.export', 'data.staged', 'data.push',
+  'hub.op.delivered', 'hub.op.failed',
 ]

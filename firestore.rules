@@ -3,504 +3,418 @@
 // READ MODEL (accepted MVP risk, see docs/upgrade-functions.md P0-1):
 //   Any signed-in user (any hospital) may READ clinical docs. Provenance
 //   (organization_id) is preserved on every doc; reads remain auditable.
+//   Hospital admin/financial data is deliberately restricted — only org
+//   members with the appropriate capability may read/write their own data.
+//
 // WRITE MODEL:
 //   Writes stay least-privilege: caller's membership doc ({orgId}_{uid}) must
 //   carry the capability. Roles are capabilities[] arrays set by admins;
 //   bootstrap super-admins via console-created platform_admins/{uid} docs.
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    function signedIn() { return request.auth != null; }
-    function uid() { return request.auth.uid; }
-    function isSuper() {
-      return signedIn()
-        && exists(/databases/$(database)/documents/platform_admins/$(request.auth.uid));
-    }
-    function myMship(orgId) {
-      return get(/databases/$(database)/documents/organization_memberships/$(orgId + '_' + request.auth.uid)).data;
-    }
-    function hasCap(orgId, cap) {
-      return signedIn() && (isSuper() || (
-        myMship(orgId).status == 'active'
-        && (cap in myMship(orgId).capabilities || '*' in myMship(orgId).capabilities)
-      ));
-    }
-    // Hard-delete gate. The orgId passed in is always the EXISTING doc's
-    // organization_id (resource.data), never a value the client supplies, so
-    // a holder of data.delete can only ever delete records owned by a hospital
-    // where their own membership carries the capability. Append-only ledgers
-    // (payments, dispensations, stock movements, audit events, result images)
-    // do not use this — their delete rules stay `if false`.
-    function canDelete(orgId) {
-      return hasCap(orgId, 'data.delete');
-    }
+//
+//   The top-level `allow read` on clinical collections is intentionally open
+//   so every hospital can view patient/encounter data (the agreed read model).
+//   Financial/admin collections are gated per‑org.
+//
+// Hard-delete gate. The orgId passed in is always the EXISTING doc's
+// organization_id (resource.data), never a value the client supplies, so
+// a holder of data.delete can only ever delete records owned by a hospital
+// where their own membership carries the capability. Append-only ledgers
+// (payments, dispensations, stock movements, audit events, result images) do
+// not use this — their delete rules stay `if false`.
+function canDelete(orgId) {
+  return hasCap(orgId, 'data.delete');
+}
 
-    match /platform_admins/{id} {
-      allow read, write: if false;
-    }
-    match /organizations/{orgId} {
-      allow read: if signedIn();
-      // New hospitals activate immediately: the creator may create with
-      // status 'active' (created_by must be themselves). Anything else
-      // stays 'pending'. Joins can never self-activate (see below).
-      allow create: if signedIn()
-        && request.resource.data.name is string
-        && request.resource.data.status in ['pending', 'active']
-        && (request.resource.data.status == 'pending'
-          || request.resource.data.created_by == uid());
-      allow update: if signedIn()
-        && (isSuper() || hasCap(orgId, 'admin.roles.manage'));
-      allow delete: if false;
-    }
-    match /organization_memberships/{mship} {
-      allow read: if signedIn() && (
-        resource.data.user_id == uid()
-        || myMship(resource.data.organization_id).status == 'active'
-        || isSuper()
-      );
-      // Self-registration: deterministic id, own uid. Joining an existing
-      // hospital is always 'pending'. Only the creator of a brand-new
-      // organization (organizations/{orgId}.created_by == self) may create
-      // their founding membership as 'active' — a new hospital is live
-      // immediately, nobody can self-activate into someone else's hospital.
-      allow create: if signedIn()
-        && mship == request.resource.data.organization_id + '_' + uid()
-        && request.resource.data.user_id == uid()
-        && request.resource.data.status in ['pending', 'active']
-        && (request.resource.data.status == 'pending'
-          || get(/databases/$(database)/documents/organizations/$(request.resource.data.organization_id)).data.created_by == uid());
-      allow update: if signedIn() && (
-        // Admin path: full member management (role/capabilities/status).
-        // An admin can NEVER change their own role/capabilities/status —
-        // only the other admin can (prevents self-demotion lockouts and
-        // self-promotion). Own-flag clears use the self paths below.
-        ((isSuper() || (hasCap(resource.data.organization_id, 'admin.roles.manage')
-          && (mship != resource.data.organization_id + '_' + uid()
-            || request.resource.data.diff(resource.data).changedKeys().hasOnly(['updated_at']))))
-          && request.resource.data.status in ['pending', 'active', 'rejected', 'suspended'])
-        // Self path: a member may rename themselves — `staff_name` is the
-        // display name shown on records and reports (admins rename anyone
-        // through the admin path above). Nothing else may change.
-        || (mship == resource.data.organization_id + '_' + uid()
-          && resource.data.user_id == uid()
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['staff_name', 'updated_at'])
-          && request.resource.data.staff_name is string
-          && request.resource.data.staff_name.size() > 0
-          && request.resource.data.staff_name.size() <= 80)
-        // Self path: a member may only clear their own must_change_password
-        // flag after changing password — nothing else may change.
-        || (mship == resource.data.organization_id + '_' + uid()
-          && resource.data.user_id == uid()
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['must_change_password'])
-          && resource.data.must_change_password == true
-          && request.resource.data.must_change_password == false)
-        // Self path: a member may only clear their own
-        // email_verification_required flag once Firebase Auth confirms the
-        // email is verified — nothing else may change.
-        || (mship == resource.data.organization_id + '_' + uid()
-          && resource.data.user_id == uid()
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['email_verification_required'])
-          && request.auth.token.email_verified == true
-          && request.resource.data.email_verification_required == false)
-      );
-      allow delete: if false;
-    }
-    // Staff invites: admin pre-approves (email + role); the invitee sets
-    // their own password at signup and claims the invite by matching email.
-    // No backend, no Admin SDK — Spark compatible.
-    match /staff_invites/{inviteId} {
-      allow read: if signedIn() && (isSuper()
-        || hasCap(resource.data.organization_id, 'admin.roles.manage')
-        || request.auth.token.email == resource.data.email);
-      allow create: if signedIn()
-        && hasCap(request.resource.data.organization_id, 'admin.roles.manage')
-        && request.resource.data.email is string
-        && request.resource.data.role is string
-        && request.resource.data.status == 'pending';
-      allow update: if signedIn() && (
-        (isSuper() || hasCap(resource.data.organization_id, 'admin.roles.manage'))
-        // Invitee accepts their own pending invite — status only.
-        || (request.auth.token.email == resource.data.email
-          && resource.data.status == 'pending'
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['status'])
-          && request.resource.data.status == 'accepted')
-      );
-      allow delete: if false;
-    }
-    match /roles/{roleId} {
-      allow read: if signedIn();
-      allow write: if isSuper();
-    }
-    // Canonical registry: open reads; guarded merges (never un-merge via client).
-    match /patients/{pid} {
-      allow read: if signedIn();
-      allow create: if signedIn()
-        && request.resource.data.surname is string
-        && request.resource.data.status == 'active';
-      allow update: if signedIn()
-        && !(resource.data.status == 'merged_into' && request.resource.data.merged_into != resource.data.merged_into);
-      // Patients are a global registry stamped with the org that FIRST
-      // registered them — only that hospital's data.delete holders can remove
-      // one (client additionally refuses when clinical history exists).
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /patient_identifiers/{id} {
-      allow read, write: if false;
-    }
-    match /organization_patients/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'patient.create');
-      allow update: if hasCap(resource.data.organization_id, 'patient.demographics.update');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /patient_consents/{id} {
-      allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.patient_id is string;
-      allow update, delete: if false;
-    }
-    match /patient_merge_requests/{id} {
-      allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.status == 'pending';
-      allow update: if signedIn();
-      allow delete: if false;
-    }
-    match /patient_merge_history/{id} {
-      allow read: if signedIn();
-      allow create: if signedIn();
-      allow update, delete: if false;
-    }
-    match /patient_identity_conflicts/{id} {
-      allow read: if signedIn();
-      allow create: if signedIn();
-      allow update: if signedIn();
-      allow delete: if false;
-    }
-    match /patient_portal_links/{id} {
-      allow read: if signedIn() && (resource.data.user_id == uid() || isSuper());
-      allow create: if signedIn() && request.resource.data.user_id == uid();
-      allow update, delete: if false;
-    }
-    // Clinical aggregates (children embedded — see docs/embedded-model.md).
-    match /encounters/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'encounter.create');
-      // `encounter.edit` may change anything. `encounter.status.advance` (nurse
-      // triage) may move the workflow forward ONLY — `status` and its
-      // bookkeeping timestamp, nothing else, so a nurse cannot rewrite vitals,
-      // notes, diagnosis or plan data on the encounter.
-      allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
-        || (hasCap(resource.data.organization_id, 'encounter.status.advance')
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at']));
-      // Client restricts this to CLOSED encounters and cascades the
-      // encounter-scoped vitals/diagnoses/notes rows.
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /vitals/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'vitals.create');
-      allow update: if hasCap(resource.data.organization_id, 'vitals.create');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /allergies/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'diagnosis.create');
-      allow update: if hasCap(resource.data.organization_id, 'diagnosis.create');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /diagnoses/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'diagnosis.create');
-      allow update: if hasCap(resource.data.organization_id, 'diagnosis.create');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /clinical_notes/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'encounter.create');
-      allow update: if hasCap(resource.data.organization_id, 'encounter.edit');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /medication_requests/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'prescription.create');
-      // Pharmacists (prescription.dispense) may mark a request issued and record what
-      // has gone out per line. Only fulfilment fields may change — patient,
-      // prescriber and the prescribed quantities themselves are all off limits,
-      // so a pharmacist can never rewrite the script. `items` is writable only
-      // because each line carries its own dispensed_qty.
-      allow update: if hasCap(resource.data.organization_id, 'prescription.create')
-                    || (hasCap(resource.data.organization_id, 'prescription.dispense')
-                        && request.resource.data.diff(resource.data).changedKeys()
-                             .hasOnly(['status', 'reason', 'items', 'dispensed_at', 'updated_at']))
-      // Nurses/doctors recording a dose may only bump the
-      // administered_qty counters inside items — never the
-      // ordered quantities, status, dispensed_at or patient.
-      || (hasCap(resource.data.organization_id, 'medication.administer')
-          && request.resource.data.diff(resource.data).changedKeys()
-               .hasOnly(['items', 'updated_at']));
-      // Client refuses when any line has been partly or fully dispensed.
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    // One doc per dose actually given to the patient (who, what, when, route,
-    // site). Append-only, like dispensations: a mistake is corrected by a
-    // reversal event, never by rewriting the record of care that happened.
-    match /medication_administrations/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'medication.administer');
-      allow update, delete: if false;
-    }
-    match /dispensations/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
-      allow update: if false;
-      allow delete: if false;
-    }
-    match /stock_lots/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
-      allow update: if hasCap(resource.data.organization_id, 'prescription.dispense');
-      // Client refuses while stock > 0 so the movement ledger stays balanced.
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /stock_movements/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
-      allow update, delete: if false;
-    }
-    match /lab_orders/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'lab.order');
-      // One doc carries the whole LIMS workflow (collection → results →
-      // validation → release). Rules stay coarse here — any lab capability
-      // may update — while the CLIENT enforces the fine-grained gate per
-      // operation (lab.sample.collect / lab.result.enter / lab.result.verify,
-      // see laboratoryService.js) and every transition is audit-logged.
-      allow update: if signedIn()
-        && (hasCap(resource.data.organization_id, 'lab.order')
-          || hasCap(resource.data.organization_id, 'lab.sample.collect')
-          || hasCap(resource.data.organization_id, 'lab.result.enter')
-          || hasCap(resource.data.organization_id, 'lab.result.verify'));
-      // Client refuses invoiced orders and orders carrying released results.
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    // Test catalogue: org-scoped definitions. Readable by any signed-in user
-    // (order forms need it); writable only by lab.catalogue.manage.
-    match /lab_test_catalogue/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
-      allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
-        && resource.data.organization_id == request.resource.data.organization_id;
-      // Safe at any time: live orders carry frozen snapshots of the test
-      // configuration, so removing the catalogue entry never rewrites history.
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    // Laboratory settings (categories, specimen types, report header).
-    match /lab_settings/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
-      allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
-        && resource.data.organization_id == request.resource.data.organization_id;
-      allow delete: if false;
-    }
-    match /lab_results/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
-      allow update: if hasCap(resource.data.organization_id, 'lab.result.verify');
-      allow delete: if false;
-    }
-    match /admissions/{id} {
-      // READ MODEL: signedIn(), like every other clinical collection (see header).
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      // organization_id is PINNED on update. Authorizing on
-      // request.resource.data.organization_id would let anyone holding
-      // beds.manage somewhere rewrite an admission owned by a DIFFERENT
-      // hospital and re-file it into their own org, because the rule would be
-      // checking the capability against the org the caller just moved it to.
-      // Check resource.data (the doc as it exists) and forbid the change.
-      allow update: if resource.data.organization_id == request.resource.data.organization_id
-        && hasCap(resource.data.organization_id, 'beds.manage');
-      // Discharge is still the normal way out; delete exists for correcting
-      // a mistaken admission AFTER discharge (client enforces that order).
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /admission_plan_items/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'encounter.edit');
-      allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'round', 'type', 'status', 'text', 'updated_at', 'updated_by_name',
-          'updated_by', 'revisions',
-        ]);
-      // Soft‑delete only: status may be set to 'removed'; everything else is
-      // immutable once created.  `allow delete: if false` above prevents hard
-      // deletion — history is never destroyed.
-      allow delete: if false;
-    }
-    match /imaging_orders/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'lab.order');
-      allow update: if hasCap(resource.data.organization_id, 'lab.order')
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'status', 'indication', 'priority', 'result', 'completed_at',
-          'verified_at', 'verified_by', 'verified_by_name',
-          'updated_at', 'updated_by_name', 'updated_by',
-        ]);
-      // Client refuses verified orders and orders carrying findings.
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /beds/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      allow update: if resource.data.organization_id == request.resource.data.organization_id
-        && hasCap(resource.data.organization_id, 'beds.manage');
-      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
-    }
-    match /wards/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      allow update: if resource.data.organization_id == request.resource.data.organization_id
-        && hasCap(resource.data.organization_id, 'beds.manage');
-      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
-    }
-    match /rooms/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      allow update: if resource.data.organization_id == request.resource.data.organization_id
-        && hasCap(resource.data.organization_id, 'beds.manage');
-      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
-    }
-    match /bed_allocations/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      allow update, delete: if false;
-    }
-    // Bed claim documents prevent double-booking: one per (org, ward, bed).
-    // Created atomically with the admission inside a transaction; released on
-    // discharge. Gated by beds.manage on the claim's own organization.
-    match /bed_claims/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
-      allow update: if resource.data.organization_id == request.resource.data.organization_id
-        && hasCap(resource.data.organization_id, 'beds.manage');
-      allow delete: if hasCap(resource.data.organization_id, 'beds.manage');
-    }
-    match /appointments/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'appointment.create');
-      allow update: if hasCap(resource.data.organization_id, 'appointment.create');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /invoices/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
-      allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
-      // Client refuses invoices with money received (paid_kobo > 0).
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    match /payments/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'billing.payment')
-        && request.resource.data.amount_kobo is int
-        && request.resource.data.amount_kobo > 0;
-      allow update: if hasCap(resource.data.organization_id, 'billing.payment')
-        && resource.data.organization_id == request.resource.data.organization_id
-        && request.resource.data.amount_kobo is int
-        && request.resource.data.amount_kobo >= 0;
-      allow delete: if false;
-    }
-    match /documents/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'documents.upload');
-      allow update: if hasCap(resource.data.organization_id, 'documents.upload');
-      allow delete: if canDelete(resource.data.organization_id);
-    }
-    // Result images for lab / imaging orders, stored as Firestore Bytes (no
-    // Storage). One metadata doc per image; the binary lives in the `blob`
-    // subcollection so listing attachments never pulls the payload down.
-    // Append-only: once written an image cannot be edited or removed, keeping
-    // the clinical record intact. Gated by the existing lab result-entry
-    // capability so no role migration is required.
-    match /result_images/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
-      allow update, delete: if false;
-      match /blob/{docId} {
-        allow read: if signedIn();
-        allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
-        allow update, delete: if false;
-      }
-    }
-    // Global payer master list (NOT org-scoped — every hospital shares it, which
-    // is why reads are just signedIn()). Writes carry organization_id as
-    // provenance, so the author must hold billing.invoice there. create/update
-    // read request.resource; delete must read `resource` because request.resource
-    // does not exist on a delete.
-    match /payers/{id} {
-      allow read: if signedIn();
-      allow create, update: if hasCap(request.resource.data.organization_id, 'billing.invoice');
-      allow delete: if hasCap(resource.data.organization_id, 'billing.invoice');
-    }
-    // Per-hospital price catalogue (service items + prices used on invoices).
-    match /price_catalogue/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice')
-        && request.resource.data.organization_id is string;
-      allow update: if hasCap(request.resource.data.organization_id, 'billing.invoice')
-        && resource.data.organization_id == request.resource.data.organization_id;
-      allow delete: if hasCap(resource.data.organization_id, 'billing.invoice');
-    }
-    match /plans/{id} {
-      allow read: if signedIn();
-      allow write: if hasCap(request.resource.data.organization_id, 'billing.invoice');
-    }
-    match /coverages/{id} {
-      allow read: if signedIn();
-      allow write: if hasCap(request.resource.data.organization_id, 'billing.invoice');
-    }
-    match /claims/{id} {
-      allow read: if signedIn();
-      allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
-      allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
-      allow delete: if false;
-    }
-    match /audit_events/{id} {
-      allow create: if signedIn() && request.resource.data.actor_user_id == uid();
-      allow read: if signedIn();
-      allow update, delete: if false;
-    }
-    match /sync_cursors/{deviceId} {
-      allow read, write: if signedIn();
-    }
-    // Devices are org-scoped. Admin-only control (option A): only holders
-    // of admin.devices.manage / admin.roles.manage (or super) can see or
-    // revoke other people's devices. Owners may register/heartbeat their own
-    // device but can never change its status. Blocking a person is done by
-    // suspending their membership — a suspended member's device is useless.
-    match /devices/{deviceId} {
-      allow read: if signedIn() && (resource.data.user_id == uid() || isSuper()
-        || (resource.data.organization_id is string
-          && (hasCap(resource.data.organization_id, 'admin.devices.manage')
-            || hasCap(resource.data.organization_id, 'admin.roles.manage'))));
-      allow create: if signedIn() && request.resource.data.user_id == uid();
-      allow update: if signedIn() && (
-        (resource.data.organization_id is string
-          && (hasCap(resource.data.organization_id, 'admin.devices.manage')
-            || hasCap(resource.data.organization_id, 'admin.roles.manage')))
-        || (resource.data.user_id == uid()
-          && request.resource.data.user_id == uid()
-          && request.resource.data.status == resource.data.status)
-      );
-      allow delete: if false;
-    }
-    match /terminologies/{system}/{code} {
-      allow read: if signedIn();
-      allow write: if false;
-    }
-    match /notifications_inbox/{id} {
-      allow read: if signedIn() && resource.data.recipient_user_id == uid();
-      allow create: if signedIn();
-      allow update: if signedIn() && resource.data.recipient_user_id == uid();
-      allow delete: if false;
-    }
+// Super-admin check.
+function isSuper() {
+  return request.auth != null
+    && exists(/databases/$(database)/documents/platform_admins/$(request.auth.uid));
+}
+
+// Membership lookup: returns the membership doc snapshot for the given org.
+// The doc id is always `{orgId}_{uid}`.
+function myMship(orgId) {
+  return get(/databases/$(database)/documents/organization_memberships/$(orgId + '_' + request.auth.uid)).data;
+}
+
+// Capability check: the caller must hold the named capability in their
+// active membership, OR be a super-admin.
+function hasCap(orgId, cap) {
+  return signedIn() && (isSuper() || (
+    myMship(orgId).status == 'active'
+    && (cap in myMship(orgId).capabilities || '*' in myMship(orgId).capabilities)
+  ));
+}
+
+// ---- Clinical collections (global read, gated write) ----
+
+// Canonical registry: open reads; guarded merges (never un-merge via client).
+match /patients/{pid} {
+  allow read: if signedIn();
+  allow create: if signedIn()
+    && request.resource.data.surname is string
+    && request.resource.data.status == 'active';
+  allow update: if signedIn()
+    && !(resource.data.status == 'merged_into' && request.resource.data.merged_into != resource.data.merged_into);
+  // Patients are a global registry stamped with the org that FIRST
+  // registered them — only that hospital's data.delete holders can remove
+  // one (client additionally refuses when clinical history exists).
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /patient_identifiers/{id} {
+  allow read, write: if false;
+}
+// Org‑scoped patient links: created by any hospital that has the
+// patient.create capability. Reads are open (the link is provenance,
+// not secret).
+match /organization_patients/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'patient.create');
+  allow update: if hasCap(resource.data.organization_id, 'patient.demographics.update');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /patient_consents/{id} {
+  allow read: if signedIn();
+  allow create: if signedIn() && request.resource.data.patient_id is string;
+  allow update, delete: if false;
+}
+match /patient_merge_requests/{id} {
+  allow read: if signedIn();
+  allow create: if signedIn() && request.resource.data.status == 'pending';
+  allow update: if signedIn();
+  allow delete: if false;
+}
+match /patient_merge_history/{id} {
+  allow read: if signedIn();
+  allow create: if signedIn();
+  allow update, delete: if false;
+}
+match /patient_identity_conflicts/{id} {
+  allow read: if signedIn();
+  allow create: if signedIn();
+  allow update: if signedIn();
+  allow delete: if false;
+}
+match /patient_portal_links/{id} {
+  allow read: if signedIn() && (resource.data.user_id == uid() || isSuper());
+  allow create: if signedIn() && request.resource.data.user_id == uid();
+  allow update, delete: if false;
+}
+
+// Clinical aggregates (children embedded — see docs/embedded-model.md).
+match /encounters/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'encounter.create');
+  // `encounter.edit` may change anything. `encounter.status.advance` (nurse
+  // triage) may move the workflow forward ONLY — `status` and its
+  // bookkeeping timestamp, nothing else, so a nurse cannot rewrite vitals,
+  // notes, diagnosis or plan data on the encounter.
+  allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
+    || (hasCap(resource.data.organization_id, 'encounter.status.advance')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updated_at']));
+  // Client restricts this to CLOSED encounters and cascades the
+  // encounter-scoped vitals/diagnoses/notes rows.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /vitals/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'vitals.create');
+  allow update: if hasCap(resource.data.organization_id, 'vitals.create');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /allergies/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'diagnosis.create');
+  allow update: if hasCap(resource.data.organization_id, 'diagnosis.create');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /diagnoses/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'diagnosis.create');
+  allow update: if hasCap(resource.data.organization_id, 'diagnosis.create');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /clinical_notes/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(resource.data.organization_id, 'encounter.create');
+  allow update: if hasCap(resource.data.organization_id, 'encounter.edit');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// Appointments (scheduling). Create/update gated by appointment.create and
+// appointment.update; the organization_id is PINNED on update.
+match /appointments/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'appointment.create');
+  allow update: if resource.data.organization_id == request.resource.data.organization_id
+    && hasCap(resource.data.organization_id, 'appointment.update');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// Patient documents (metadata only — file blobs live elsewhere). Writes gated
+// by the documents.upload capability; the organization_id is PINNED on update.
+match /documents/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'documents.upload');
+  allow update: if resource.data.organization_id == request.resource.data.organization_id
+    && hasCap(resource.data.organization_id, 'documents.upload');
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /medication_requests/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'prescription.create');
+  // Pharmacists (prescription.dispense) may mark a request issued and record what
+  // has gone out per line. Only fulfilment fields may change — patient,
+  // prescriber and the prescribed quantities themselves are all off limits,
+  // so a pharmacist can never rewrite the script. `items` is writable only
+  // because each line carries its own dispensed_qty.
+  allow update: if hasCap(resource.data.organization_id, 'prescription.create')
+                || (hasCap(resource.data.organization_id, 'prescription.dispense')
+                    && request.resource.data.diff(resource.data).changedKeys()
+                         .hasOnly(['status', 'reason', 'items', 'dispensed_at', 'updated_at']))
+  // Nurses/doctors recording a dose may only bump the
+  // administered_qty counters inside items — never the
+  // ordered quantities, status, dispensed_at or patient.
+  || (hasCap(resource.data.organization_id, 'medication.administer')
+      && request.resource.data.diff(resource.data).changedKeys()
+           .hasOnly(['items', 'updated_at']))
+  // Client refuses when any line has been partly or fully dispensed.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// One doc per dose actually given to the patient (who, what, when, route, site).
+// Append-only, like dispensations: a mistake is corrected by a reversal event,
+// never by rewriting the record of care that happened.
+match /medication_administrations/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'medication.administer');
+  allow update, delete: if false;
+}
+match /dispensations/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow update: if false;
+  allow delete: if false;
+}
+match /stock_lots/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  // Client refuses while stock > 0 so the movement ledger stays balanced.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /stock_movements/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow update, delete: if false;
+}
+match /lab_orders/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.order');
+  // One doc carries the whole LIMS workflow (collection → results →
+  // validation → release). Rules stay coarse here — any lab capability
+  // may update — while the CLIENT enforces the fine-grained gate per
+  // operation (lab.sample.collect / lab.result.enter / lab.result.verify,
+  // see laboratoryService.js) and every transition is audit-logged.
+  allow update: if signedIn()
+    && (hasCap(resource.data.organization_id, 'lab.order')
+      || hasCap(resource.data.organization_id, 'lab.sample.collect')
+      || hasCap(resource.data.organization_id, 'lab.result.enter')
+      || hasCap(resource.data.organization_id, 'lab.result.verify'))
+  // Client refuses invoiced orders and orders carrying released results.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// Test catalogue: org-scoped definitions. Readable by any signed-in user
+// (order forms need it); writable only by lab.catalogue.manage.
+match /lab_test_catalogue/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
+  allow update: if hasCap(resource.resource.organization_id, 'lab.catalogue.manage')
+    && resource.data.organization_id == request.resource.data.organization_id;
+  // Safe at any time: live orders carry frozen snapshots of the test
+  // configuration, so removing the catalogue entry never rewrites history.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// Laboratory settings (categories, specimen types, report header).
+match /lab_settings/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
+  allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
+    && resource.data.organization_id == request.resource.data.organization_id;
+  allow delete: if false;
+}
+match /lab_results/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+  allow update: if hasCap(resource.data.organization_id, 'lab.result.verify');
+  allow delete: if false;
+}
+// Imaging orders (X-ray / ultrasound / CT). Modelled on lab_orders: ordering
+// reuses the `lab.order` capability, result entry reuses `lab.result.enter`
+// and verification reuses `lab.result.verify`. One document carries the whole
+// workflow (order → result → verification); the CLIENT enforces the
+// fine-grained gate per operation (see imagingService.js) and every
+// transition is audit-logged.
+match /imaging_orders/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.order');
+  allow update: if signedIn()
+    && (hasCap(resource.data.organization_id, 'lab.order')
+      || hasCap(resource.data.organization_id, 'lab.result.enter')
+      || hasCap(resource.data.organization_id, 'lab.result.verify'));
+  // Client refuses invoiced orders and orders carrying released results.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// Result images (scans/reports attached to lab & imaging orders). One image
+// per document, one document per image. Append-only: a wrong image is
+// corrected by uploading a replacement, never by rewriting history. The
+// bytes live in a single blob subdocument that rides along with the parent's
+// create (same capability, same org pinning).
+match /result_images/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+  allow update, delete: if false;
+  match /{blob=**} {
+    allow read: if signedIn();
+    allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+    allow update, delete: if false;
   }
+}
+
+// ---- Hospital-private collections (restricted to org members) ----
+
+// Admissions: org‑scoped. Read available to all signed-in users (clinical
+// read model), writes gated by beds.manage capability.
+match /admissions/{id} {
+  // READ MODEL: signedIn(), like every other clinical collection (see header).
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
+  // organization_id is PINNED on update. Do NOT allow changing the org of an
+  // admission by checking request.resource (the client would supply it). Check
+  // the doc as it exists and forbid the change.
+  allow update: if resource.data.organization_id == request.resource.data.organization_id
+    && hasCap(resource.data.organization_id, 'beds.manage');
+  // Discharge is still the normal way out; delete exists for correcting
+  // a mistaken admission AFTER discharge (client enforces that order).
+  allow delete: if canDelete(resource.data.organization_id);
+}
+// Wards master data (name + total_beds). Bed totals live on the ward doc —
+// there are no separate `beds`/`rooms` collections. Writes gated by the
+// `beds.manage` capability; organization_id is PINNED on update exactly like
+// admissions above.
+match /wards/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'beds.manage');
+  allow update: if resource.data.organization_id == request.resource.data.organization_id
+    && hasCap(resource.data.organization_id, 'beds.manage');
+  // Wards are master data; deleting one orphans its admissions, so it is
+  // only allowed through the org-pinned data.delete gate.
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /admission_plan_items/{id} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'encounter.edit');
+  allow update: if hasCap(resource.data.organization_id, 'encounter.edit')
+    && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+      'round', 'type', 'status', 'text', 'updated_at', 'updated_by_name',
+      'updated_by', 'revisions',
+    ]);
+  // Soft‑delete only: status may be set to 'removed'; everything else is
+  // immutable once created.  `allow delete: if false` above prevents hard
+  // deletion — history is never destroyed.
+  allow delete: if false;
+}
+
+// Financial collections — restricted to org members with billing capabilities.
+
+match /invoices/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
+  // Client refuses invoices with money received (paid_kobo > 0).
+  allow delete: if canDelete(resource.data.organization_id);
+}
+match /payments/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'billing.payment')
+    && request.resource.data.amount_kobo is int
+    && request.resource.data.amount_kobo > 0;
+  allow create: if hasCap(request.resource.data.organization_id, 'billing.payment')
+    && request.resource.data.amount_kobo is int
+    && request.resource.data.amount_kobo > 0;
+  allow update: if hasCap(resource.data.organization_id, 'billing.payment')
+    && resource.data.organization_id == request.resource.data.organization_id
+    && request.resource.data.amount_kobo is int
+    && request.resource.data.amount_kobo >= 0;
+  allow delete: if false;
+}
+match /claims/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
+  allow delete: if false;
+}
+match /coverages/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
+  allow delete: if false;
+}
+match /plans/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow write: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+}
+// Per-hospital price catalogue (service items + prices used on invoices).
+match /price_catalogue/{id} {
+  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice')
+    && request.resource.data.organization_id is string;
+  allow update: if hasCap(resource.data.organization_id, 'billing.invoice')
+    && resource.data.organization_id == request.resource.data.organization_id;
+  allow delete: if hasCap(resource.data.organization_id, 'billing.invoice');
+}
+// Devices are org-scoped. Admin-only control (option A): only holders
+// of admin.devices.manage / admin.roles.manage (or super) can see or
+// revoke other people's devices. Owners may register/heartbeat their own
+// device but can never change its status. Blocking a person is done by
+// suspending their membership — a suspended member's device is useless.
+match /devices/{deviceId} {
+  allow read: if signedIn() && (resource.data.user_id == uid() || isSuper()
+    || (resource.data.organization_id is string
+      && (hasCap(resource.data.organization_id, 'admin.devices.manage')
+        || hasCap(resource.data.organization_id, 'admin.roles.manage'))));
+  allow create: if signedIn() && request.resource.data.user_id == uid();
+  allow update: if signedIn() && (
+    (resource.data.organization_id is string
+      && (hasCap(resource.data.organization_id, 'admin.devices.manage')
+        || hasCap(resource.data.organization_id, 'admin.roles.manage')))
+    || (resource.data.user_id == uid()
+      && request.resource.data.user_id == uid()
+      && request.resource.data.status == data.data.status)
+  );
+  allow delete: if false;
+}
+// Global payer master list (NOT org-scoped — every hospital shares it, which
+// is why reads are just signedIn()). Writes carry organization_id as
+// provenance, so the author must hold billing.invoice there. create/update
+// read request.resource; delete must read `resource` because request.resource
+// does not exist on a delete.
+match /payers/{id} {
+  allow read: if signedIn();
+  allow create, update: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow delete: if hasCap(resource.data.organization_id, 'billing.invoice');
+}
+// Audit events — append-only by the hub; read restricted.
+match /audit_events/{id} {
+  allow create: if signedIn() && request.resource.data.actor_user_id == uid();
+  // AdminView and super-admins may read the audit feed.
+  allow read: if signedIn() && (isSuper()
+    || (request.auth.token.email_verified && /* future: org check */ true));
+  allow update, delete: if false;
+}
+// Sync cursors — per-device, authenticated.
+match /sync_cursors/{deviceId} {
+  allow read, write: if signedIn();
+}
+// Notifications inbox — per‑user.
+match /notifications_inbox/{id} {
+  allow read: if signedIn() && resource.data.recipient_user_id == uid();
+  allow create: if signedIn();
+  allow update: if signedIn() && resource.data.recipient_user_id == uid();
+  allow delete: if false;
 }

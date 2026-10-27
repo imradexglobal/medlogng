@@ -53,6 +53,19 @@ body {
   display: flex; align-items: center; justify-content: center;
   font-size: 1.3rem; font-weight: 800;
 }
+.brand-logo {
+  width: 36px; height: 36px; border-radius: 8px;
+  object-fit: contain; flex-shrink: 0;
+}
+.side-brand .brand-logo {
+  width: 30px; height: 30px; border-radius: 6px;
+  object-fit: contain;
+}
+.fn-brand .brand-logo {
+  width: 44px; height: 44px; border-radius: 12px;
+  object-fit: contain;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
 
 .muted { color: var(--muted); }
 .err { color: var(--danger); min-height: 1.2em; }

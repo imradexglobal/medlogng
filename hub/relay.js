@@ -13,37 +13,67 @@
 // an edit-ish sequence still lands in creation order. Ops are independent
 // (each writes its own request/encounter), so concurrency inside one batch
 // matters less than FIFO admission — the claim step serialises that.
+//
+// Auditing: every applied (or permanently rejected) write is appended to
+// audit_events with the identity the hub verified at accept time. Audit is
+// best-effort and never blocks the queue.
 
 import { PermanentError } from './handlers.js'
 
 const PROBE_DOC = '_hub_probe/status' // never written — reading a missing doc still proves the network
+const PROBE_TIMEOUT_MS = 4000
 
-export function createRelay({ db, queue, handlers, cfg, log = console }) {
+function timeout(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms)
+    if (typeof t.unref === 'function') t.unref()
+  })
+}
+
+export function createRelay({ db, queue, handlers, cfg, log = console, audit = null }) {
   let lastContact = null // ISO time of the last successful probe
   let lastProbeAt = 0
   let lastError = ''
   let online = false
   let running = false
+  let probing = null
 
   // A Firestore round-trip proves the link. A "not found" answer counts as
   // online (the request crossed the wire); only transport failures are offline.
-  async function probe() {
-    if (!db) {
-      online = false
-      lastError = 'firestore not initialised (missing credentials?)'
-      return false
-    }
-    try {
-      await db.doc(PROBE_DOC).get()
-      online = true
-      lastContact = new Date().toISOString()
-      lastError = ''
-      return true
-    } catch (e) {
-      online = false
-      lastError = String(e?.message || e).slice(0, 300)
-      return false
-    }
+  // The probe is capped so a half-open connection can never hang a tick (or
+  // /health) forever.
+  function probe() {
+    if (probing) return probing
+    lastProbeAt = Date.now()
+    probing = (async () => {
+      if (!db) {
+        online = false
+        lastError = 'firestore not initialised (missing credentials?)'
+        return false
+      }
+      try {
+        const read = db.doc(PROBE_DOC).get()
+        const winner = await Promise.race([
+          read.then(() => 'ok').catch((e) => { throw e }),
+          timeout(PROBE_TIMEOUT_MS).then(() => 'timeout'),
+        ])
+        if (winner === 'timeout') {
+          online = false
+          lastError = 'Firestore probe timed out after ' + PROBE_TIMEOUT_MS + 'ms'
+          return false
+        }
+        online = true
+        lastContact = new Date().toISOString()
+        lastError = ''
+        return true
+      } catch (e) {
+        online = false
+        lastError = String(e?.message || e).slice(0, 300)
+        return false
+      }
+    })()
+    probing.finally(() => { probing = null })
+    return probing
   }
 
   // One delivery pass. Exported for tests so they don't have to wait for the
@@ -60,25 +90,30 @@ export function createRelay({ db, queue, handlers, cfg, log = console }) {
       let retried = 0
       let failed = 0
       for (const op of batch) {
+        const queueKey = op.queueKey || op.clientOpKey
         const handler = handlers[op.kind]
         if (!handler) {
-          queue.markError(op.clientOpKey, new PermanentError('unknown op kind: ' + op.kind), now)
+          const err = new PermanentError('unknown op kind: ' + op.kind)
+          queue.markError(queueKey, err, now)
           failed += 1
+          if (audit) await audit.failed(op, err.message)
           continue
         }
         try {
           const result = await handler(db, op)
-          queue.markDelivered(op.clientOpKey)
+          queue.markDelivered(queueKey)
           delivered += 1
+          if (audit) await audit.delivered(op, result)
           if (result?.deduped) log.info('[hub] delivered (replay, skipped as already applied)', op.kind, op.clientOpKey)
           else log.info('[hub] delivered', op.kind, op.clientOpKey)
         } catch (e) {
           if (e instanceof PermanentError || e?.permanent) {
-            queue.markError(op.clientOpKey, e, now)
+            queue.markError(queueKey, e, now)
             failed += 1
+            if (audit) await audit.failed(op, e.message)
             log.warn('[hub] failed permanently', op.kind, op.clientOpKey, '—', e.message)
           } else {
-            queue.markRetry(op.clientOpKey, e, now)
+            queue.markRetry(queueKey, e, now)
             retried += 1
             log.warn('[hub] will retry', op.kind, op.clientOpKey, '—', e?.message || e)
           }
@@ -113,13 +148,15 @@ export function createRelay({ db, queue, handlers, cfg, log = console }) {
     return { online, lastContact, lastProbeAt: lastProbeAt || null, lastError }
   }
 
-  // Run a probe outside the tick so /health on a quiet hub still refreshes
-  // the internet picture (throttled to once per 10s).
-  async function refreshStatus() {
+  // Called by /health. It must answer quickly even when Firestore is wedged:
+  // the probe is throttled and the wait is capped, so the endpoint returns the
+  // last known picture instead of leaving the tray on "not responding".
+  async function refreshStatus({ timeoutMs = 2500 } = {}) {
     const now = Date.now()
-    if (now - lastProbeAt > 10000) {
-      lastProbeAt = now
-      await probe()
+    if (now - lastProbeAt > 10000 && !probing) {
+      await Promise.race([probe(), timeout(timeoutMs)])
+    } else if (probing) {
+      await Promise.race([probing, timeout(timeoutMs)])
     }
     return status()
   }

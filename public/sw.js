@@ -18,7 +18,7 @@
  *    login screen paints offline after one successful online visit.
  *  - Cross-origin Firebase/Firestore/Auth: untouched — pass through.
  */
-const CACHE = 'medilogng-shell-v2'
+const CACHE = 'medilogng-shell-v3'
 const SHELL = ['./', './index.html', './logo.svg', './manifest.webmanifest']
 const NAV_TIMEOUT_MS = 2000
 
@@ -68,8 +68,12 @@ self.addEventListener('fetch', (event) => {
         if (res && res.status === 200 && res.type === 'basic') {
           const copy = res.clone()
           caches.open(CACHE).then((cache) => cache.put(req, copy))
+          return res
         }
-        return res
+        // A hashed chunk that 404s means the tab is running an older shell than
+        // the one deployed. If we already have a copy, keep serving it instead
+        // of failing the dynamic import.
+        return hit || res
       }).catch(() => hit)
       return hit || refresh
     })
@@ -85,7 +89,9 @@ async function navigationResponse(req) {
   }
   // Online (or the flag is stale): race the network against a short timeout.
   // The fetch is not cancelled on loss — a late 200 still refreshes the cache.
-  const network = fetch(req).then((res) => {
+  // `no-cache` revalidates the document so a deploy is picked up immediately
+  // instead of being masked for up to an hour by the HTTP cache.
+  const network = fetch(req, { cache: 'no-cache' }).then((res) => {
     if (res && res.status === 200) {
       cache.put('./index.html', res.clone()).catch(() => {})
     }

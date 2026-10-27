@@ -1,6 +1,7 @@
 import { authStore } from './store/authStore.js'
 import { runCleanups } from './lib/lifecycle.js'
 import { ensureStaffDirectory } from './lib/staffName.js'
+import { isChunkLoadError, recoverFromStaleChunk } from './lib/chunkRecovery.js'
 import { HospitalChoiceView } from './views/HospitalChoiceView.js'
 
 const routes = []
@@ -140,6 +141,20 @@ export async function handleRoute() {
       // Unlatch on failure so the user can retry the same route.
       if (lastKey === key) lastKey = null
       console.error(err)
+      // The hashed chunk this route needs was replaced by a newer deploy.
+      // Reload into the new build, keeping the current hash route.
+      if (isChunkLoadError(err)) {
+        if (app) app.innerHTML = '<p class="loading boot">Updating to the latest version…</p>'
+        if (recoverFromStaleChunk()) return
+        if (app) {
+          app.innerHTML = '<div class="card card-error"><h2>App updated</h2>' +
+            '<p>This page needs the newest version of the app. Reload to continue.</p>' +
+            '<div class="mrow"><button class="btn" id="reloadBuild">Reload</button></div></div>'
+          const btn = document.getElementById('reloadBuild')
+          if (btn) btn.onclick = () => window.location.reload()
+        }
+        return
+      }
       if (app) {
         app.innerHTML = '<div class="card card-error"><h2>Page failed to load</h2><p>Please retry.</p><p class="muted">' +
           String(err?.message || err) + '</p></div>'

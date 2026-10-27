@@ -382,12 +382,17 @@ const rulesSrc = fs.readFileSync(new URL('../firestore.rules', import.meta.url),
 const indexesSrc = fs.readFileSync(new URL('../firestore.indexes.json', import.meta.url), 'utf8')
 
 function matchBlock(name) {
-  const m = rulesSrc.match(new RegExp('match\\s+/' + name + '/\\{[^}]*\\}\\s*\\{([\\s\\S]*?)\\n\\s{4}\\}', 'm'))
+  // Match blocks close with `}` on its own line (column 0) — the style used
+  // throughout firestore.rules. The non-greedy capture stops at the first
+  // such closer, which is always the block's own closing brace.
+  const m = rulesSrc.match(new RegExp('match\\s+/' + name + '/\\{[^}]*\\}\\s*\\{([\\s\\S]*?)\\n\\}', 'm'))
   assert.ok(m, 'firestore.rules has a match block for ' + name)
   return m[1]
 }
 
-for (const coll of ['admissions', 'wards', 'beds', 'rooms']) {
+// admissions + wards are the two Firestore collections behind the beds module
+// (bed totals live on the ward doc; there are no `beds`/`rooms` collections).
+for (const coll of ['admissions', 'wards']) {
   const block = matchBlock(coll)
   const update = block.match(/allow update:[^;]+;/)
   assert.ok(update, coll + ' has an explicit update rule')
@@ -592,10 +597,12 @@ for (const view of ['AppointmentsView', 'BillingView', 'AdmissionsView']) {
   const opts = src.match(/const patientOpts =[\s\S]*?\n    \}/)
   assert.ok(opts, view + ' builds a patient option list')
   assert.ok(/formatPhone/.test(opts[0]), view + ' patient options carry the mobile number')
-  // Filterable by typing: either the shell's `searchable` select or a bespoke
-  // type-ahead (BillingView) that joins through matchesPatient.
+  // Filterable by typing: either the shell's `searchable` select, a bespoke
+  // type-ahead (BillingView) that joins through matchesPatient, or the shell's
+  // wireSearchableSelect filter-box + select pair.
   const filterable = /searchable:/.test(src) ||
-    (/matchesPatient\(/.test(src) && /invPatientSearch|patient-dropdown/.test(src))
+    (/matchesPatient\(/.test(src) && /invPatientSearch|patient-dropdown/.test(src)) ||
+    /wireSearchableSelect\(/.test(src)
   assert.ok(filterable, view + ' patient picker is filterable')
 }
 {

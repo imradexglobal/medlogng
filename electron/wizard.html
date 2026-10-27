@@ -40,15 +40,23 @@
     .addr {
       font-family: Consolas, monospace; font-size: 15px; background: #0f172a;
       border: 1px dashed #0e6b5e; border-radius: 8px; padding: 10px 12px;
-      margin: 8px 0; word-break: break-all; color: #f8fafc;
+      margin: 6px 0 10px; word-break: break-all; color: #f8fafc;
     }
+    .addr.missing { border-color: #475569; color: #94a3b8; font-family: 'Segoe UI', sans-serif; font-size: 13px }
+    .addr-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #94a3b8; margin-top: 6px }
     .hint { font-size: 12px; color: #94a3b8; line-height: 1.5 }
+    .diag {
+      font-size: 12px; color: #fbbf24; line-height: 1.55; margin-top: 8px;
+      white-space: pre-line; background: #1e293b66; border-left: 3px solid #fbbf24;
+      border-radius: 4px; padding: 8px 10px;
+    }
     .actions { display: flex; gap: 10px; margin-top: 18px; justify-content: flex-end }
+    code { background: #0f172a; border-radius: 4px; padding: 1px 4px; font-family: Consolas, monospace }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="brand"><span class="dot"></span><h1>MediLog NG Host</h1></div>
+    <div class="brand"><img src="../public/logo.png" alt="MediLog NG" style="width:32px; height:32px; object-fit:contain; border-radius:6px;" onerror="this.style.display='none'" /><h1>MediLog NG Host</h1></div>
     <p class="sub">This PC will serve the EMR to the whole building and keep handoffs safe during internet outages.</p>
 
     <div class="step">
@@ -60,15 +68,21 @@
 
     <div class="step">
       <h2><span class="n">2</span> Open the firewall</h2>
-      <p>Windows will ask for permission once — click <b>Yes</b>. This lets other PCs in the building reach this one.</p>
+      <p>Windows will ask for permission once — click <b>Yes</b>. This lets other PCs in the building reach this one. The rule applies to <b>Domain and Private</b> networks only; it never opens a Public network.</p>
       <button id="btnFw">Open firewall…</button>
       <div id="fwMsg"></div>
     </div>
 
     <div class="step">
       <h2><span class="n">3</span> Finish</h2>
-      <p class="hint">On every other PC: open Chrome, go to the address below, log in, and bookmark it.</p>
-      <div class="addr" id="addr" hidden></div>
+      <p class="hint">On every other PC: open Chrome, go to the <b>LAN address</b>, sign in with that user's own MediLog account, and bookmark it. No secret needs copying.</p>
+      <div id="addrWrap" hidden>
+        <div class="addr-label">Other PCs on the same Wi-Fi / LAN</div>
+        <div class="addr" id="lanAddr">Not available yet</div>
+        <div class="addr-label">This PC only</div>
+        <div class="addr" id="localAddr"></div>
+      </div>
+      <div id="diag" class="diag" hidden></div>
       <div id="finMsg"></div>
     </div>
 

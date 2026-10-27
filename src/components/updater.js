@@ -52,7 +52,10 @@ function ensureBanner() {
 
 async function onPrimary() {
   const m = window.medilog
-  if (!m) return
+  if (!m) {
+    if (state.ready) window.location.reload();
+    return;
+  }
   try {
     if (state.ready) {
       els.primary.disabled = true
@@ -166,6 +169,24 @@ export function initUpdater() {
   booted = true
   ensureBanner()
   ensurePill()
+  try {
+    window.__medilogUpdate = (s = {}) => {
+      dismissed = false
+      state = {
+        checking: !!s.checking,
+        available: !!s.available || !!s.ready,
+        downloading: !!s.downloading,
+        ready: !!s.ready,
+        progress: Math.round(s.progress ?? (s.ready ? 100 : 0)),
+        version: s.version ? String(s.version).replace(/^v/, '') : state.version,
+        error: s.error || '',
+        transferred: s.transferred,
+        total: s.total,
+      }
+      render()
+      return state
+    }
+  } catch (e) {}
   const m = window.medilog
   if (!m) return // web build — pill hidden, banner never shows
   try { console.log('[updater] build', BUILD_ID, '| runtime', m) } catch (e) {}

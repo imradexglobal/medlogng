@@ -57,8 +57,8 @@ export async function LoginView(app, params = {}) {
   app.innerHTML =
     '<div class="fn-page">' +
       '<div class="fn-left"><div class="fn-form">' +
-        '<div class="fn-brand"><span class="brand-mark">✚</span>' +
-          '<span><span class="fn-brand-name">MedLogNg</span>' +
+        '<div class="fn-brand"><img src="./logo.png" class="brand-logo" alt="MediLog NG" onerror="this.style.display=\'none\'" />' +
+          '<span><span class="fn-brand-name">MediLog NG</span>' +
           '<span class="fn-live"><i></i>System online</span></span></div>' +
         '<div class="fn-seg" id="fnSeg" role="tablist">' +
           '<button id="segLogin" class="fn-seg-btn" role="tab">Log in</button>' +

@@ -7,6 +7,7 @@ import { ORG } from '../data/mockData.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { onUpdate, getSyncMode } from '../services/clinicalOutbox.js'
 import { createAllergyTagInput } from './AllergyTagInput.js'
+import { getHostNetworkInfo } from '../services/hostService.js'
 
 export const NAV = [
   { path: '/', label: 'Dashboard', icon: '▦' },
@@ -51,7 +52,7 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
     '<div class="emr">' +
       '<div class="side-scrim" id="sideScrim" aria-hidden="true"></div>' +
       '<aside class="side" id="side">' +
-        '<div class="side-brand"><span class="brand-mark">✚</span>' +
+        '<div class="side-brand"><img src="./logo.png" class="brand-logo" alt="MediLog NG" onerror="this.style.display=\'none\'" />' +
           '<span><strong>MediLog NG</strong><em>' + esc(org) + '</em></span>' +
           '<button class="iconbtn side-close only-mobile" id="sideClose" aria-label="Close navigation">✕</button></div>' +
         '<nav class="side-nav" aria-label="Main">' +
@@ -63,6 +64,13 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
           '<div class="sync"><span class="dot" id="syncDot"></span><span><strong id="syncState">' +
             (online ? 'Online · Firestore' : 'Offline · local cache') +
             '</strong><em id="syncDetail">' + (online ? 'writes sync to the cloud' : 'writes queue until you reconnect') + '</em></span></div>' +
+          '<div id="sideHostLan" style="display:none; margin:8px 0; padding:6px 10px; background:rgba(14,107,94,0.18); border:1px solid rgba(14,107,94,0.35); border-radius:8px; cursor:pointer;" title="Click to copy hospital LAN address">' +
+            '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+              '<span style="color:#2dd4bf; font-weight:600; font-size:11px;">🌐 Host LAN</span>' +
+              '<span style="font-size:10px; color:#94a3b8;">Copy</span>' +
+            '</div>' +
+            '<div id="sideHostLanText" style="font-family:Consolas, monospace; color:#f8fafc; font-size:11.5px; font-weight:700; margin-top:2px;"></div>' +
+          '</div>' +
           '<div class="me"><span class="avatar">' + esc(initials) + '</span>' +
             '<span class="me-meta"><strong>' + esc(who || 'signed out') + '</strong><em>' + esc(role) + '</em></span>' +
             '<button id="outBtn" class="iconbtn" title="Sign out" aria-label="Sign out">⎋</button></div>' +
@@ -128,6 +136,25 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
     // overlay that no longer exists.
     document.body.classList.remove('nav-open', 'modal-open')
   })
+
+  getHostNetworkInfo().then((info) => {
+    if (!info) return
+    const el = document.getElementById('sideHostLan')
+    const txt = document.getElementById('sideHostLanText')
+    if (el && txt) {
+      const displayUrl = info.lanUrl || ('http://' + (info.addresses[0] || '127.0.0.1') + ':' + info.port)
+      txt.textContent = displayUrl.replace(/^https?:\/\//, '')
+      el.style.display = 'block'
+      el.onclick = () => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(displayUrl).then(() => toast('Copied ' + displayUrl + ' to clipboard!'))
+            .catch(() => prompt('Copy this LAN URL:', displayUrl))
+        } else {
+          prompt('Copy this LAN URL:', displayUrl)
+        }
+      }
+    }
+  }).catch(() => {})
 
   document.getElementById('outBtn').onclick = async () => { await logout(); navigate('/login') }
   document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = closeModal })

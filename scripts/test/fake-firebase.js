@@ -71,6 +71,10 @@ export async function getDocs(q) {
   return { docs: out, size: out.length, empty: out.length === 0 }
 }
 
+export async function getDocsFromCache(q) {
+  return getDocs(q)
+}
+
 export async function getCountFromServer(q) {
   const snap = await getDocs(q)
   return { data: () => ({ count: snap.size }) }
@@ -90,6 +94,10 @@ export async function getDoc(ref) {
     exists: () => !!data,
     data: () => ({ ...data }),
   }
+}
+
+export async function getDocFromCache(ref) {
+  return getDoc(ref)
 }
 
 export async function setDoc(ref, data) {

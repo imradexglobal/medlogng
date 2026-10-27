@@ -1,6 +1,6 @@
 {
   "name": "medilogng",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "main": "electron/main.js",
   "author": "Imradex Global",
@@ -17,10 +17,12 @@
     "cap:sync": "npx cap sync",
     "cap:open": "npx cap open android",
     "electron:dev": "electron .",
+    "electron:host": "npm run build && node scripts/start-host.mjs",
     "electron:test": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --publish never",
     "dist:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish never",
-    "publish:desktop": "npm run build && electron-builder --win --publish always"
+    "publish:desktop": "npm run build && electron-builder --win --publish always",
+    "publish:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish always"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.1",
@@ -39,5 +41,12 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "allowScripts": {
+    "@firebase/util": true,
+    "electron": true,
+    "esbuild": true,
+    "protobufjs": true,
+    "re2": true
   }
 }

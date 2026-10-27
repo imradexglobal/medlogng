@@ -51,13 +51,21 @@ const HANDLERS = {
 export const OUTBOX_KINDS = Object.keys(HANDLERS)
 
 // ---- hospital hub (Phase 2/3) -------------------------------------------------
-// Endpoint + secret, resolved at call time. Three sources, in order:
+// Endpoint resolved at call time. Two sources, in order:
 //   1. localStorage override (testing: set 'medilogng.hubUrl' from the console)
-//   2. build-time VITE_HUB_URL / VITE_HUB_TOKEN
+//   2. build-time VITE_HUB_URL (blank = hub off)
 //   3. AUTO-DETECT: when the app itself is being served from a host PC
-//      (http://<host-ip>:8787), handoffs post back to the SAME address —
-//      no configuration exists on ward PCs at all, and the hub injects the
-//      sync token into the HTML it serves (see hub/server.js).
+//      (http://<host-ip>:8787), handoffs post back to the SAME address — no
+//      configuration exists on ward PCs at all.
+//
+// AUTH: the hub requires a Firebase ID token. Each push calls
+// auth.currentUser.getIdToken() (the SDK refreshes it when it can) and sends
+// it as `Authorization: Bearer`. There is no shared secret and no token in the
+// HTML; the hub resolves the user's hospital/role from Firestore itself.
+//
+// NOTE: an ID token lives one hour. During an internet outage the token cannot
+// be refreshed, so a hub push is rejected once it expires; the rows stay in
+// IndexedDB and drain normally when connectivity returns (see hub/README.md).
 
 let sameOriginHub = null // null = not probed yet
 
@@ -81,18 +89,26 @@ async function detectSameOriginHub() {
 
 async function hubConfig() {
   let url = ''
-  let token = ''
   try {
     url = localStorage.getItem('medilogng.hubUrl') || ''
-    token = localStorage.getItem('medilogng.hubToken') || ''
+    // Obsolete shared secret from older installs: remove it so it cannot be
+    // mistaken for a credential.
+    localStorage.removeItem('medilogng.hubToken')
   } catch { /* storage disabled */ }
   if (!url && import.meta.env?.VITE_HUB_URL) url = String(import.meta.env.VITE_HUB_URL)
-  if (!token && import.meta.env?.VITE_HUB_TOKEN) token = String(import.meta.env.VITE_HUB_TOKEN)
-  if (!token && typeof window !== 'undefined' && window.__MEDILOG_HUB_TOKEN__) {
-    token = String(window.__MEDILOG_HUB_TOKEN__) // injected by the serving hub
-  }
   if (!url && await detectSameOriginHub()) url = window.location.origin
-  return { url: url.replace(/\/+$/, ''), token }
+  return { url: url.replace(/\/+$/, '') }
+}
+
+async function currentIdToken() {
+  try {
+    const { auth } = await import('../firebase.js')
+    const user = auth.currentUser
+    if (!user) return ''
+    return await user.getIdToken()
+  } catch {
+    return ''
+  }
 }
 
 // What most recently delivered an op — the shell badge shows the difference
@@ -107,7 +123,28 @@ export function getSyncMode() {
 // Stable identity for one row, shared by BOTH transports: the cloud path
 // stamps it as medication_requests.sync_keys, the hub path sends it as
 // clientOpKey. A row that somehow goes out twice applies exactly once.
+//
+// New rows get a random opKey at enqueue time. The old `v1:<kind>:<IndexedDB
+// autoincrement>` form is only unique per browser profile — two devices could
+// generate the same key — so it is kept only for rows queued before the
+// upgrade (their cloud write may already carry it; changing it would risk a
+// duplicate). The hub additionally namespaces the key by organisation.
+function newOpKey() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+  } catch { /* insecure context / older browser */ }
+  try {
+    const bytes = new Uint8Array(16)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  } catch { /* last resort below */ }
+  return 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12)
+}
+
 function opKeyFor(row) {
+  if (row && typeof row.opKey === 'string' && row.opKey) return row.opKey
   return 'v1:' + row.kind + ':' + row.key
 }
 
@@ -116,22 +153,25 @@ const HUB_TIMEOUT_MS = 6000
 // POST claimed rows to the LAN hub. Claim already removed them from
 // IndexedDB, so: 2xx -> done (hub owns them now); anything else -> requeue.
 async function pushToHub(rows) {
-  const { url, token } = await hubConfig()
+  const { url } = await hubConfig()
   if (!url || !rows.length) return false
+  const token = await currentIdToken()
+  if (!token) {
+    console.warn('[handoff] hospital hub skipped: no signed-in user (cannot authenticate).')
+    return false
+  }
   let orgId = ''
-  let actor = null
   try {
     const { authStore } = await import('../store/authStore.js')
-    const st = authStore.getState()
-    orgId = st.activeOrg || ''
-    actor = st.user ? { uid: st.user.uid || null, email: st.user.email || '' } : null
+    orgId = authStore.getState().activeOrg || ''
   } catch { /* no auth context — the hub will reject a missing orgId */ }
+  if (!orgId) return false
   const ops = rows.map((r) => ({
     clientOpKey: opKeyFor(r),
     kind: r.kind,
     args: r.args,
+    // A request, not proof: the hub verifies membership before queueing.
     orgId,
-    actor,
     createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : '',
   }))
   const ctrl = new AbortController()
@@ -139,7 +179,11 @@ async function pushToHub(rows) {
   try {
     const res = await fetch(url + '/outbox', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-hub-token': token },
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + token,
+        'x-medilog-client': 'medilogng-web',
+      },
       body: JSON.stringify({ ops }),
       signal: ctrl.signal,
     })
@@ -232,6 +276,7 @@ export async function enqueue(kind, args) {
   await new Promise((resolve, reject) => {
     const t = db.transaction([STORE], 'readwrite')
     t.objectStore(STORE).add({
+      opKey: newOpKey(),
       kind,
       args,
       status: 'queued',

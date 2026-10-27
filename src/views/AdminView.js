@@ -24,6 +24,7 @@ import { isDevHost, hostName } from '../utils/env.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { esc } from '../utils/sanitize.js'
 import { IMPORT_ORDER_TABLES } from '../features/data/schema.js'
+import { getHostNetworkInfo } from '../services/hostService.js'
 import {
   generateTemplate, readDatabase, closeDatabase, describeDatabase,
   stageImport, pushQueue, flushPending, exportToDatabase,
@@ -79,11 +80,25 @@ export async function AdminView(app) {
     active: '/admin',
     title: 'Administration',
     subtitle: esc(activeOrgName || activeOrg) + ' · signed in as ' + esc(me.staff_name || me.role || ''),
-    actions: '<button class="btn ghost" id="copyOrg">Copy Org ID</button><button class="btn" id="inviteTop">+ Create staff</button>',
+    actions: '<button class="btn ghost" id="btnLanInfo" style="display:none; color:#2dd4bf; border-color:rgba(45,212,191,0.4);">🌐 Host LAN</button><button class="btn ghost" id="copyOrg">Copy Org ID</button><button class="btn" id="inviteTop">+ Create staff</button>',
     body: unverifiedBanner +
       '<div class="tabs" id="adt">' + visibleTabs().map((t, i) => '<button data-t="' + t + '" class="' + (i === 0 ? 'on' : '') + '">' + t + '</button>').join('') + '</div>' +
       '<div class="card" id="adpane"><p class="muted">Loading…</p></div>',
   })
+
+  getHostNetworkInfo().then((info) => {
+    if (!info) return
+    const b = document.getElementById('btnLanInfo')
+    if (b) {
+      const displayUrl = info.lanUrl || ('http://' + (info.addresses[0] || '127.0.0.1') + ':' + info.port)
+      b.textContent = '🌐 LAN: ' + displayUrl.replace(/^https?:\/\//, '')
+      b.style.display = 'inline-block'
+      b.onclick = () => {
+        render('Devices')
+        syncTabs('Devices')
+      }
+    }
+  }).catch(() => {})
 
   const copy = document.getElementById('copyOrg')
   if (copy) copy.onclick = async () => {
@@ -473,12 +488,45 @@ export async function AdminView(app) {
       return
     }
     const revoked = devs.filter((d) => d.status === 'revoked')
+    const hostInfo = await getHostNetworkInfo()
+    const hostCardHtml = hostInfo ? (
+      '<div class="card" style="border:1.5px solid #0e6b5e; background:#0f172a; margin-bottom:18px; border-radius:10px; padding:16px;">' +
+        '<div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">' +
+          '<div>' +
+            '<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">' +
+              '<span class="pill ok">✓ Host Server Active</span>' +
+              (hostInfo.isHostMachine ? '<span class="pill info">This PC is Host</span>' : '<span class="pill">Connected via LAN</span>') +
+            '</div>' +
+            '<h3 style="margin:0; font-size:17px; color:#f8fafc;">Hospital LAN Access (Connect Other PCs)</h3>' +
+            '<p class="sub" style="margin:4px 0 0; color:#94a3b8; font-size:13px;">' +
+              'Other computers, laptops, and tablets on this hospital Wi-Fi can open MediLog NG at:' +
+            '</p>' +
+          '</div>' +
+          '<button class="btn sm" id="btnCopyLan" style="background:#0e6b5e; display:inline-flex; align-items:center; gap:6px;">' +
+            '<span>📋</span><span>Copy LAN Link</span>' +
+          '</button>' +
+        '</div>' +
+        '<div style="margin-top:14px; padding:12px 14px; background:#1e293b; border-radius:8px; border:1px dashed #0e6b5e; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">' +
+          '<div style="font-family:Consolas, monospace; font-size:18px; font-weight:700; color:#38bdf8; letter-spacing:0.5px;" id="lanUrlDisplay">' +
+            esc(hostInfo.lanUrl || ('http://' + (hostInfo.addresses[0] || '127.0.0.1') + ':' + hostInfo.port)) +
+          '</div>' +
+          '<span style="font-size:12px; color:#94a3b8;">Type this into Chrome or Edge on any ward PC</span>' +
+        '</div>' +
+        '<div style="margin-top:10px; font-size:12px; color:#94a3b8; display:flex; gap:16px; flex-wrap:wrap;">' +
+          '<span>Local address: <code style="color:#cbd5e1;">' + esc(hostInfo.localUrl) + '</code></span>' +
+          (hostInfo.addresses && hostInfo.addresses.length > 1
+            ? '<span>Other network IPs: ' + hostInfo.addresses.map((a) => '<code style="color:#cbd5e1;">http://' + esc(a) + ':' + hostInfo.port + '</code>').join(' · ') + '</span>'
+            : '') +
+        '</div>' +
+      '</div>'
+    ) : ''
     pane.innerHTML =
       '<div class="card-head"><h3>Devices (' + devs.length + ')</h3><span class="pill">admin-only control</span></div>' +
       '<p class="sub">Only admins see and revoke hospital devices. Staff have no device controls. ' +
       'Suspending a <a href="#" id="goStaff">staff member</a> blocks them instantly — revoking a device blocks that device. ' +
       'Only devices registered after this update appear here.</p>' +
       '<div class="toolbar"><button class="btn sm" id="regDev">+ Register this device</button></div>' +
+      hostCardHtml +
       (devs.length
         ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Device</th><th>User</th><th>Last seen</th><th>Status</th><th></th></tr></thead><tbody>' +
           devs.map((d) => '<tr><td><strong>' + esc(d.device_name || d.id) + '</strong><div class="mut">' + esc(d.platform || '') + ' · ' + esc(d.id) + '</div></td>' +
@@ -493,6 +541,18 @@ export async function AdminView(app) {
         : '<p class="sub">No devices registered yet. Press “Register this device” on each hospital PC/tablet.</p>') +
       (revoked.length ? '<p class="sub" style="margin-top:8px">' + revoked.length + ' revoked device(s) are blocked by Rules.</p>' : '')
     document.getElementById('goStaff').onclick = (e) => { e.preventDefault(); render('Staff & roles'); syncTabs('Staff & roles') }
+    const copyLanBtn = document.getElementById('btnCopyLan')
+    if (copyLanBtn && hostInfo) {
+      copyLanBtn.onclick = () => {
+        const url = hostInfo.lanUrl || ('http://' + (hostInfo.addresses[0] || '127.0.0.1') + ':' + hostInfo.port)
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(() => toast('Copied ' + url + ' to clipboard!'))
+            .catch(() => prompt('Copy this LAN URL:', url))
+        } else {
+          prompt('Copy this LAN URL:', url)
+        }
+      }
+    }
     document.getElementById('regDev').onclick = async (e) => {
       e.target.disabled = true
       try { await registerThisDevice(activeOrg); toast('This device registered.'); await renderDevices() }

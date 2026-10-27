@@ -18,11 +18,13 @@ files:
   - '!node_modules/firebase-admin/**/*'
 
 win:
+  icon: public/icon.ico
   target:
     - target: nsis
       arch: [x64]
   publisherName: Imradex Global
   requestedExecutionLevel: asInvoker
+  signAndEditExecutable: false
 
 nsis:
   oneClick: false
@@ -34,10 +36,10 @@ nsis:
   shortcutName: MediLog NG
   menuCategory: Imradex Global
   deleteAppDataOnUninstall: true
-  differentialPackage: true
+  differentialPackage: false
 
 publish:
   provider: github
-  owner: adebowaleabdulwasiu00
-  repo: medilogng
+  owner: imradexglobal
+  repo: medlogng
   channel: latest

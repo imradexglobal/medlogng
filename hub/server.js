@@ -1,8 +1,8 @@
-// MediLog NG LAN hub — HTTP front door.
+// MediLog NG LAN hub — HTTP front door (v2, verified Firebase Auth).
 //
 //   GET  /         the EMR app itself (serves dist/ when present)
-//   GET  /health   { ok, internet, queue counts, lastContact, ... }
-//   POST /outbox   { ops: [...] } -> durably queued, acked in milliseconds
+//   GET  /health   { ok, version, hub } — operational detail on this PC / with auth
+//   POST /outbox   { ops: [...] } -> authorised, durably queued, acked in ms
 //
 // ONE port does everything. Ward PCs load the app from here AND the app's
 // offline handoffs post back to the same origin — which quietly removes every
@@ -10,28 +10,43 @@
 // on the public internet would hit when talking to a LAN device.
 //
 // The hub never waits for the internet to acknowledge a handoff: POST /outbox
-// only touches the local queue file, and the relay delivers later. That is
-// what lets a department machine with a dead internet line keep accepting
-// prescriptions from the ward.
+// only touches the local queue file, and the relay delivers later.
 //
-// Auth: a single shared secret (HUB_TOKEN) in the `x-hub-token` header —
-// compared in constant time. CORS stays wide open so pages NOT served from
-// here (e.g. https://medlogng.web.app during transition) can still post.
+// AUTH MODEL (v2):
+//   * The caller must present a Firebase Auth ID token: `Authorization: Bearer`.
+//   * The Admin SDK verifies the signature and expiry.
+//   * The requested organisation is checked against the caller's own
+//     membership document; `orgId` in the body is a request, never proof.
+//   * Each op kind maps to a capability (rx_mirror -> prescription.create,
+//     lab_snapshot -> lab.order); a role without it is rejected.
+//   * Every record the handler touches is checked for organisation ownership.
+//   * Delivered writes append an audit_events row with the verified uid.
+//
+// There is NO shared secret, NO token injected into HTML, and NO wildcard
+// CORS. HUB_TOKEN is obsolete; if it is still in .env the hub warns and
+// ignores it.
 
 import { createServer } from 'node:http'
-import { createReadStream, existsSync, statSync, readFileSync } from 'node:fs'
-import { join, extname, normalize, resolve } from 'node:path'
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createReadStream, existsSync, statSync } from 'node:fs'
+import { join, extname, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { loadConfig, PROJECT_ROOT } from './config.js'
-import { createQueue } from './queue.js'
-import { initFirestore, HANDLERS, PermanentError } from './handlers.js'
-import { createRelay } from './relay.js'
+import { networkInterfaces } from 'node:os'
 
-const VERSION = 'hub-1.1.0'
+import { loadConfig, PROJECT_ROOT, normalizeOrigin, parseOrigins } from './config.js'
+import { createQueue } from './queue.js'
+import { HANDLERS } from './handlers.js'
+import { createRelay } from './relay.js'
+import { initFoundation, foundationSummary } from './foundation.js'
+import { createAuthenticator } from './auth.js'
+import { createAuditor } from './audit.js'
+import { validateOp, capabilityFor } from './ops.js'
+import { listLanAddresses, startupLines, describeListenError } from './netinfo.js'
+
+const VERSION = 'hub-2.0.0'
 const MAX_BODY = 1024 * 1024 // 1 MB
 const MAX_OPS = 100
-const KEY_RE = /^[A-Za-z0-9_:.\-]{1,160}$/
+const CLIENT_HEADER = 'x-medilog-client'
+const CLIENT_VALUE = 'medilogng-web'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -51,90 +66,164 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 }
 
-const sha = (s) => createHash('sha256').update(String(s)).digest()
-function tokenOk(presented, expected) {
-  if (!expected) return false
-  try {
-    return timingSafeEqual(sha(presented || ''), sha(expected))
-  } catch {
-    return false
+class RequestError extends Error {
+  constructor(status, message, code = '') {
+    super(message)
+    this.status = status
+    this.code = code
+    this.expose = true
   }
 }
 
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Headers', 'content-type, x-hub-token')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  // Chrome's Private Network Access preflight: a public https page talking to
-  // a 192.168.x device asks for this explicitly.
-  res.setHeader('Access-Control-Allow-Private-Network', 'true')
+function securityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('X-Frame-Options', 'DENY')
 }
 
-function json(res, code, body) {
+function json(res, code, body, extra = {}) {
   const payload = JSON.stringify(body)
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(payload),
+    ...extra,
+  })
   res.end(payload)
 }
 
-function validateOp(raw, index) {
-  if (!raw || typeof raw !== 'object') return 'op[' + index + '] is not an object'
-  if (typeof raw.clientOpKey !== 'string' || !KEY_RE.test(raw.clientOpKey)) {
-    return 'op[' + index + '].clientOpKey missing or malformed'
+function isLoopbackAddress(address) {
+  const a = String(address || '')
+  return a === '::1' || a === '127.0.0.1' || a.startsWith('127.') || a === '::ffff:127.0.0.1'
+}
+
+function allowedOriginsFor(req, cfg) {
+  const host = String(req.headers.host || '')
+  const self = []
+  if (host) {
+    const http = normalizeOrigin('http://' + host)
+    const https = normalizeOrigin('https://' + host)
+    if (http) self.push(http)
+    if (https) self.push(https)
   }
-  if (typeof raw.kind !== 'string' || !HANDLERS[raw.kind]) {
-    return 'op[' + index + '].kind unknown: ' + String(raw.kind)
+  return new Set([...self, ...(cfg.allowedOrigins || [])])
+}
+
+// Returns { ok, origin }. No Origin header = non-browser client (curl, the
+// relay, a native app); auth is still required for sensitive routes, so this
+// cannot be used to bypass anything. A browser Origin must be explicitly
+// trusted: the hub's own page origin, or ALLOWED_ORIGINS.
+function checkOrigin(req, cfg) {
+  const raw = req.headers.origin
+  if (!raw) return { ok: true, origin: '' }
+  const origin = normalizeOrigin(raw)
+  if (!origin) return { ok: false, origin: '' }
+  return { ok: allowedOriginsFor(req, cfg).has(origin), origin }
+}
+
+function applyCors(req, res, cfg) {
+  const origin = checkOrigin(req, cfg)
+  if (origin.origin) res.setHeader('Vary', 'Origin')
+  if (origin.ok && origin.origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin.origin)
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, ' + CLIENT_HEADER)
+    res.setHeader('Access-Control-Max-Age', '600')
+    if (String(req.headers['access-control-request-private-network'] || '').toLowerCase() === 'true') {
+      res.setHeader('Access-Control-Allow-Private-Network', 'true')
+    }
   }
-  if (typeof raw.orgId !== 'string' || !raw.orgId || raw.orgId.length > 100) {
-    return 'op[' + index + '].orgId missing'
+  return origin
+}
+
+// Small in-memory sliding-window limiter. It protects the queue file and the
+// Admin SDK from accidental loops; it is not a substitute for auth.
+const buckets = new Map()
+function rateLimit(key, limit, windowMs = 60_000) {
+  const now = Date.now()
+  if (buckets.size > 5000) {
+    for (const [k, b] of buckets) if (now > b.resetAt) buckets.delete(k)
   }
-  if (!raw.args || typeof raw.args !== 'object' || Array.isArray(raw.args)) {
-    return 'op[' + index + '].args must be an object'
+  let b = buckets.get(key)
+  if (!b || now > b.resetAt) {
+    b = { count: 0, resetAt: now + windowMs }
+    buckets.set(key, b)
   }
-  return ''
+  b.count += 1
+  return { ok: b.count <= limit, retryAfter: Math.max(1, Math.ceil((b.resetAt - now) / 1000)) }
 }
 
 function readBody(req, limit) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolveBody, reject) => {
     const chunks = []
     let size = 0
-    req.on('data', (c) => {
-      size += c.length
+    req.on('data', (chunk) => {
+      size += chunk.length
       if (size > limit) {
-        reject(Object.assign(new Error('body too large'), { code: 'TOO_LARGE' }))
+        reject(new RequestError(413, 'Request body is larger than ' + limit + ' bytes', 'too_large'))
         req.destroy()
         return
       }
-      chunks.push(c)
+      chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('end', () => resolveBody(Buffer.concat(chunks).toString('utf8')))
     req.on('error', reject)
   })
 }
 
-// Serves the built web app (dist/) from this same port. Returns true when the
-// request was handled. Path-traversal safe; unknown routes without a file
-// extension fall back to index.html so client-side URLs (e.g. /login) work
-// as bookmarkable addresses.
+function requireJson(req) {
+  const type = String(req.headers['content-type'] || '').toLowerCase()
+  if (!/^application\/json\s*(;|$)/.test(type)) {
+    throw new RequestError(415, 'Content-Type must be application/json', 'bad_content_type')
+  }
+  const encoding = String(req.headers['content-encoding'] || 'identity').toLowerCase()
+  if (encoding !== 'identity') {
+    throw new RequestError(415, 'Compressed request bodies are not supported', 'bad_content_encoding')
+  }
+}
+
+async function readJson(req) {
+  requireJson(req)
+  const raw = await readBody(req, MAX_BODY)
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new RequestError(400, 'Request body is not valid JSON', 'bad_json')
+  }
+}
+
+// ---- static app ------------------------------------------------------------
+
+function withinRoot(root, candidate) {
+  const rootFs = root.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const candFs = candidate.replace(/\\/g, '/').toLowerCase()
+  return candFs === rootFs || candFs.startsWith(rootFs + '/')
+}
+
+// Serves the built web app (dist/) from this same port. Path-traversal safe;
+// unknown routes WITHOUT a file extension fall back to index.html so
+// client-side URLs (e.g. /login) work as bookmarkable addresses.
 //
-// HTML pages get the hub token injected as window.__MEDILOG_HUB_TOKEN__.
-// That is deliberate: any device allowed to LOAD the app from this hub is
-// already allowed to use the EMR, so handing it the sync secret needs zero
-// setup on ward PCs — and the secret never ships in an installer. (Do not
-// port-forward the hub past the hospital router.)
-function makeStaticHandler(staticDir, token) {
+// No server-side value is ever injected into HTML or JS. Dotfiles/secret-looking
+// segments are refused even though dist/ should never contain them.
+function makeStaticHandler(staticDir) {
   if (!staticDir) return null
   const root = resolve(staticDir)
-  const inject = token
-    ? '<script>window.__MEDILOG_HUB_TOKEN__=' + JSON.stringify(token) + ';</script>'
-    : ''
   return function serveStatic(req, res, url) {
-    const rel = url === '/' ? 'index.html' : decodeURIComponent(url).replace(/^\/+/, '')
+    let rel
+    try {
+      rel = decodeURIComponent(url)
+    } catch {
+      json(res, 400, { ok: false, error: 'malformed path' })
+      return true
+    }
+    rel = rel.replace(/^\/+/, '') || 'index.html'
+    if (rel.includes('\0') || rel.split(/[\\/]+/).some((seg) => seg.startsWith('.'))) {
+      json(res, 404, { ok: false, error: 'not found' })
+      return true
+    }
     const candidate = resolve(root, normalize(rel))
-    // Compare on forward slashes: on Windows resolve() yields backslashes and
-    // a naive startsWith(root + '/') would reject every legitimate file.
-    const rootFs = root.replace(/\\/g, '/')
-    const candFs = candidate.replace(/\\/g, '/')
-    if (candFs !== rootFs && !candFs.startsWith(rootFs + '/')) {
+    if (!withinRoot(root, candidate)) {
       json(res, 403, { ok: false, error: 'forbidden' })
       return true
     }
@@ -149,157 +238,309 @@ function makeStaticHandler(staticDir, token) {
     }
     const ext = extname(file).toLowerCase()
     const headers = { 'content-type': MIME[ext] || 'application/octet-stream' }
-    // The service worker and the HTML (which carries the injected token)
-    // must always be revalidated — a stale one would pin ward PCs to an old
-    // app version or an old secret forever.
+    // The service worker and the HTML shell must always be revalidated — a
+    // stale one would pin ward PCs to an old app version forever.
     if (file.endsWith('sw.js') || ext === '.html') headers['cache-control'] = 'no-cache'
-    if (ext === '.html' && inject) {
-      const html = readFileSync(file, 'utf8').replace(/<\/head>/i, inject + '</head>')
-      const buf = Buffer.from(html)
-      headers['content-length'] = String(buf.length)
-      res.writeHead(200, headers)
-      res.end(buf)
-      return true
-    }
     res.writeHead(200, headers)
     createReadStream(file).pipe(res)
     return true
   }
 }
 
-// Build the server (exported so tests can mount it on an ephemeral port).
+// ---- request handler -------------------------------------------------------
+
+function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log }) {
+  async function handleOutbox(req, res) {
+    const ip = String(req.socket.remoteAddress || 'unknown')
+    const ipLimit = rateLimit('ip:' + ip, 120)
+    if (!ipLimit.ok) {
+      json(res, 429, { ok: false, error: 'Too many requests — wait a moment and retry.' }, { 'retry-after': String(ipLimit.retryAfter) })
+      return
+    }
+
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok) {
+      log.warn('[hub] rejected /outbox from untrusted origin:', origin.origin || '(unparseable)')
+      json(res, 403, { ok: false, error: 'This browser origin is not allowed to use this hub.' })
+      return
+    }
+
+    // A custom header forces a CORS preflight and prevents a plain HTML form
+    // (or a <script>/<img> URL) from reaching this endpoint. Bearer auth in an
+    // Authorization header is already not sent automatically by browsers, so
+    // this is defence in depth rather than the primary CSRF defence.
+    if (String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
+      json(res, 400, { ok: false, error: 'Missing ' + CLIENT_HEADER + ' header (expected ' + CLIENT_VALUE + ').' })
+      return
+    }
+
+    let identity
+    try {
+      identity = await authenticator.verify(req)
+    } catch (e) {
+      if (e?.expose) json(res, e.status || 401, { ok: false, error: e.message })
+      else {
+        log.error('[hub] auth failure:', e?.message || e)
+        json(res, 503, { ok: false, error: 'Authentication is temporarily unavailable.' })
+      }
+      return
+    }
+
+    const userLimit = rateLimit('uid:' + identity.uid, 120)
+    if (!userLimit.ok) {
+      json(res, 429, { ok: false, error: 'Too many requests for this account — wait a moment and retry.' }, { 'retry-after': String(userLimit.retryAfter) })
+      return
+    }
+
+    let parsed
+    try {
+      parsed = await readJson(req)
+    } catch (e) {
+      if (e?.expose) {
+        json(res, e.status || 400, { ok: false, error: e.message }, e.status === 413 ? { connection: 'close' } : {})
+      } else {
+        log.warn('[hub] body read failed:', e?.message || e)
+        json(res, 400, { ok: false, error: 'Could not read the request body.' })
+      }
+      return
+    }
+
+    const rawOps = Array.isArray(parsed?.ops) ? parsed.ops : null
+    if (!rawOps || !rawOps.length) {
+      json(res, 400, { ok: false, error: 'Body must be { ops: [...] } with at least one op.' })
+      return
+    }
+    if (rawOps.length > MAX_OPS) {
+      json(res, 400, { ok: false, error: 'Too many ops per request (max ' + MAX_OPS + ').' })
+      return
+    }
+
+    // Schema validation before any database read.
+    const ops = []
+    const errors = []
+    rawOps.forEach((raw, i) => {
+      const result = validateOp(raw, i)
+      if (result.error) errors.push(result.error)
+      else ops.push(result.op)
+    })
+    if (errors.length) {
+      json(res, 400, { ok: false, error: errors[0], errors: errors.slice(0, 10) })
+      return
+    }
+
+    // Authorise each distinct (org, capability) pair once, before queueing.
+    // A request touching two hospitals must be allowed in both.
+    const approved = new Map()
+    for (const op of ops) {
+      const capability = capabilityFor(op.kind)
+      const key = op.orgId + '|' + capability
+      if (approved.has(key)) continue
+      try {
+        approved.set(key, await authenticator.authorize(identity, op.orgId, capability))
+      } catch (e) {
+        // Authenticated but forbidden: safe to name the org/capability in the
+        // server log (no patient data). The client gets a short message.
+        log.warn('[hub] denied op', op.kind, 'uid=' + identity.uid, 'org=' + op.orgId, 'cap=' + capability, '—', e?.message || e)
+        if (e?.expose) json(res, e.status || 403, { ok: false, error: e.message })
+        else {
+          log.error('[hub] authorisation failure:', e?.message || e)
+          json(res, 503, { ok: false, error: 'Authorisation is temporarily unavailable.' })
+        }
+        return
+      }
+    }
+
+    // Durable before ack — after this returns the device may delete its copy.
+    const actor = {
+      uid: identity.uid,
+      email: identity.email,
+      name: identity.displayName || approved.values().next().value?.membership?.staff_name || '',
+    }
+    let accepted = 0
+    let duplicates = 0
+    for (const op of ops) {
+      const r = queue.add({
+        // Org-scoped storage key: legacy v1 client keys are only unique per
+        // device, so two hospitals must never collide in one queue file.
+        queueKey: op.orgId + ':' + op.clientOpKey,
+        clientOpKey: op.clientOpKey,
+        kind: op.kind,
+        args: op.args,
+        orgId: op.orgId,
+        // Identity from the verified token, never from the request body.
+        actor,
+        authVersion: 2,
+        createdAt: op.createdAt,
+      })
+      if (r.duplicate) duplicates += 1
+      else accepted += 1
+    }
+    log.info('[hub] accepted', accepted, 'op(s)' + (duplicates ? ' (' + duplicates + ' duplicate(s) skipped)' : '') + ' uid=' + identity.uid)
+    json(res, 200, { ok: true, accepted, duplicates, queue: queue.counts() })
+  }
+
+  async function handleHealth(req, res, url) {
+    const loopback = isLoopbackAddress(req.socket.remoteAddress)
+    const params = url.searchParams
+    const wantsDetail = params.get('detail') === '1'
+    const lanAddrs = listLanAddresses(networkInterfaces())
+    const lanUrl = lanAddrs.length ? `http://${lanAddrs[0]}:${cfg.port || 8787}` : ''
+    const minimal = {
+      ok: true,
+      hub: true,
+      version: VERSION,
+      time: new Date().toISOString(),
+      lanUrl,
+      addresses: lanAddrs,
+      port: Number(cfg.port) || 8787,
+    }
+    if (!wantsDetail && !loopback) {
+      json(res, 200, minimal)
+      return
+    }
+
+    // Detail is available to the local operator (Electron tray polls from
+    // 127.0.0.1) or to an authenticated caller. It never contains the raw
+    // credential error: that can disclose filesystem paths.
+    if (!loopback) {
+      try {
+        await authenticator.verify(req)
+      } catch (e) {
+        json(res, e?.status || 401, { ok: false, error: e?.expose ? e.message : 'Sign-in required.' })
+        return
+      }
+    }
+    const status = db ? await relay.refreshStatus({ timeoutMs: 2000 }) : relay.status()
+    json(res, 200, {
+      ...minimal,
+      projectId: cfg.projectId,
+      firestoreReady: !!db,
+      authReady: !!authReady,
+      internet: status.online,
+      lastContact: status.lastContact,
+      lastProbeError: status.lastError || undefined,
+      queue: queue.counts(),
+      servesApp: !!staticDir,
+    })
+  }
+
+  return async function handle(req, res) {
+    securityHeaders(res)
+    applyCors(req, res, cfg)
+
+    let url
+    try {
+      url = new URL(req.url || '/', 'http://hub.local')
+    } catch {
+      json(res, 400, { ok: false, error: 'malformed URL' })
+      return
+    }
+    const path = url.pathname
+
+    if (req.method === 'OPTIONS') {
+      const origin = checkOrigin(req, cfg)
+      if (!origin.ok) {
+        json(res, 403, { ok: false, error: 'This browser origin is not allowed to use this hub.' })
+        return
+      }
+      res.writeHead(204)
+      res.end()
+      return
+    }
+
+    if (req.method === 'GET' && path === '/health') {
+      await handleHealth(req, res, url)
+      return
+    }
+
+    if (req.method === 'POST' && path === '/outbox') {
+      await handleOutbox(req, res)
+      return
+    }
+
+    if (req.method === 'GET' && serveStatic) {
+      serveStatic(req, res, path)
+      return
+    }
+
+    if (req.method === 'GET' && path === '/') {
+      json(res, 200, {
+        ok: true,
+        hub: true,
+        version: VERSION,
+        note: 'web app (dist/) not present on this hub — API only',
+        auth: 'Firebase ID token required for POST /outbox',
+        endpoints: ['GET /health', 'POST /outbox'],
+      })
+      return
+    }
+
+    if (path === '/outbox') {
+      json(res, 405, { ok: false, error: 'Use POST /outbox' }, { allow: 'POST, OPTIONS' })
+      return
+    }
+    json(res, 404, { ok: false, error: 'not found — try GET /health' })
+  }
+}
+
+// ---- startup ---------------------------------------------------------------
+
+// Build the server (exported so tests can mount it on an ephemeral port and
+// inject a fake authenticator / foundation). Returns a promise of the handle.
 export function startHub(overrides = {}) {
   const cfg = { ...loadConfig(), ...overrides }
   const log = overrides.log || console
+  if (typeof cfg.allowedOrigins === 'string') cfg.allowedOrigins = parseOrigins(cfg.allowedOrigins)
+  if (!Array.isArray(cfg.allowedOrigins)) cfg.allowedOrigins = []
 
-  if (!cfg.token && !cfg.allowNoToken) {
-    throw new Error(
-      'HUB_TOKEN is not set. Generate one (e.g. an openssl rand -hex 32 style random string),\n' +
-      'put it in .env as HUB_TOKEN=..., and give the SAME value to every client (VITE_HUB_TOKEN).'
-    )
+  if (cfg.legacyToken && !overrides.ignoreLegacyToken) {
+    log.warn('[hub] HUB_TOKEN is set but obsolete — the hub now requires Firebase sign-in. Remove HUB_TOKEN from .env and from clients.')
+  }
+
+  const foundation = overrides.foundation || initFoundation(cfg, log)
+  const db = foundation.db
+  if (!db) {
+    log.warn('[hub] ' + foundationSummary(foundation, cfg))
+    log.warn('[hub] Sensitive endpoints (POST /outbox) will be DENIED until credentials are fixed.')
+  } else {
+    log.info('[hub] ' + foundationSummary(foundation, cfg))
   }
 
   const queue = createQueue(cfg.queueFile)
 
   // Serve the built app when present. Electron host mode passes an explicit
   // dir (the packaged dist); standalone `node hub/server.js` auto-detects
-  // ./dist — with no dist, the hub behaves as before (API only).
-  const staticDir = overrides.staticDir !== undefined
-    ? overrides.staticDir
-    : (existsSync(resolve(PROJECT_ROOT, 'dist', 'index.html')) ? resolve(PROJECT_ROOT, 'dist') : '')
-  const serveStatic = makeStaticHandler(staticDir, cfg.token)
-
-  let db = null
-  let firestoreError = ''
-  try {
-    db = initFirestore(cfg)
-    log.info('[hub] firestore ready (project ' + cfg.projectId + (cfg.emulator ? ', emulator ' + cfg.emulator : '') + ')')
-  } catch (e) {
-    firestoreError = String(e?.message || e)
-    log.warn('[hub] firestore NOT ready:', firestoreError, '— queue will hold ops until credentials are fixed')
+  // ./dist — with no dist, the hub behaves as an API only.
+  let staticDir = overrides.staticDir
+  if (staticDir === undefined) {
+    staticDir = existsSync(resolve(PROJECT_ROOT, 'dist', 'index.html')) ? resolve(PROJECT_ROOT, 'dist') : ''
   }
+  const serveStatic = makeStaticHandler(staticDir)
 
-  const relay = createRelay({ db, queue, handlers: HANDLERS, cfg, log })
+  const authenticator = overrides.authenticator
+    || createAuthenticator({ auth: foundation.auth, db, log })
+  const auditor = overrides.auditor || createAuditor({ db, log })
+  const relay = createRelay({
+    db,
+    queue,
+    handlers: overrides.handlers || HANDLERS,
+    cfg,
+    log,
+    audit: auditor,
+  })
 
-  const server = createServer(async (req, res) => {
-    cors(res)
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204)
-      res.end()
-      return
-    }
-    const url = (req.url || '/').split('?')[0]
-
-    if (req.method === 'GET' && url === '/health') {
-      const relayStatus = db ? await relay.refreshStatus() : relay.status()
-      json(res, 200, {
-        ok: true,
-        version: VERSION,
-        projectId: cfg.projectId,
-        firestoreReady: !!db,
-        firestoreError: firestoreError || undefined,
-        internet: relayStatus.online,
-        lastContact: relayStatus.lastContact,
-        lastProbeError: relayStatus.lastError || undefined,
-        queue: queue.counts(),
-        tokenConfigured: !!cfg.token,
-        servesApp: !!staticDir,
-        time: new Date().toISOString(),
-      })
-      return
-    }
-
-    if (req.method === 'GET' && serveStatic) {
-      serveStatic(req, res, url)
-      return
-    }
-
-    if (req.method === 'GET' && url === '/') {
-      json(res, 200, {
-        ok: true,
-        hub: true,
-        version: VERSION,
-        note: 'web app (dist/) not present on this hub — API only',
-        endpoints: ['GET /health', 'POST /outbox'],
-      })
-      return
-    }
-
-    if (req.method === 'POST' && url === '/outbox') {
-      if (!tokenOk(req.headers['x-hub-token'], cfg.token)) {
-        json(res, 401, { ok: false, error: 'bad or missing x-hub-token' })
-        return
-      }
-      let body
+  const handler = makeHandler({
+    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log,
+  })
+  const server = createServer((req, res) => {
+    handler(req, res).catch((e) => {
+      // Never leak stack traces, paths, credentials or PHI to the client.
+      log.error('[hub] request failed:', e?.message || e)
       try {
-        body = await readBody(req, MAX_BODY)
-      } catch (e) {
-        json(res, e.code === 'TOO_LARGE' ? 413 : 400, { ok: false, error: String(e.message || e) })
-        return
-      }
-      let parsed
-      try {
-        parsed = JSON.parse(body)
-      } catch {
-        json(res, 400, { ok: false, error: 'body is not valid JSON' })
-        return
-      }
-      const ops = Array.isArray(parsed?.ops) ? parsed.ops : null
-      if (!ops || !ops.length) {
-        json(res, 400, { ok: false, error: 'body must be { ops: [...] } with at least one op' })
-        return
-      }
-      if (ops.length > MAX_OPS) {
-        json(res, 400, { ok: false, error: 'too many ops per request (max ' + MAX_OPS + ')' })
-        return
-      }
-      const errors = ops.map((o, i) => validateOp(o, i)).filter(Boolean)
-      if (errors.length) {
-        json(res, 400, { ok: false, error: errors[0], errors: errors.slice(0, 10) })
-        return
-      }
-
-      // Durable before ack — after this returns the device may delete its copy.
-      let accepted = 0
-      let duplicates = 0
-      for (const op of ops) {
-        const r = queue.add({
-          clientOpKey: op.clientOpKey,
-          kind: op.kind,
-          args: op.args,
-          orgId: op.orgId,
-          actor: op.actor && typeof op.actor === 'object' ? op.actor : null,
-          createdAt: typeof op.createdAt === 'string' ? op.createdAt.slice(0, 40) : '',
-        })
-        if (r.duplicate) duplicates += 1
-        else accepted += 1
-      }
-      log.info('[hub] accepted', accepted, 'ops' + (duplicates ? ' (' + duplicates + ' duplicates skipped)' : ''))
-      json(res, 200, { ok: true, accepted, duplicates, queue: queue.counts() })
-      return
-    }
-
-    json(res, 404, { ok: false, error: 'not found — try GET /health or POST /outbox' })
+        if (!res.headersSent) json(res, e?.expose ? e.status : 500, { ok: false, error: e?.expose ? e.message : 'internal server error' })
+        else res.end()
+      } catch { /* socket already gone */ }
+    })
   })
 
   // Process-wide failure of a socket must not take the hub down.
@@ -307,22 +548,46 @@ export function startHub(overrides = {}) {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
   })
 
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(cfg.port, () => {
+  return new Promise((resolveStart, rejectStart) => {
+    const onError = (err) => rejectStart(describeListenError(err, cfg.port))
+
+    server.once('error', onError)
+    server.listen(cfg.port, cfg.host, () => {
+      server.removeListener('error', onError)
       relay.start()
+
       const addr = server.address()
-      log.info(`[hub] listening on http://0.0.0.0:${addr.port}  (health: GET /health)`)
-      resolve({
-        cfg,
+      const actualPort = addr && typeof addr === 'object' ? addr.port : cfg.port
+      const interfaces = overrides.interfaces || networkInterfaces()
+      const lanAddresses = listLanAddresses(interfaces)
+      const boundHost = cfg.host
+
+      for (const line of startupLines({ host: boundHost, port: actualPort, version: VERSION, lanAddresses })) {
+        log.info(line)
+      }
+      log.info('[hub] authentication: Firebase ID token (Authorization: Bearer)')
+      log.info('[hub] do not port-forward this port on the hospital router; it is for the trusted LAN only.')
+
+      resolveStart({
+        cfg: { ...cfg, port: actualPort },
+        port: actualPort,
+        lanAddresses,
         queue,
         relay,
         server,
         db,
+        auth: foundation.auth,
+        foundation,
+        authenticator,
+        localUrl: 'http://127.0.0.1:' + actualPort,
+        lanUrl: lanAddresses.length ? 'http://' + lanAddresses[0] + ':' + actualPort : '',
         close: () =>
           new Promise((r) => {
             relay.stop()
             server.close(() => r())
+            // fetch()/undici keeps sockets alive; do not leave a test or a
+            // restart hanging on an idle keep-alive connection.
+            server.closeIdleConnections?.()
           }),
       })
     })
@@ -332,7 +597,7 @@ export function startHub(overrides = {}) {
 // `node hub/server.js` starts it; an import (tests) does not.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   startHub().catch((e) => {
-    console.error('[hub] failed to start:', e.message || e)
+    console.error('[hub] failed to start: ' + (e?.message || e))
     process.exit(1)
   })
 }

@@ -9,6 +9,7 @@ import { checkAccess, startAccessWatch } from './services/authService.js'
 import { startIdleWatch } from './services/idleService.js'
 import { initUpdater } from './components/updater.js'
 import { startOutboxSync } from './services/clinicalOutbox.js'
+import { installChunkRecovery } from './lib/chunkRecovery.js'
 
 // Views are loaded on demand (see registerRoute in router.js). Login is pulled
 // in eagerly because it is the screen a cold, signed-out load lands on.
@@ -142,6 +143,7 @@ authStore.subscribe(async (s) => {
 })
 
 initRouter()
+installChunkRecovery()
 initAuthListener()
 startAccessWatch()
 startIdleWatch()
@@ -156,7 +158,24 @@ handleRoute()
 if (import.meta.env.PROD && 'serviceWorker' in navigator &&
     !navigator.userAgent.includes('Electron')) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {
+    navigator.serviceWorker.register('./sw.js', { scope: './' }).then((reg) => {
+      // Periodically check for Host app updates every 15 minutes
+      setInterval(() => {
+        try { reg.update() } catch (e) {}
+      }, 15 * 60 * 1000)
+
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing
+        if (sw) {
+          sw.addEventListener('statechange', () => {
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+              console.log('[SW] New app version available from Host!')
+              try { window.__medilogUpdate?.({ ready: true, version: 'new' }) } catch (e) {}
+            }
+          })
+        }
+      })
+    }).catch(() => {
       /* offline support degrades to Firestore's data cache only */
     })
   })
