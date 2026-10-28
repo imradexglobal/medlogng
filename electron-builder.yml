@@ -11,6 +11,7 @@ asar: true
 
 files:
   - dist/**/*
+  - public/**/*
   - electron/**/*
   - package.json
   - '!node_modules/@capacitor/android/**/*'
@@ -19,12 +20,13 @@ files:
 
 win:
   icon: public/icon.ico
+  sign: false
+  verifyUpdateCodeSignature: false
   target:
     - target: nsis
       arch: [x64]
   publisherName: Imradex Global
   requestedExecutionLevel: asInvoker
-  signAndEditExecutable: false
 
 nsis:
   oneClick: false

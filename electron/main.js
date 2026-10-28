@@ -19,6 +19,27 @@ try {
 } catch (e) { /* flags must be set early; ignore if too late */ }
 
 let mainWindow = null;
+let isQuitting = false;
+
+async function performQuitAndInstall() {
+  if (isQuitting) return;
+  isQuitting = true;
+  try {
+    host.stopStatusPoll();
+    host.destroyTray();
+    await host.stopHubRuntime();
+  } catch (e) {
+    console.error('[AutoUpdate] Cleanup before install failed:', e);
+  }
+  setImmediate(() => {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+    } catch (e) {
+      console.error('[AutoUpdate] quitAndInstall failed:', e);
+      app.quit();
+    }
+  });
+}
 const START_URL = process.env.ELECTRON_START_URL || '';
 
 const DEFAULT_ZOOM = 0.85;
@@ -61,10 +82,21 @@ function setZoom(z) {
 }
 
 function appIconPath() {
-  const ico = path.join(__dirname, '..', 'public', 'icon.ico');
-  if (fs.existsSync(ico)) return ico;
-  const png = path.join(__dirname, '..', 'public', 'logo.png');
-  if (fs.existsSync(png)) return png;
+  const candidates = [
+    path.join(__dirname, '..', 'public', 'icon.ico'),
+    path.join(__dirname, '..', 'public', 'logo.png'),
+    path.join(__dirname, '..', 'dist', 'icon.ico'),
+    path.join(__dirname, '..', 'dist', 'logo.png'),
+    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'public', 'icon.ico'),
+    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'dist', 'icon.ico'),
+    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'public', 'logo.png'),
+    path.join(process.resourcesPath || '', 'app.asar.unpacked', 'dist', 'logo.png'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (p && fs.existsSync(p)) return p;
+    } catch {}
+  }
   return null;
 }
 
@@ -110,7 +142,8 @@ function createWindow(startUrl) {
 let wizardWindow = null;
 
 function createWizardWindow() {
-  wizardWindow = new BrowserWindow({
+  const winIcon = appIconPath();
+  const winOpts = {
     width: 560,
     height: 700,
     resizable: false,
@@ -121,7 +154,9 @@ function createWizardWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-  });
+  };
+  if (winIcon) winOpts.icon = winIcon;
+  wizardWindow = new BrowserWindow(winOpts);
   try { wizardWindow.setMenuBarVisibility(false); } catch (e) {}
   wizardWindow.loadFile(path.join(__dirname, 'wizard.html'));
   wizardWindow.on('closed', () => {
@@ -206,10 +241,10 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle('auto-quit-install', () => {
+  ipcMain.handle('auto-quit-install', async () => {
     if (!autoUpdater) return { error: 'autoUpdater not available' };
     try {
-      autoUpdater.quitAndInstall(false, true);
+      await performQuitAndInstall();
       return { success: true };
     } catch (e) {
       return { error: e.message };
@@ -311,8 +346,8 @@ app.whenReady().then(async () => {
           releaseNotes: info?.releaseNotes,
         });
         if (isHost) {
-          host.setUpdateReady(info?.version, () => {
-            autoUpdater.quitAndInstall(false, true);
+          host.setUpdateReady(info?.version, async () => {
+            await performQuitAndInstall();
           });
         }
       });
@@ -335,6 +370,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  if (isQuitting) {
+    app.quit();
+    return;
+  }
   // Host mode lives in the tray: closing the window must NOT stop the server
   // the rest of the building depends on. Quit from the tray menu.
   if (host.isHostMode()) return;
@@ -342,6 +381,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   host.stopStatusPoll();
+  host.destroyTray();
   host.stopHubRuntime().catch(() => {});
 });

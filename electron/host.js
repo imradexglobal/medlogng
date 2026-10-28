@@ -32,9 +32,9 @@ const { pathToFileURL } = require('node:url')
 
 const HOST_PORT_DEFAULT = 8787
 
-// 16x16 green circle + white cross, embedded so no binary asset is required.
+// 32x32 MediLog NG custom logo embedded so tray icon is always truthful even if assets are missing.
 const TRAY_ICON_PNG =
-  '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'
+  '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'
 
 function markerPath() {
   return path.join(__dirname, 'host.flag')
@@ -294,13 +294,24 @@ let currentPort = HOST_PORT_DEFAULT
 
 function trayIcon() {
   try {
-    const iconFile = path.join(projectRoot(), 'public', 'logo.png')
-    if (fs.existsSync(iconFile)) {
-      const img = nativeImage.createFromPath(iconFile)
-      if (!img.isEmpty()) return img.resize({ width: 16, height: 16 })
+    const candidates = [
+      path.join(projectRoot(), 'public', 'logo.png'),
+      path.join(projectRoot(), 'dist', 'logo.png'),
+      path.join(projectRoot(), 'public', 'icon.png'),
+      path.join(projectRoot(), 'dist', 'icon.png'),
+      path.join(__dirname, '..', 'public', 'logo.png'),
+      path.join(__dirname, '..', 'dist', 'logo.png'),
+      path.join(process.resourcesPath || '', 'app.asar.unpacked', 'dist', 'logo.png'),
+      path.join(process.resourcesPath || '', 'app.asar.unpacked', 'public', 'logo.png'),
+    ]
+    for (const iconFile of candidates) {
+      if (iconFile && fs.existsSync(iconFile)) {
+        const img = nativeImage.createFromPath(iconFile)
+        if (!img.isEmpty()) return img.resize({ width: 16, height: 16 })
+      }
     }
   } catch {}
-  return nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_PNG, 'base64'))
+  return nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_PNG, 'base64')).resize({ width: 16, height: 16 })
 }
 
 function setLoginItem(enabled) {
@@ -365,6 +376,13 @@ function createTray(getWindow, port) {
   rebuildTrayMenu()
   tray.on('click', () => { const w = getWindow(); if (w) w.show() })
   return tray
+}
+
+function destroyTray() {
+  if (tray) {
+    try { tray.destroy() } catch {}
+    tray = null
+  }
 }
 
 async function pollOnce(port) {
@@ -492,6 +510,7 @@ module.exports = {
   startHubRuntime,
   stopHubRuntime,
   createTray,
+  destroyTray,
   startStatusPoll,
   stopStatusPoll,
   registerHostIpc,

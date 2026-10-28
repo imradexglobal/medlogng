@@ -27,12 +27,14 @@ asar: true
 asarUnpack:
   - hub/**/*
   - dist/**/*
+  - public/**/*
   - src/features/pharmacy/requests.js
   - node_modules/**/*
   - package.json
 
 files:
   - dist/**/*
+  - public/**/*
   - electron/**/*
   - hub/**/*
   - src/features/pharmacy/requests.js
@@ -44,12 +46,13 @@ files:
 
 win:
   icon: public/icon.ico
+  sign: false
+  verifyUpdateCodeSignature: false
   target:
     - target: nsis
       arch: [x64]
   publisherName: Imradex Global
   requestedExecutionLevel: asInvoker
-  signAndEditExecutable: false
 
 nsis:
   oneClick: false
