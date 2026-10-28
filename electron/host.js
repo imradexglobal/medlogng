@@ -341,7 +341,7 @@ function rebuildTrayMenu() {
   items.push(
     statusItem || { label: 'Status: starting…', enabled: false },
     { type: 'separator' },
-    { label: 'Open MediLog NG', click: () => { const w = getWindow(); if (w) { w.show(); w.focus() } } },
+    { label: 'Open MediLog NG', click: () => openHostWindow() },
     {
       label: 'Start with Windows',
       type: 'checkbox',
@@ -366,15 +366,29 @@ function setUpdateReady(version, onRestart) {
   } catch {}
 }
 
-function createTray(getWindow, port) {
+let currentReopenHandler = null
+
+function openHostWindow() {
+  const w = currentWindowGetter ? currentWindowGetter() : null
+  if (w && !w.isDestroyed()) {
+    if (w.isMinimized()) w.restore()
+    w.show()
+    w.focus()
+  } else if (typeof currentReopenHandler === 'function') {
+    currentReopenHandler()
+  }
+}
+
+function createTray(getWindow, port, onReopen) {
   if (tray) return tray
   currentWindowGetter = getWindow
+  currentReopenHandler = onReopen
   currentPort = port || HOST_PORT_DEFAULT
   tray = new Tray(trayIcon())
   tray.setToolTip('MediLog NG Host')
   statusItem = { label: 'Status: starting…', enabled: false }
   rebuildTrayMenu()
-  tray.on('click', () => { const w = getWindow(); if (w) w.show() })
+  tray.on('click', () => openHostWindow())
   return tray
 }
 

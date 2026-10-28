@@ -21,6 +21,24 @@ try {
 let mainWindow = null;
 let isQuitting = false;
 
+function sendToRenderer(channel, data) {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    try {
+      mainWindow.webContents.send(channel, data);
+    } catch (e) {}
+  }
+}
+
+function ensureHostWindow(port) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow(host.localUrl(port));
+  } else {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
 async function performQuitAndInstall() {
   if (isQuitting) return;
   isQuitting = true;
@@ -127,6 +145,17 @@ function createWindow(startUrl) {
     return { action: 'deny' };
   });
 
+  mainWindow.on('close', (event) => {
+    if (host.isHostMode() && !isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
   if (startUrl) {
     // Host mode: load the EMR from the local hub server (same code path a
     // ward PC uses) so the host exercises exactly what the building sees.
@@ -175,7 +204,7 @@ async function startHostExperience() {
     const cfg = host.loadHostConfig();
     const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
     createWindow(host.localUrl(port));
-    host.createTray(() => mainWindow, port);
+    host.createTray(() => mainWindow, port, () => ensureHostWindow(port));
     host.startStatusPoll(port);
   });
 
@@ -196,7 +225,7 @@ async function startHostExperience() {
   const cfg = host.loadHostConfig();
   const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
   createWindow(host.localUrl(port));
-  host.createTray(() => mainWindow, port);
+  host.createTray(() => mainWindow, port, () => ensureHostWindow(port));
   host.startStatusPoll(port);
 }
 
@@ -260,7 +289,19 @@ app.whenReady().then(async () => {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      if (host.isHostMode()) {
+        const cfg = host.loadHostConfig();
+        const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
+        ensureHostWindow(port);
+      } else {
+        createWindow();
+      }
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
   });
 
 // Auto-update (GitHub releases)
@@ -278,13 +319,13 @@ app.whenReady().then(async () => {
       autoUpdater.on('checking-for-update', () => {
         updateAvailable = false;
         updateProgress = 0;
-        mainWindow?.webContents.send('auto-update-status', { checking: true, progress: 0, available: false });
+        sendToRenderer('auto-update-status', { checking: true, progress: 0, available: false });
       });
 
       autoUpdater.on('update-available', (info) => {
         updateAvailable = true;
         updateProgress = 0;
-        mainWindow?.webContents.send('auto-update-status', {
+        sendToRenderer('auto-update-status', {
           checking: false,
           progress: 0,
           available: true,
@@ -299,7 +340,7 @@ app.whenReady().then(async () => {
       autoUpdater.on('update-not-available', (info) => {
         updateAvailable = false;
         updateProgress = 0;
-        mainWindow?.webContents.send('auto-update-status', {
+        sendToRenderer('auto-update-status', {
           checking: false,
           progress: 0,
           available: false,
@@ -309,7 +350,7 @@ app.whenReady().then(async () => {
 
       autoUpdater.on('download-progress', (progressObj) => {
         updateProgress = Math.round(progressObj?.percent || 0);
-        mainWindow?.webContents.send('auto-update-status', {
+        sendToRenderer('auto-update-status', {
           checking: false,
           downloading: true,
           progress: updateProgress,
@@ -326,7 +367,7 @@ app.whenReady().then(async () => {
       // electron-updater <6 emits `progress`, >=6 emits `download-progress`. Keep both.
       autoUpdater.on('progress', (progressObj) => {
         updateProgress = Math.round(progressObj?.percent || 0);
-        mainWindow?.webContents.send('auto-update-status', {
+        sendToRenderer('auto-update-status', {
           checking: false,
           downloading: true,
           progress: updateProgress,
@@ -337,7 +378,7 @@ app.whenReady().then(async () => {
       autoUpdater.on('update-downloaded', (info) => {
         updateAvailable = true;
         updateProgress = 100;
-        mainWindow?.webContents.send('auto-update-status', {
+        sendToRenderer('auto-update-status', {
           checking: false,
           progress: 100,
           available: true,
@@ -353,7 +394,7 @@ app.whenReady().then(async () => {
       });
 
       autoUpdater.on('error', (err) => {
-        mainWindow?.webContents.send('auto-update-status', {
+        sendToRenderer('auto-update-status', {
           checking: false,
           progress: updateProgress,
           available: updateAvailable,
