@@ -167,7 +167,7 @@ export async function LabOrderView(app, params = {}) {
         (it.accession_no ? '<div class="mut" style="font-size:.78rem">Accession ' + esc(it.accession_no) + '</div>' : '') +
         (it.specimen_type ? '<div class="mut" style="font-size:.78rem">Specimen: ' + esc(it.specimen_type) + '</div>' : '') +
         '</div>' +
-        '<div style="text-align:right"><div>' + (it.price_kobo ? naira(it.price_kobo) : '<span class="mut">—</span>') + '</div>' +
+        '<div style="text-align:right"><div>' + (it.price_kobo ? naira(it.price_kobo / 100) : '<span class="mut">—</span>') + '</div>' +
         '<div class="mrow" style="justify-content:flex-end;margin-top:6px">' + itemActions(it) + '</div></div>' +
         '</div>' +
         (it.collection && it.collection.reject_reason ? '<p class="sub" style="color:#b91c1c;margin:6px 0 0">Rejected: ' + esc(it.collection.reject_reason) + '</p>' : '') +
@@ -204,7 +204,7 @@ export async function LabOrderView(app, params = {}) {
       bill.onclick = async () => {
         try {
           const inv = await createInvoiceForLabOrder(order)
-          toast('Invoice ' + inv.id.slice(0, 8) + ' created · ' + naira(inv.total_kobo))
+          toast('Invoice ' + inv.id.slice(0, 8) + ' created · ' + naira(inv.total_kobo / 100))
           reload()
         } catch (e) { toast(friendlyWriteError(e, 'Billing failed')) }
       }

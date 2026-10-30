@@ -7,6 +7,8 @@ import { emptyRow } from '../data/mockData.js'
 import { can } from '../features/admin/roles.js'
 import { myActiveMembership, getClinicalStaff } from '../services/authService.js'
 import { payerOptions } from '../services/payerService.js'
+import { listPatientInvoices } from '../services/billingService.js'
+import { naira } from '../utils/format.js'
 import {
   getPatient, updatePatient, listPatientDocs, createPatientDoc, findOpenEncounterForPatient,
   myPatientCaps, friendlyPatientError, formatPhone,
@@ -680,8 +682,27 @@ function paneHtml(t) {
         (caps.canUpdate ? '<br/><button class="btn ghost" data-edit-pane>Edit demographics</button>' : '') +
         '</div>' +
         '<div>' +
-        '<div class="card"><h3>Billing</h3><p class="sub">Outstanding balance: no invoices linked to this patient yet.</p>' +
-        '<a class="btn ghost sm" href="#/billing?patient=' + encodeURIComponent(pid) + '&new=1">Open billing for ' + esc(p.name) + ' →</a></div>' +
+        '<div class="card"><h3>Billing & Invoices</h3>' +
+        (() => {
+          const invList = loadCache.Billing || []
+          const totalBilled = invList.reduce((sum, i) => sum + (i.total || 0), 0)
+          const totalPaid = invList.reduce((sum, i) => sum + (i.paid || 0), 0)
+          const bal = totalBilled - totalPaid
+          const openCount = invList.filter((i) => (i.status || 'unpaid') !== 'paid').length
+          if (!invList.length) {
+            return '<p class="sub">No invoices raised for this patient yet.</p>'
+          }
+          return '<div class="kv">' +
+            '<div><em>Billed</em><strong>' + esc(naira(totalBilled)) + '</strong></div>' +
+            '<div><em>Paid</em><strong style="color:#047857">' + esc(naira(totalPaid)) + '</strong></div>' +
+            '<div><em>Balance due</em><strong style="color:' + (bal > 0 ? '#b91c1c' : '#047857') + '">' + esc(naira(bal)) + '</strong></div>' +
+            '<div><em>Open bills</em><strong>' + openCount + '</strong></div>' +
+            '</div>'
+        })() +
+        '<div class="mrow" style="margin-top:12px">' +
+        '<a class="btn ghost sm" href="#/billing?patient=' + encodeURIComponent(pid) + '">All bills (' + (loadCache.Billing ? loadCache.Billing.length : 0) + ') →</a>' +
+        '<a class="btn sm" href="#/billing?patient=' + encodeURIComponent(pid) + '&new=1">+ Raise invoice</a>' +
+        '</div></div>' +
         '<div class="card"><h3>Consent & access</h3><p class="sub">Recorded consents appear here. Cross-hospital access always requires reason + audit.</p>' +
         '<button class="btn ghost sm" id="consentBtn">Record consent</button></div>' +
         '</div></div>'
@@ -834,6 +855,8 @@ function paneHtml(t) {
     pane.innerHTML = skeletonCard(4)
     if (t === 'Dashboard') {
       loadCache.Dashboard = await loadDashboardData()
+    } else if (t === 'Personal Data') {
+      loadCache.Billing = await listPatientInvoices(pid).catch(() => [])
     } else if (t !== 'Overview') {
       const coll = tabCollection(t)
       if (coll) loadCache[t] = await loadTab(t)

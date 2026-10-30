@@ -204,7 +204,7 @@ export async function AdmissionsView(app, params = {}) {
         // Bed, ward and doctor stay searchable; the patient's own record is
         // joined in so a mobile number finds the occupied bed, which the
         // admission row alone cannot answer.
-        const bedHay = [admissionName(a), a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
+        let bedHay = [admissionName(a), a.wardName, a.bedNumber, a.attendingProvider, a.admissionType, a.encounterId]
           .join(' ').toLowerCase()
         // MRN and phone live on the patient record; include them so a search by
         // MRN or mobile finds the occupied bed even when the admission row has

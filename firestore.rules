@@ -324,16 +324,14 @@ match /admission_plan_items/{id} {
 // Financial collections — restricted to org members with billing capabilities.
 
 match /invoices/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow read: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
   allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
   // Client refuses invoices with money received (paid_kobo > 0).
   allow delete: if canDelete(resource.data.organization_id);
 }
 match /payments/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'billing.payment')
-    && request.resource.data.amount_kobo is int
-    && request.resource.data.amount_kobo > 0;
+  allow read: if hasCap(resource.data.organization_id, 'billing.payment');
   allow create: if hasCap(request.resource.data.organization_id, 'billing.payment')
     && request.resource.data.amount_kobo is int
     && request.resource.data.amount_kobo > 0;
@@ -344,24 +342,24 @@ match /payments/{id} {
   allow delete: if false;
 }
 match /claims/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow read: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
   allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow delete: if false;
 }
 match /coverages/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow read: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
   allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow delete: if false;
 }
 match /plans/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow read: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow write: if hasCap(request.resource.data.organization_id, 'billing.invoice');
 }
 // Per-hospital price catalogue (service items + prices used on invoices).
 match /price_catalogue/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'billing.invoice');
+  allow read: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice')
     && request.resource.data.organization_id is string;
   allow update: if hasCap(resource.data.organization_id, 'billing.invoice')

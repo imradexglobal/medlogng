@@ -1,12 +1,13 @@
 // Shared payment modal — used by BillingView and InvoiceDetailView.
 // Single place for amount validation (no overpayment without a credit note),
-// method selection and the recordPayment call. When `editing` is true, the
-// modal pre-fills from `existing` and returns the new values via onSuccess
-// (the caller decides whether to call recordPayment or updatePayment).
+// method selection, POS/transfer reference tracking, and the recordPayment call.
 import { formModal, closeModal, toast } from './shell.js'
 import { recordPayment } from '../services/billingService.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { naira } from '../utils/format.js'
+import { printDocument } from '../lib/print.js'
+import { receiptPrintHtml } from '../lib/billingPrint.js'
+import { authStore } from '../store/authStore.js'
 
 export function openPaymentModal({ invoice, onSuccess, onClose, editing = false, existing = null }) {
   const outstanding = Number(invoice.outstanding || 0)
@@ -15,6 +16,7 @@ export function openPaymentModal({ invoice, onSuccess, onClose, editing = false,
   const invoiceId = invoice.invoiceId || id
   const currentAmount = existing ? Number(existing.amount || 0) : 0
   const currentMethod = existing ? existing.method || 'Cash' : 'Cash'
+  const currentRef = existing ? existing.reference || '' : ''
   const currentNotes = existing ? existing.notes || '' : ''
 
   formModal({
@@ -23,8 +25,9 @@ export function openPaymentModal({ invoice, onSuccess, onClose, editing = false,
       : 'Record payment — ' + naira(outstanding) + ' outstanding',
     submitLabel: editing ? 'Save changes' : 'Save payment',
     fields: [
-      { name: 'amount', label: 'Amount ₦', required: true, placeholder: String(currentAmount || outstanding), value: existing ? String(currentAmount) : '' },
+      { name: 'amount', label: 'Amount ₦', required: true, placeholder: String(currentAmount || outstanding), value: existing ? String(currentAmount) : String(outstanding > 0 ? outstanding : '') },
       { name: 'method', label: 'Method', type: 'select', options: ['Cash', 'Transfer', 'POS', 'NHIA'], value: currentMethod },
+      { name: 'reference', label: 'Reference / POS RRN / Transfer ID', placeholder: 'e.g. POS terminal RRN, bank session ID…', value: currentRef },
       { name: 'notes', label: 'Receipt note', full: true, placeholder: '…', value: currentNotes },
     ],
     onSubmit: async (v) => {
@@ -44,10 +47,11 @@ export function openPaymentModal({ invoice, onSuccess, onClose, editing = false,
             invoice_id: id,
             amount_kobo: Math.round(amount * 100),
             method: v.method || 'Cash',
-            notes: v.notes || '',
+            reference: (v.reference || '').trim(),
+            notes: (v.notes || '').trim(),
           })
           closeModal()
-          toast('Payment recorded — ' + result.status)
+          toast('Payment recorded — ' + result.status + ' (' + result.receiptNumber + ')')
           if (onSuccess) onSuccess(result)
         } else {
           closeModal()
@@ -55,7 +59,8 @@ export function openPaymentModal({ invoice, onSuccess, onClose, editing = false,
           if (onSuccess) onSuccess({
             amount_kobo: Math.round(amount * 100),
             method: v.method || 'Cash',
-            notes: v.notes || '',
+            reference: (v.reference || '').trim(),
+            notes: (v.notes || '').trim(),
           })
         }
       } catch (e) {

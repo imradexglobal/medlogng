@@ -11,7 +11,7 @@ import { payerOptions } from '../services/payerService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
-import { naira } from '../utils/format.js'
+import { naira, fmtDate, fmtDateTime } from '../utils/format.js'
 import { esc } from '../utils/sanitize.js'
 import { navigate } from '../router.js'
 import { confirmDelete } from './deleteUi.js'
@@ -22,18 +22,15 @@ import {
   listPrices, savePrice, deletePrice, catalogueItems, lineText, priceFor, myPriceCaps,
 } from '../services/priceCatalogueService.js'
 import { billingSummary } from '../services/billingSummary.js'
-import { staffLabel } from '../lib/staffName.js'
+import { staffLabel, currentStaffName } from '../lib/staffName.js'
+import { printDocument } from '../lib/print.js'
+import { receiptPrintHtml, shiftReconciliationPrintHtml } from '../lib/billingPrint.js'
 
 const TABS = ['Invoices', 'Payments', 'Price catalogue']
 const DEFAULT_PAYER = 'Self-pay'
 
-// Billing is reachable with context from other screens:
-//   #/billing?patient=<pid>&new=1&from=enc
-// `patient` pre-selects the invoice patient (and their saved payer), `new=1`
-// opens the New invoice form immediately, `from=enc` offers a way back to the
-// encounter the charge came from.
 export default async function BillingView(app, params = {}) {
-  const { activeOrg } = authStore.getState()
+  const { activeOrg, activeOrgName } = authStore.getState()
   const caps = myBillingCaps()
   const presetPid = String(params.patient || '')
   const autoOpen = params.new === '1' || params.new === 'true'
@@ -63,6 +60,18 @@ export default async function BillingView(app, params = {}) {
   let hasMore = false
   let loading = false
 
+  // Filters state
+  let invSearch = ''
+  let invStatusFilter = 'all'
+  let invPayerFilter = 'all'
+  let invDateFilter = 'all'
+
+  let paySearch = ''
+  let payMethodFilter = 'all'
+
+  let priceSearch = ''
+  let priceCatFilter = 'all'
+
   shell(app, {
     active: '/billing',
     title: 'Billing',
@@ -91,8 +100,6 @@ export default async function BillingView(app, params = {}) {
   }
   loadPayments()
 
-  // Append the next chunk of invoices. The first call has no cursor and
-  // replaces the list; later ones walk forward from the last row loaded.
   async function loadMore() {
     if (loading) return
     const first = cursor == null && invoices.length === 0
@@ -105,8 +112,6 @@ export default async function BillingView(app, params = {}) {
         first ? listOrgPatientsAll(activeOrg).catch(() => []) : Promise.resolve(patients),
         first ? payerOptions().catch(() => []) : Promise.resolve([]),
       ])
-      // A row written between two chunk reads shifts the cursor stream and can
-      // repeat the boundary document.
       const seen = new Set(invoices.map((i) => i.id))
       invoices = first ? pg.rows : [...invoices, ...pg.rows.filter((i) => !seen.has(i.id))]
       cursor = pg.cursor
@@ -119,8 +124,6 @@ export default async function BillingView(app, params = {}) {
       more.setLoading(false)
       more.setDone(!hasMore)
       render()
-      // The pre-selected patient only exists after the list resolves, so the
-      // form is opened here rather than before the first paint.
       if (autoOpen && !openedPreset) {
         openedPreset = true
         if (!caps.canInvoice) {
@@ -140,14 +143,46 @@ export default async function BillingView(app, params = {}) {
     }
   }
 
-  // A fresh read of the whole list.
   function reload() {
     invoices = []
     cursor = null
     hasMore = false
     more.reset()
     teardownListeners()
+    loadPrices()
+    loadPayments()
     loadMore().then(subscribeLive)
+  }
+
+  function getFilteredInvoices() {
+    let list = invoices
+    const q = invSearch.trim().toLowerCase()
+    if (q) {
+      list = list.filter((i) => {
+        const idMatch = (i.invoiceId || i.id || '').toLowerCase().includes(q)
+        const nameMatch = (i.patientName || '').toLowerCase().includes(q)
+        const payerMatch = (i.payer || '').toLowerCase().includes(q)
+        return idMatch || nameMatch || payerMatch
+      })
+    }
+    if (invStatusFilter !== 'all') {
+      list = list.filter((i) => i.status === invStatusFilter)
+    }
+    if (invPayerFilter !== 'all') {
+      list = list.filter((i) => i.payer === invPayerFilter)
+    }
+    if (invDateFilter !== 'all') {
+      const now = Date.now()
+      const dayMs = 24 * 60 * 60 * 1000
+      list = list.filter((i) => {
+        const t = i.createdAt || 0
+        if (invDateFilter === 'today') return (now - t) < dayMs
+        if (invDateFilter === 'week') return (now - t) < (7 * dayMs)
+        if (invDateFilter === 'month') return (now - t) < (30 * dayMs)
+        return true
+      })
+    }
+    return list
   }
 
   function render() {
@@ -170,23 +205,84 @@ export default async function BillingView(app, params = {}) {
   function renderInvoices() {
     const pane = document.getElementById('bpane')
     if (!pane) return
-    const rows = invoices.map((i) => {
+    const filtered = getFilteredInvoices()
+
+    const uniquePayers = Array.from(new Set(invoices.map((i) => i.payer).filter(Boolean)))
+
+    const toolbarHtml =
+      '<div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;background:#f9fafb;padding:10px 12px;border-radius:6px;border:1px solid #e5e7eb">' +
+        '<input class="input" id="invSearchInput" placeholder="🔍 Search patient, invoice ID…" value="' + esc(invSearch) + '" style="max-width:240px" />' +
+        '<select class="input" id="invStatusSelect" style="max-width:140px">' +
+          '<option value="all"' + (invStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
+          '<option value="unpaid"' + (invStatusFilter === 'unpaid' ? ' selected' : '') + '>Unpaid</option>' +
+          '<option value="part-paid"' + (invStatusFilter === 'part-paid' ? ' selected' : '') + '>Part-paid</option>' +
+          '<option value="paid"' + (invStatusFilter === 'paid' ? ' selected' : '') + '>Paid</option>' +
+        '</select>' +
+        '<select class="input" id="invPayerSelect" style="max-width:140px">' +
+          '<option value="all"' + (invPayerFilter === 'all' ? ' selected' : '') + '>All payers</option>' +
+          uniquePayers.map((p) => '<option value="' + esc(p) + '"' + (invPayerFilter === p ? ' selected' : '') + '>' + esc(p) + '</option>').join('') +
+        '</select>' +
+        '<select class="input" id="invDateSelect" style="max-width:130px">' +
+          '<option value="all"' + (invDateFilter === 'all' ? ' selected' : '') + '>All time</option>' +
+          '<option value="today"' + (invDateFilter === 'today' ? ' selected' : '') + '>Today</option>' +
+          '<option value="week"' + (invDateFilter === 'week' ? ' selected' : '') + '>This week</option>' +
+          '<option value="month"' + (invDateFilter === 'month' ? ' selected' : '') + '>This month</option>' +
+        '</select>' +
+        ((invSearch || invStatusFilter !== 'all' || invPayerFilter !== 'all' || invDateFilter !== 'all')
+          ? '<button class="btn ghost sm" id="clearInvFiltersBtn">Reset filters</button>'
+          : '') +
+        '<span class="mut" style="margin-left:auto;align-self:center;font-size:.85rem">' + filtered.length + ' matching</span>' +
+      '</div>'
+
+    const rows = filtered.map((i) => {
       const items = []
       if (i.status !== 'paid' && caps.canPayment) items.push({ label: 'Record payment', dataAction: 'pay' })
-      if (canDeleteRecords()) items.push({ label: 'Delete', tone: 'danger', dataAction: 'delete' })
-      return '<tr><td><a class="btn ghost sm" href="#/billing/' + esc(i.id) + '"><strong>' + esc(i.invoiceId.slice(0, 8)) + '</strong></a><div class="mut">' + esc(i.date || '') + '</div></td>' +
-        '<td>' + esc(i.patientName) + '</td><td>' + esc(i.payer) + '</td>' +
+      if (canDeleteRecords() && Number(i.paid || 0) === 0) items.push({ label: 'Delete', tone: 'danger', dataAction: 'delete' })
+      return '<tr><td><a class="btn ghost sm" href="#/billing/' + esc(i.id) + '"><strong>' + esc(i.invoiceId.slice(0, 8).toUpperCase()) + '</strong></a><div class="mut">' + esc(i.date || '') + '</div></td>' +
+        '<td>' + (i.patientId ? '<a href="#/patients/' + encodeURIComponent(i.patientId) + '">' + esc(i.patientName) + '</a>' : esc(i.patientName)) + '</td>' +
+        '<td>' + esc(i.payer) + (i.pa_code ? '<div class="mut" style="font-size:.78rem">PA: ' + esc(i.pa_code) + '</div>' : '') + '</td>' +
         '<td><strong>' + esc(naira(i.total)) + '</strong><div class="mut">paid ' + esc(naira(i.paid)) + '</div></td>' +
         '<td>' + statusBadge(i.status) + '</td>' +
         '<td>' + kebabCell({ rowId: i.id, items }) + '</td></tr>'
     }).join('')
+
     const emptyHtml = caps.canInvoice
-  ? '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No invoices yet &middot; <button class="btn" id="invBtnEmpty">+ Create first invoice</button></td></tr>'
-  : '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No invoices yet</td></tr>';
-    const rowsHtml = rows || emptyHtml;
+      ? '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No matching invoices &middot; <button class="btn" id="invBtnEmpty">+ Create invoice</button></td></tr>'
+      : '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No matching invoices</td></tr>'
+
     pane.innerHTML =
+      toolbarHtml +
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Invoice</th><th>Patient</th><th>Payer</th><th>Total</th><th>Status</th><th style="width:120px">Actions</th></tr></thead><tbody>' +
-      rowsHtml + '</tbody></table><div class="loadmore" data-loadmore="1"></div></div>'
+      (rows || emptyHtml) + '</tbody></table><div class="loadmore" data-loadmore="1"></div></div>'
+
+    // Wire filter events
+    const searchInp = document.getElementById('invSearchInput')
+    if (searchInp) {
+      searchInp.oninput = (e) => { invSearch = e.target.value; render() }
+    }
+    const statusSel = document.getElementById('invStatusSelect')
+    if (statusSel) {
+      statusSel.onchange = (e) => { invStatusFilter = e.target.value; render() }
+    }
+    const payerSel = document.getElementById('invPayerSelect')
+    if (payerSel) {
+      payerSel.onchange = (e) => { invPayerFilter = e.target.value; render() }
+    }
+    const dateSel = document.getElementById('invDateSelect')
+    if (dateSel) {
+      dateSel.onchange = (e) => { invDateFilter = e.target.value; render() }
+    }
+    const clearBtn = document.getElementById('clearInvFiltersBtn')
+    if (clearBtn) {
+      clearBtn.onclick = () => {
+        invSearch = ''
+        invStatusFilter = 'all'
+        invPayerFilter = 'all'
+        invDateFilter = 'all'
+        render()
+      }
+    }
+
     wireKebabs(pane, async (rowId, action) => {
       const inv = invoices.find((i) => i.id === rowId)
       if (!inv) return
@@ -207,57 +303,155 @@ export default async function BillingView(app, params = {}) {
     const pane = document.getElementById('bpane')
     if (!pane) return
     const canPay = myBillingCaps().canPayment
-    const rows = (payments || []).map((p) => {
+
+    let list = payments || []
+    const q = paySearch.trim().toLowerCase()
+    if (q) {
+      list = list.filter((p) => {
+        const inv = invoices.find((i) => i.id === p.invoice_id)
+        const patName = (p.patient_name || (inv ? inv.patientName : '')).toLowerCase()
+        const rec = (p.receipt_number || p.id || '').toLowerCase()
+        const invId = (p.invoice_id || '').toLowerCase()
+        const ref = (p.reference || '').toLowerCase()
+        return patName.includes(q) || rec.includes(q) || invId.includes(q) || ref.includes(q)
+      })
+    }
+    if (payMethodFilter !== 'all') {
+      list = list.filter((p) => (p.method || 'Cash').toLowerCase() === payMethodFilter.toLowerCase())
+    }
+
+    const toolbarHtml =
+      '<div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;background:#f9fafb;padding:10px 12px;border-radius:6px;border:1px solid #e5e7eb">' +
+        '<input class="input" id="paySearchInput" placeholder="🔍 Search receipt #, patient, ref…" value="' + esc(paySearch) + '" style="max-width:240px" />' +
+        '<select class="input" id="payMethodSelect" style="max-width:140px">' +
+          '<option value="all"' + (payMethodFilter === 'all' ? ' selected' : '') + '>All methods</option>' +
+          '<option value="Cash"' + (payMethodFilter === 'Cash' ? ' selected' : '') + '>Cash</option>' +
+          '<option value="Transfer"' + (payMethodFilter === 'Transfer' ? ' selected' : '') + '>Transfer</option>' +
+          '<option value="POS"' + (payMethodFilter === 'POS' ? ' selected' : '') + '>POS</option>' +
+          '<option value="NHIA"' + (payMethodFilter === 'NHIA' ? ' selected' : '') + '>NHIA</option>' +
+        '</select>' +
+        '<button class="btn ghost sm" id="shiftReconBtn" style="margin-left:auto">📊 Daily / Shift reconciliation</button>' +
+      '</div>'
+
+    const rows = list.map((p) => {
       const inv = invoices.find((i) => i.id === p.invoice_id)
+      const patName = p.patient_name || (inv ? inv.patientName : '—')
       const paidBy = staffLabel(p.paid_by) || '—'
-      const paidAt = p.paid_at ? new Date(typeof p.paid_at.toMillis === 'function' ? p.paid_at.toMillis() : p.paid_at).toLocaleString('en-NG', { dateStyle: 'short', timeStyle: 'short' }) : '—'
-      return '<tr><td>' + (inv ? '<strong>' + esc(inv.invoiceId.slice(0, 8)) + '</strong>' : esc(p.invoice_id.slice(0, 8))) + '</td>' +
-        '<td>' + esc(inv ? inv.patientName : '—') + '</td>' +
-        '<td>' + esc(naira(p.amount_kobo || 0)) + '</td>' +
-        '<td>' + esc(p.method || 'Cash') + '</td>' +
+      const paidAt = p.paid_at ? fmtDateTime(p.paid_at) : '—'
+      const amountNaira = (Number(p.amount_kobo) || (p.amount_naira ? p.amount_naira * 100 : 0)) / 100
+      const recNo = p.receipt_number || ('REC-' + p.id.slice(0, 8).toUpperCase())
+
+      return '<tr>' +
+        '<td><strong>' + esc(recNo) + '</strong></td>' +
+        '<td>' + (inv ? '<a href="#/billing/' + esc(inv.id) + '">' + esc(inv.invoiceId.slice(0, 8).toUpperCase()) + '</a>' : esc(p.invoice_id.slice(0, 8))) + '</td>' +
+        '<td>' + esc(patName) + '</td>' +
+        '<td><strong>' + esc(naira(amountNaira)) + '</strong></td>' +
+        '<td><span class="pill neutral">' + esc(p.method || 'Cash') + '</span></td>' +
+        '<td class="mut">' + esc(p.reference || '—') + '</td>' +
         '<td class="mut">' + esc(paidAt) + '</td>' +
         '<td>' + esc(paidBy) + '</td>' +
-        '<td style="white-space:nowrap">' + (canPay ? '<button class="btn ghost sm" data-edit-pay="' + esc(p.id) + '">Edit</button>' : '—') + '</td></tr>'
+        '<td style="white-space:nowrap;gap:4px;display:flex">' +
+          '<button class="btn ghost sm" data-print-pay="' + esc(p.id) + '">🖨️ Receipt</button>' +
+          (canPay ? '<button class="btn ghost sm" data-edit-pay="' + esc(p.id) + '">Edit</button>' : '') +
+        '</td></tr>'
     }).join('')
+
     pane.innerHTML =
-      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Invoice</th><th>Patient</th><th>Amount</th><th>Method</th><th>Date</th><th>By</th><th></th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="7" class="mut" style="text-align:center;padding:22px 8px">No payments recorded</td></tr>') + '</tbody></table></div>'
+      toolbarHtml +
+      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Receipt #</th><th>Invoice</th><th>Patient</th><th>Amount</th><th>Method</th><th>Ref</th><th>Date</th><th>By</th><th style="width:130px"></th></tr></thead><tbody>' +
+      (rows || '<tr><td colspan="9" class="mut" style="text-align:center;padding:22px 8px">No payments recorded</td></tr>') + '</tbody></table></div>'
+
+    const searchInp = document.getElementById('paySearchInput')
+    if (searchInp) searchInp.oninput = (e) => { paySearch = e.target.value; render() }
+    const methSel = document.getElementById('payMethodSelect')
+    if (methSel) methSel.onchange = (e) => { payMethodFilter = e.target.value; render() }
+    const reconBtn = document.getElementById('shiftReconBtn')
+    if (reconBtn) reconBtn.onclick = openShiftReconciliationModal
+
+    pane.querySelectorAll('[data-print-pay]').forEach((b) => {
+      b.onclick = () => {
+        const payId = b.getAttribute('data-print-pay')
+        const p = payments.find((x) => x.id === payId)
+        if (!p) return
+        const inv = invoices.find((i) => i.id === p.invoice_id) || {}
+        printDocument('Receipt-' + (p.receipt_number || payId.slice(0, 8)), receiptPrintHtml({
+          hospitalName: activeOrgName || 'Hospital',
+          payment: p,
+          invoice: inv,
+          receivedBy: p.paid_by || currentStaffName(),
+        }))
+      }
+    })
   }
 
   function renderPriceCatalogue() {
     const pane = document.getElementById('bpane')
     if (!pane) return
     const canManage = myPriceCaps().canManage
-    const rows = (prices || []).map((p) =>
-      '<tr><td><strong>' + esc(p.name) + '</strong></td><td>' + esc(p.category || 'Service') + '</td>' +
-      '<td>' + esc(naira(p.price_kobo || 0)) + '</td>' +
-      '<td>' + (canManage
-        ? kebabCell({ rowId: p.id, items: [
-            { label: 'Edit', dataAction: 'edit-price' },
-            { label: 'Delete', tone: 'danger', dataAction: 'del-price' }
-          ] })
-        : '—') + '</td></tr>'
-    ).join('')
+
+    let list = prices || []
+    const q = priceSearch.trim().toLowerCase()
+    if (q) {
+      list = list.filter((p) => (p.name || '').toLowerCase().includes(q))
+    }
+    if (priceCatFilter !== 'all') {
+      list = list.filter((p) => (p.category || 'Service').toLowerCase() === priceCatFilter.toLowerCase())
+    }
+
+    const toolbarHtml =
+      '<div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;background:#f9fafb;padding:10px 12px;border-radius:6px;border:1px solid #e5e7eb">' +
+        '<input class="input" id="priceSearchInput" placeholder="🔍 Search service / item…" value="' + esc(priceSearch) + '" style="max-width:240px" />' +
+        '<select class="input" id="priceCatSelect" style="max-width:140px">' +
+          '<option value="all"' + (priceCatFilter === 'all' ? ' selected' : '') + '>All categories</option>' +
+          '<option value="Service"' + (priceCatFilter === 'Service' ? ' selected' : '') + '>Service</option>' +
+          '<option value="Consult"' + (priceCatFilter === 'Consult' ? ' selected' : '') + '>Consultation</option>' +
+          '<option value="Lab"' + (priceCatFilter === 'Lab' ? ' selected' : '') + '>Laboratory</option>' +
+          '<option value="Drug"' + (priceCatFilter === 'Drug' ? ' selected' : '') + '>Drug</option>' +
+          '<option value="Bed"' + (priceCatFilter === 'Bed' ? ' selected' : '') + '>Ward bed</option>' +
+          '<option value="Other"' + (priceCatFilter === 'Other' ? ' selected' : '') + '>Other</option>' +
+        '</select>' +
+        (canManage ? '<button class="btn sm" id="addPriceBtn" style="margin-left:auto">+ Add new price</button>' : '') +
+      '</div>'
+
+    const rows = list.map((p) => {
+      const priceNaira = (Number(p.price_kobo) || 0) / 100
+      return '<tr><td><strong>' + esc(p.name) + '</strong></td><td><span class="pill neutral">' + esc(p.category || 'Service') + '</span></td>' +
+        '<td><strong>' + esc(naira(priceNaira)) + '</strong></td>' +
+        '<td>' + (canManage
+          ? kebabCell({ rowId: p.id, items: [
+              { label: 'Edit price', dataAction: 'edit-price' },
+              { label: 'Delete', tone: 'danger', dataAction: 'del-price' }
+            ] })
+          : '—') + '</td></tr>'
+    }).join('')
+
     pane.innerHTML =
+      toolbarHtml +
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Service / item</th><th>Category</th><th>Price</th><th style="width:100px">Actions</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No prices set yet. Add your first item below.</td></tr>') + '</tbody></table>' +
+      (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No prices matching filter.</td></tr>') + '</tbody></table>' +
       (canManage
-        ? '<div class="mrow" style="margin-top:12px"><button class="btn ghost" id="addPriceBtn">+ Add price</button></div>' +
-          '<div id="priceForm" class="card" style="margin-top:10px;display:none">' +
+        ? '<div id="priceForm" class="card" style="margin-top:14px;display:none;background:#f8fafc;border:1px solid #cbd5e1">' +
+          '<h4 style="margin:0 0 10px">Set Service Price</h4>' +
           '<div class="fgrid">' +
-          '<label>Item name<input class="input" id="priceName" /></label>' +
+          '<label>Item name<input class="input" id="priceName" placeholder="e.g. Full Blood Count" /></label>' +
           '<label>Category<select class="input" id="priceCat">' +
           '<option value="Service">Service</option><option value="Consult">Consultation</option>' +
           '<option value="Lab">Laboratory</option><option value="Drug">Drug</option>' +
           '<option value="Bed">Ward bed</option><option value="Other">Other</option>' +
           '</select></label>' +
-          '<label>Price (₦)<input class="input" id="priceAmt" type="number" step="0.01" min="0" /></label>' +
+          '<label>Price (₦)<input class="input" id="priceAmt" type="number" step="0.01" min="0" placeholder="0.00" /></label>' +
           '</div>' +
-          '<div class="mrow" style="margin-top:10px">' +
+          '<div class="mrow" style="margin-top:12px">' +
           '<button class="btn ghost" id="cancelPriceBtn">Cancel</button>' +
           '<button class="btn" id="savePriceBtn">Save price</button>' +
           '<input type="hidden" id="priceEditId" /></div></div>' :
           '<p class="sub" style="margin-top:10px">Ask your administrator to set up service prices.</p>')
+
+    const searchInp = document.getElementById('priceSearchInput')
+    if (searchInp) searchInp.oninput = (e) => { priceSearch = e.target.value; render() }
+    const catSel = document.getElementById('priceCatSelect')
+    if (catSel) catSel.onchange = (e) => { priceCatFilter = e.target.value; render() }
+
     wireKebabs(pane, async (rowId, action) => {
       const p = prices.find((x) => x.id === rowId)
       if (!p) return
@@ -281,8 +475,75 @@ export default async function BillingView(app, params = {}) {
     })
   }
 
-  // `presetPid` comes from #/billing?patient=… — used by the consultation
-  // "Bill item" flow so the cashier does not re-pick the patient.
+  // Daily / Shift Cashier Reconciliation Modal
+  function openShiftReconciliationModal() {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayMs = today.getTime()
+
+    // Filter payments for today
+    const todaysPayments = (payments || []).filter((p) => {
+      const ms = p.paid_at ? (typeof p.paid_at.toMillis === 'function' ? p.paid_at.toMillis() : p.paid_at) : 0
+      return ms >= todayMs
+    })
+
+    const byMethod = {}
+    let totalCollected = 0
+    todaysPayments.forEach((p) => {
+      const m = p.method || 'Cash'
+      const amt = Number(p.amount_kobo || (p.amount_naira ? p.amount_naira * 100 : 0)) / 100
+      if (!byMethod[m]) byMethod[m] = { count: 0, total: 0 }
+      byMethod[m].count++
+      byMethod[m].total += amt
+      totalCollected += amt
+    })
+
+    const summary = {
+      count: todaysPayments.length,
+      total: totalCollected,
+      byMethod,
+    }
+
+    const summaryRows = Object.entries(byMethod).map(([m, d]) => {
+      return '<tr><td><strong>' + esc(m) + '</strong></td>' +
+        '<td style="text-align:center">' + d.count + '</td>' +
+        '<td style="text-align:right"><strong>' + esc(naira(d.total)) + '</strong></td></tr>'
+    }).join('')
+
+    const modalBody =
+      '<div class="card" style="margin-bottom:12px;background:#f8fafc">' +
+        '<div class="grid2x">' +
+          '<div><em>Date</em><strong>' + esc(fmtDate(Date.now())) + '</strong></div>' +
+          '<div><em>Cashier</em><strong>' + esc(currentStaffName()) + '</strong></div>' +
+          '<div><em>Transactions</em><strong>' + summary.count + ' receipts</strong></div>' +
+          '<div><em>Total Collected</em><strong style="color:#047857;font-size:1.15rem">' + esc(naira(totalCollected)) + '</strong></div>' +
+        '</div>' +
+      '</div>' +
+      '<table class="tbl" style="margin-bottom:14px"><thead><tr><th>Channel</th><th style="text-align:center">Txn Count</th><th style="text-align:right">Amount</th></tr></thead><tbody>' +
+      (summaryRows || '<tr><td colspan="3" class="mut" style="text-align:center">No payments logged today yet.</td></tr>') +
+      '</tbody></table>' +
+      '<div class="mrow" style="justify-content:flex-end">' +
+        '<button class="btn ghost" data-close>Close</button>' +
+        '<button class="btn" id="printReconReportBtn">🖨️ Print Shift Handover Report</button>' +
+      '</div>'
+
+    openModal('Daily Cashier Shift Reconciliation', modalBody)
+
+    const printBtn = document.getElementById('printReconReportBtn')
+    if (printBtn) {
+      printBtn.onclick = () => {
+        printDocument('Shift-Reconciliation-' + fmtDate(Date.now()), shiftReconciliationPrintHtml({
+          hospitalName: activeOrgName || 'Hospital',
+          cashierName: currentStaffName(),
+          dateStr: fmtDate(Date.now()),
+          summary,
+          payments: todaysPayments,
+        }))
+      }
+    }
+  }
+
+  // Invoice creation modal
   async function openInvoiceForm(presetPid = '') {
     let patientList = patients
     let preSelectedPatient = null
@@ -325,7 +586,7 @@ export default async function BillingView(app, params = {}) {
       label: p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key),
     }))
 
-    // ---- invoice line items (each line: item, qty, adjustable unit price) ----
+    // ---- invoice line items ----
     let lines = [{ item: itemOpts[0] || '', qty: 1, priceKobo: itemOpts[0] ? priceFor(prices, itemOpts[0]) : 0 }]
 
     function lineHtml(i) {
@@ -335,8 +596,8 @@ export default async function BillingView(app, params = {}) {
         '<option value="' + esc(it) + '"' + (it === lines[i].item ? ' selected' : '') + '>' + esc(it) + '</option>').join('')
       return '<tr data-line="' + i + '">' +
         '<td><select class="input" data-field="item" style="width:100%">' +
-        '<option value="">— type item —</option>' + itemOptions +
-        '</select><input class="input" data-field="item-text" type="text" placeholder="custom item…" style="width:100%;margin-top:4px;' + (!itemOpts.length || lines[i].item === '' ? '' : 'display:none') + '" /></td>' +
+        '<option value="">— type custom item —</option>' + itemOptions +
+        '</select><input class="input" data-field="item-text" type="text" placeholder="custom service or item…" style="width:100%;margin-top:4px;' + (!itemOpts.length || lines[i].item === '' ? '' : 'display:none') + '" /></td>' +
         '<td><input class="input" data-field="qty" type="number" min="1" value="' + esc(lines[i].qty) + '" style="width:70px" /></td>' +
         '<td><input class="input" data-field="price" type="number" step="0.01" min="0" value="' + esc((defaultPrice / 100).toFixed(2)) + '" style="width:110px" /></td>' +
         '<td style="white-space:nowrap">' + (lines.length > 1
@@ -353,7 +614,12 @@ export default async function BillingView(app, params = {}) {
         s.onchange = () => {
           const td = s.parentElement
           const txt = td.querySelector('input[data-field="item-text"]')
-          if (s.value === '') { lines[i].item = ''; txt.style.display = ''; txt.focus() } else { txt.style.display = 'none'; lines[i].item = s.value }
+          if (s.value === '') { lines[i].item = ''; txt.style.display = ''; txt.focus() }
+          else {
+            txt.style.display = 'none'
+            lines[i].item = s.value
+            lines[i].priceKobo = priceFor(prices, s.value)
+          }
           renderLines()
         }
       })
@@ -375,18 +641,21 @@ export default async function BillingView(app, params = {}) {
     const modalHtml =
       '<div class="fgrid">' +
       '<label class="fld full"><span>Patient</span>' +
-      '<input class="input" id="invPatientFilter" placeholder="Search patient by name, ID or mobile…" autocomplete="off" style="margin-bottom:6px">' +
+      '<input class="input" id="invPatientFilter" placeholder="Search patient by name, MRN or mobile…" autocomplete="off" style="margin-bottom:6px">' +
       '<select class="input" id="invPatientSel"><option value="">— Select patient —</option>' +
       patientOpts.map((o) => '<option value="' + esc(o.value) + '" data-label="' + esc(o.label) + '"' + (o.value === (pre ? pre.pid : '') ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') +
       '</select></label>' +
       '<label>Payer<select class="input" id="invPayer">' +
       payerOpts.map((o) => '<option value="' + esc(o.value) + '"' + (o.value === ((pre && pre.payer) || DEFAULT_PAYER) ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') +
       '</select></label>' +
+      '<label id="paCodeWrapper">Pre-authorization (PA) code<input class="input" id="invPaCode" placeholder="Required for HMO/NHIA claims…" /></label>' +
       '</div>' +
       '<div class="tblwrap" style="margin:10px 0"><table class="tbl"><thead><tr><th>Item / service</th><th>Qty</th><th>Unit price (₦)</th><th></th></tr></thead>' +
       '<tbody id="invLines"></tbody></table></div>' +
-      '<div class="mrow" style="margin-top:8px"><button class="btn ghost" id="invAddLine">+ Add line</button>' +
-      '<span class="mut">Total: <strong id="invTotal">₦0</strong></span></div>'
+      '<div class="mrow" style="margin-top:8px;justify-content:space-between;align-items:center">' +
+      '<button class="btn ghost sm" id="invAddLine">+ Add line</button>' +
+      '<div style="text-align:right"><span class="mut">Total: </span><strong id="invTotal" style="font-size:1.15rem">₦0</strong></div>' +
+      '</div>'
 
     openModal(fromConsult && pre ? 'New invoice — ' + pre.name : 'New invoice',
       modalHtml +
@@ -396,15 +665,13 @@ export default async function BillingView(app, params = {}) {
     renderLines()
     const totalEl = document.getElementById('invTotal')
     function updateTotal() {
-      const t = lines.reduce((sum, l) => sum + (Number(l.priceKobo || 0) * Number(l.qty || 1)), 0)
-      if (totalEl) totalEl.textContent = naira(t)
+      const tKobo = lines.reduce((sum, l) => sum + (Number(l.priceKobo || 0) * Number(l.qty || 1)), 0)
+      if (totalEl) totalEl.textContent = naira(tKobo / 100)
     }
     updateTotal()
-    // Recompute total whenever a line changes — wrap renderLines to also update total
     const origRenderLines = renderLines
     renderLines = () => { origRenderLines(); updateTotal() }
 
-    // Wire buttons AFTER openModal() has inserted the HTML into the DOM.
     const addLineBtn = document.getElementById('invAddLine')
     if (addLineBtn) {
       addLineBtn.onclick = () => {
@@ -413,13 +680,11 @@ export default async function BillingView(app, params = {}) {
       }
     }
 
-    // Patient searchable select (same filter-box + <select> pattern as the
-    // consultation "Start encounter" modal — no floating dropdown to cover
-    // the input). Selection is read from the select at save time.
     wireSearchableSelect(document.getElementById('invPatientFilter'), document.getElementById('invPatientSel'))
 
     document.getElementById('invSave').onclick = async () => {
       const payer = document.getElementById('invPayer').value || DEFAULT_PAYER
+      const paCode = document.getElementById('invPaCode')?.value?.trim() || ''
       const chosenPid = document.getElementById('invPatientSel').value
       const chosen = baseList.find((p) => p.pid === chosenPid) || (chosenPid && chosenPid === (selectedPatient && selectedPatient.pid) ? selectedPatient : null)
       if (!chosen) { toast('Select a patient.'); return }
@@ -436,14 +701,18 @@ export default async function BillingView(app, params = {}) {
           patient_id: patientId,
           patient_name: patientName,
           payer: payer,
+          pa_code: paCode,
           source_type: 'manual',
           source_id: '',
-          lines: validLines.map((l) => ({
-            label: l.item,
-            category: 'Service',
-            unit_price_kobo: Math.round(Number(l.priceKobo) || 0),
-            qty: Math.max(1, Math.round(Number(l.qty) || 1)),
-          })),
+          lines: validLines.map((l) => {
+            const priceMatch = prices.find((p) => p.name === l.item)
+            return {
+              label: l.item,
+              category: priceMatch?.category || 'Service',
+              unit_price_kobo: Math.round(Number(l.priceKobo) || 0),
+              qty: Math.max(1, Math.round(Number(l.qty) || 1)),
+            }
+          }),
         })
         closeModal()
         toast('Invoice created')
@@ -475,6 +744,7 @@ export default async function BillingView(app, params = {}) {
           await updatePayment(paymentId, {
             amount_kobo: result.amount_kobo,
             method: result.method || 'Cash',
+            reference: result.reference || '',
             notes: result.notes || '',
           })
           toast('Payment updated')
@@ -487,6 +757,7 @@ export default async function BillingView(app, params = {}) {
       existing: {
         amount: currentAmount,
         method: pay.method || 'Cash',
+        reference: pay.reference || '',
         notes: pay.notes || '',
       },
     })
@@ -543,14 +814,9 @@ export default async function BillingView(app, params = {}) {
     unsubs = []
   }
 
-  // Live updates for invoices/payments. The patient picker stays one-shot
-  // (registry is never live); a brand-new patient may only appear after reload.
   function subscribeLive() {
     teardownListeners()
     if (!watchedOrg) return
-    // The live feed only ever knows about the newest slice of the ledger. Once
-    // the user has scrolled past it, leave the accumulated list alone rather
-    // than truncating it back to one chunk.
     if (cursor != null) return
     unsubs.push(
       subscribeOrgInvoices(watchedOrg,
@@ -574,8 +840,6 @@ export default async function BillingView(app, params = {}) {
     unsubAuth()
   })
 
-  // The app does not re-route on org change, so rebuild the listener when the
-  // active hospital switches.
   const unsubAuth = authStore.subscribe((s) => {
     if (s.activeOrg === watchedOrg) return
     watchedOrg = s.activeOrg

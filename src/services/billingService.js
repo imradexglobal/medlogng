@@ -33,14 +33,16 @@ export function myBillingCaps() {
 function toInvoiceRow(r) {
   const total = (r.total_kobo || 0) / 100  // convert kobo to naira for display
   const paid = (r.paid_kobo || 0) / 100
-  const outstanding = total - paid
+  const outstanding = Math.max(0, total - paid)
   return {
     id: r.id,
     invoiceId: r.invoice_id || r.id,
     patientId: r.patient_id,
     patientName: r.patient_name || '',
     payer: r.payer || 'Self-pay',
+    pa_code: r.pa_code || '',
     items: r.items || [],
+    lines: Array.isArray(r.lines) ? r.lines : [],
     total: total,  // in naira (kobo-safe)
     paid: paid,    // in naira
     outstanding: outstanding,  // in naira
@@ -64,8 +66,8 @@ function mapInvoiceDoc(d) {
 // Client-side filter + sort shared by listOrgInvoices and
 // subscribeOrgInvoices so live rows match one-shot rows exactly.
 function applyInvoiceFilters(rows, filters = {}) {
-  if (filters.status) rows = rows.filter((r) => r.status === filters.status)
-  if (filters.payer) rows = rows.filter((r) => r.payer === filters.payer)
+  if (filters.status && filters.status !== 'all') rows = rows.filter((r) => r.status === filters.status)
+  if (filters.payer && filters.payer !== 'all') rows = rows.filter((r) => r.payer === filters.payer)
   rows.sort((a, b) => b.createdAt - a.createdAt)
   return rows
 }
@@ -90,7 +92,6 @@ export async function listOrgInvoicesPage(orgId, { pageSize = INVOICES_PAGE, cur
   const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
   return { rows: applyInvoiceFilters(docs.map(mapInvoiceDoc), filters), hasMore, cursor: next }
 }
-
 
 // Live query: same org scope + row shape as listOrgInvoices, but bounded to
 // the 100 most recent (orderBy+limit needs the composite index in
@@ -134,6 +135,19 @@ export async function getInvoice(iid) {
   return toInvoiceRow({ ...snap.data(), id: snap.id })
 }
 
+// Payments recorded against a specific invoice
+export async function listInvoicePayments(iid) {
+  if (!iid) return []
+  const snap = await getDocs(query(
+    collection(db, PAYMENTS),
+    where('invoice_id', '==', iid),
+  ))
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => {
+    const ms = (t) => (t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : 0))
+    return ms(b.paid_at) - ms(a.paid_at)
+  })
+}
+
 // ---- create invoice -------------------------------------------------------
 export async function createInvoice(input) {
   const { activeOrg, user } = authStore.getState()
@@ -147,16 +161,6 @@ export async function createInvoice(input) {
   if (!pid) throw new Error('Patient is required.')
   if (!input.item || !input.qty) throw new Error('Item and quantity are required.')
 
-  // Verify patient exists in this organization
-  try {
-    const invoices = await listPatientInvoices(pid) // actually listOrgPatients
-    // Just proceed - Firestore rules will validate
-  } catch (e) {
-    console.warn('[billing] patient verification error:', e)
-  }
-
-  // Unit price comes from the caller (settings price or invoice-adjusted value),
-  // in kobo. Defaults to 0 when not supplied.
   const priceKobo = Math.round(Number(input.unit_price_kobo || 0) || 0)
   const qty = Math.max(1, Math.round(Number(input.qty) || 1))
   const totalKobo = priceKobo * qty
@@ -170,7 +174,14 @@ export async function createInvoice(input) {
     patient_name: input.patient_name || '',
     organization_id: activeOrg,
     payer: input.payer || 'Self-pay',
+    pa_code: String(input.pa_code || '').trim(),
     items: itemsText,
+    lines: [{
+      label: input.item,
+      category: 'Service',
+      unit_price_kobo: priceKobo,
+      qty,
+    }],
     total_kobo: totalKobo,  // stored in kobo for precision
     paid_kobo: 0,  // initially 0
     status: 'unpaid',
@@ -193,12 +204,7 @@ export async function createInvoice(input) {
   return { id: invoiceId, ...invoice }
 }
 
-// ---- create invoice from explicit lines (LIMS integration) ------------------
-// Unlike createInvoice (fixed demo catalogue), this takes pre-priced lines:
-//   lines: [{ label, category, unit_price_kobo, qty, ref_type?, ref_id? }]
-// The legacy `items` TEXT field is still written (join of labels) so
-// BillingView and every existing reader keep working unchanged; the
-// structured `lines` array is additive.
+// ---- create invoice from explicit lines (LIMS / Pharmacy / Manual integration) --
 export async function createInvoiceFromLines(input) {
   const { activeOrg, user } = authStore.getState()
   if (!activeOrg) throw new Error('No hospital selected.')
@@ -221,7 +227,7 @@ export async function createInvoiceFromLines(input) {
     if (unit < 0) throw new Error('Line price cannot be negative: ' + label)
     totalKobo += unit * qty
     lines.push({
-      label, category: String(l.category || '').trim(),
+      label, category: String(l.category || 'Service').trim(),
       unit_price_kobo: unit, qty,
       ref_type: String(l.ref_type || '').trim(), ref_id: String(l.ref_id || '').trim(),
     })
@@ -235,6 +241,7 @@ export async function createInvoiceFromLines(input) {
     patient_name: input.patient_name || '',
     organization_id: activeOrg,
     payer: input.payer || 'Self-pay',
+    pa_code: String(input.pa_code || '').trim(),
     // Legacy TEXT summary (BillingView renders this as-is).
     items: lines.map((l) => l.label + (l.qty > 1 ? ' ×' + l.qty : '') + ' · ₦' + (l.unit_price_kobo / 100).toLocaleString('en-NG')).join('; '),
     lines,
@@ -279,6 +286,7 @@ export async function createInvoiceForLabOrder(labOrder, opts = {}) {
     admission_session_id: labOrder.admissionSessionId || '',
     encounter_id: labOrder.encounterId || '',
     payer: opts.payer,
+    pa_code: opts.pa_code || '',
     source_type: 'lab_order',
     source_id: labOrder.id,
     lines: billable.map((it) => ({
@@ -333,13 +341,17 @@ export async function recordPayment(input) {
 
   // Record the payment transaction
   const paymentId = doc(collection(db, PAYMENTS)).id
+  const receiptNumber = 'REC-' + paymentId.slice(0, 8).toUpperCase()
   await setDoc(doc(db, PAYMENTS, paymentId), {
     invoice_id: iid,
     invoice_number: iid,
+    patient_id: invoice.patientId || '',
+    patient_name: invoice.patientName || '',
     amount_kobo: amountKobo,
     amount_naira: amountKobo / 100,
     method: input.method || 'Cash',
-    receipt_number: 'REC-' + paymentId.slice(0, 8).toUpperCase(),
+    reference: input.reference || '',
+    receipt_number: receiptNumber,
     paid_by: currentStaffName(),
     paid_at: serverTimestamp(),
     organization_id: activeOrg,
@@ -347,7 +359,7 @@ export async function recordPayment(input) {
   })
 
   try {
-    await logAudit({ action: 'payment.recorded', organizationId: activeOrg, patientId: invoice.patientId, details: 'Payment ' + paymentId + ' - ₦' + (amountKobo / 100).toLocaleString('en-NG') })
+    await logAudit({ action: 'payment.recorded', organizationId: activeOrg, patientId: invoice.patientId, details: 'Payment ' + paymentId + ' (' + receiptNumber + ') - ₦' + (amountKobo / 100).toLocaleString('en-NG') })
   } catch (e) {
     console.warn('[billing] audit append failed:', e?.message)
   }
@@ -355,13 +367,17 @@ export async function recordPayment(input) {
   return {
     invoiceId: iid,
     paymentId: paymentId,
+    receiptNumber: receiptNumber,
+    receipt_number: receiptNumber,
+    reference: input.reference || '',
+    method: input.method || 'Cash',
     amount: amountKobo / 100,  // in naira
-    newOutstanding: outstandingKobo / 100,
+    newOutstanding: Math.max(0, outstandingKobo / 100),
     status: status,
   }
 }
 
-// ---- list payments for an org --------------------------------------------
+// ---- list payments for an org (unbounded for reporting) --------------------
 export async function listOrgPayments(orgId) {
   if (!orgId) return []
   const snap = await getDocs(query(
@@ -374,11 +390,24 @@ export async function listOrgPayments(orgId) {
   })
 }
 
+// ---- paginated payments for org --------------------------------------------
+export const PAYMENTS_PAGE = 30
+export async function listOrgPaymentsPage(orgId, { pageSize = PAYMENTS_PAGE, cursor = null } = {}) {
+  const { runChunk } = await import('./pagination.js')
+  const base = query(
+    collection(db, PAYMENTS),
+    where('organization_id', '==', orgId),
+    orderBy('paid_at', 'desc'),
+  )
+  const { docs, hasMore, cursor: next } = await runChunk(base, { pageSize, cursor })
+  return { rows: docs.map((d) => ({ id: d.id, ...d.data() })), hasMore, cursor: next }
+}
+
 // ---- edit a previously saved payment -------------------------------------
 // Adjusts the invoice's paid_kobo by the difference and updates the payment
-// record (amount, method, notes). The original payment is never deleted — the
+// record (amount, method, reference, notes). The original payment is never deleted — the
 // ledger stays intact because the invoice total is recomputed from the delta.
-export async function updatePayment(paymentId, { amount_kobo, method, notes }) {
+export async function updatePayment(paymentId, { amount_kobo, method, reference, notes }) {
   const { activeOrg, user } = authStore.getState()
   if (!activeOrg) throw new Error('No hospital selected.')
   const caps = myBillingCaps()
@@ -425,6 +454,7 @@ export async function updatePayment(paymentId, { amount_kobo, method, notes }) {
     amount_kobo: newAmount,
     amount_naira: newAmount / 100,
     method: method || payment.method || 'Cash',
+    reference: reference != null ? reference : (payment.reference || ''),
     notes: notes != null ? notes : (payment.notes || ''),
     updated_at: serverTimestamp(),
   })
@@ -435,20 +465,5 @@ export async function updatePayment(paymentId, { amount_kobo, method, notes }) {
     console.warn('[billing] audit append failed:', e?.message)
   }
 
-  return { invoiceId: payment.invoice_id, paymentId, amount: newAmount / 100, newOutstanding: outstandingKobo / 100, status }
-}
-
-// ---- helper: convert timestamp to millis ---
-function serversTimestampToMillis(ts) {
-  if (!ts) return null
-  if (typeof ts === 'number') return ts
-  if (ts.toMillis) return ts.toMillis()
-  if (ts._seconds !== undefined) return ts._seconds * 1000
-  return Date.parse(String(ts))
-}
-
-// ---- naira formatting (kobo-safe) ---------------------------------------
-function naira(koboOrNaira) {
-  const n = Number(koboOrNaira || 0)
-  return '₦' + n.toLocaleString('en-NG')
+  return { invoiceId: payment.invoice_id, paymentId, amount: newAmount / 100, newOutstanding: Math.max(0, outstandingKobo / 100), status }
 }

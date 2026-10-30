@@ -5,6 +5,7 @@ import {
   listOrgDrugs, listOrgRequests, dispense, reverseDispenseIssue, myPharmacyCaps,
 } from '../services/pharmacyService.js'
 import { createInvoiceFromLines } from '../services/billingService.js'
+import { getPatient } from '../services/patientService.js'
 import * as R from '../features/pharmacy/requests.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { friendlyWriteError } from '../utils/errors.js'
@@ -166,6 +167,8 @@ export async function PharmacyRequestView(app, params = {}) {
               (p ? p.outstanding : '?') + ' still owed')
           // Raise a billing invoice for the dispensed lines so the patient is charged.
           try {
+            const pat = await getPatient(req.patientId).catch(() => null)
+            const patientPayer = (pat && pat.payer) ? pat.payer : 'Self-pay'
             const lines = issued.map((i) => {
               const drug = drugs.find((d) => d.id === i.drugId)
               return {
@@ -178,12 +181,12 @@ export async function PharmacyRequestView(app, params = {}) {
             await createInvoiceFromLines({
               patient_id: req.patientId,
               patient_name: req.patientName,
-              payer: 'Self-pay',
+              payer: patientPayer,
               source_type: 'dispense',
               source_id: res.dispensationId,
               lines,
             })
-            toast('Invoice raised for ' + req.patientName)
+            toast('Invoice raised for ' + req.patientName + ' (' + patientPayer + ')')
           } catch (e) {
             // Invoice failure must not roll back a successful dispense.
             console.warn('[pharmacy] invoice not raised:', e?.message)

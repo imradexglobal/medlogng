@@ -38,6 +38,7 @@ import { printDocument } from '../lib/print.js'
 import { labRequestHtml, labResultHtml, imagingRequestHtml, imagingResultHtml } from '../lib/labPrintTemplates.js'
 import { listPrices, catalogueItems, priceFor } from '../services/priceCatalogueService.js'
 import { dischargeSummaryHtml } from '../lib/dischargeSummaryHtml.js'
+import { inpatientStatementHtml } from '../lib/billingPrint.js'
 import { staffLabel, currentStaffName } from '../lib/staffName.js'
 
 export async function AdmissionWorkspaceView(app, params = {}) {
@@ -320,11 +321,22 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<td style="white-space:nowrap">' + badge(inv.status || 'unpaid') + '</td>' +
         '<td class="mut">' + fmtDate(inv.created_at) + '</td></tr>'
     }
+    const totalBilled = (invoices || []).reduce((s, i) => s + (Number(i.total_kobo || 0) / 100), 0)
+    const totalPaid = (invoices || []).reduce((s, i) => s + (Number(i.paid_kobo || 0) / 100), 0)
+    const balDue = totalBilled - totalPaid
     const invRows = (invoices || []).map(invRow).join('')
     const billingCard =
       '<div class="card">' +
-        '<div class="card-head"><h3>Billing</h3>' +
-          (canBill ? '<button class="btn sm" id="addInvBtn">+ Add charge</button>' : '') + '</div>' +
+        '<div class="card-head"><h3>Inpatient Billing</h3>' +
+          '<div style="display:flex;gap:6px">' +
+            '<button class="btn ghost sm" id="printInpatientStatementBtn">🖨️ Statement of Account</button>' +
+            (canBill ? '<button class="btn sm" id="addInvBtn">+ Add charge</button>' : '') +
+          '</div></div>' +
+        '<div class="grid3" style="margin-bottom:12px">' +
+          '<div class="stat"><em>Billed</em><strong>₦' + totalBilled.toLocaleString('en-NG') + '</strong></div>' +
+          '<div class="stat"><em>Paid</em><strong style="color:#047857">₦' + totalPaid.toLocaleString('en-NG') + '</strong></div>' +
+          '<div class="stat"><em>Balance</em><strong style="color:' + (balDue > 0 ? '#b91c1c' : '#047857') + '">₦' + balDue.toLocaleString('en-NG') + '</strong></div>' +
+        '</div>' +
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>Item</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead><tbody>' +
           (invRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No charges.</td></tr>') + '</tbody></table></div>' +
       '</div>'
@@ -452,6 +464,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
 
     const printDischargeBtn = document.getElementById('printDischargeBtn')
     if (printDischargeBtn) printDischargeBtn.onclick = printDischargeSummary
+    const printStmtBtn = document.getElementById('printInpatientStatementBtn')
+    if (printStmtBtn) printStmtBtn.onclick = printInpatientStatement
   }
 
   // ---------------------------------------------------------------
@@ -898,17 +912,44 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   //  Discharge
   // ---------------------------------------------------------------
   function openDischargeModal() {
+    const outstandingKobo = (invoices || []).reduce((sum, inv) => {
+      const tot = Number(inv.total_kobo || 0)
+      const pd = Number(inv.paid_kobo || 0)
+      return sum + Math.max(0, tot - pd)
+    }, 0)
+    const outstandingNaira = outstandingKobo / 100
+
+    const fields = [
+      { name: 'reason', label: 'Discharge reason *', required: true, full: true, placeholder: 'e.g. Recovered' },
+      { name: 'notes', label: 'Discharge notes', full: true, placeholder: 'Follow-up instructions…' },
+      { name: 'discharge_type', label: 'Discharge type', type: 'select', options: DISCHARGE_TYPES.map((t) => ({ value: t.value, label: t.label })), value: 'discharged', required: true },
+    ]
+
+    if (outstandingNaira > 0) {
+      fields.push({
+        name: 'clearance',
+        label: '⚠️ Financial clearance warning: Patient has ₦' + outstandingNaira.toLocaleString('en-NG') + ' outstanding balance!',
+        type: 'select',
+        options: [
+          'Cleared: Payment verified with Cashier / Billing Desk',
+          'Promissory: Signed promissory note / payment plan',
+          'Waiver: Administrative waiver / Indigent patient',
+        ],
+        required: true,
+        full: true,
+      })
+    }
+
     formModal({
       title: 'Discharge — ' + admission.patientName,
       submitLabel: 'Discharge patient',
-      fields: [
-        { name: 'reason', label: 'Discharge reason *', required: true, full: true, placeholder: 'e.g. Recovered' },
-        { name: 'notes', label: 'Discharge notes', full: true, placeholder: 'Follow-up instructions…' },
-        { name: 'discharge_type', label: 'Discharge type', type: 'select', options: DISCHARGE_TYPES.map((t) => ({ value: t.value, label: t.label })), value: 'discharged', required: true },
-      ],
+      fields,
       onSubmit: async (v) => {
         try {
-          await dischargeAdmission(sid, { reason: v.reason, notes: v.notes, dischargeType: v.discharge_type })
+          const notesWithClearance = v.clearance
+            ? (v.notes ? v.notes + ' | ' : '') + '[Financial clearance: ' + v.clearance + ']'
+            : (v.notes || '')
+          await dischargeAdmission(sid, { reason: v.reason, notes: notesWithClearance, dischargeType: v.discharge_type })
         } catch (e) {
           throw new Error(friendlyWriteError(e))
         }
@@ -917,6 +958,20 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         reload()
       },
     })
+  }
+
+  async function printInpatientStatement() {
+    try {
+      printDocument('Inpatient statement', inpatientStatementHtml({
+        hospitalName: authStore.getState().activeOrgName || 'Hospital',
+        admission,
+        invoices,
+        payments: [],
+        generatedBy: currentStaffName(),
+      }))
+    } catch (e) {
+      toast('Could not print inpatient statement: ' + friendlyWriteError(e))
+    }
   }
 
   async function printDischargeSummary() {
