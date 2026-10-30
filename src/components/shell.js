@@ -377,6 +377,13 @@ export function demoFormModal(title, fieldsHtml, saveLabel = 'Save (UI preview)'
 export function wireSearchableSelect(box, sel) {
   if (!box || !sel) return
   const options = Array.from(sel.options)
+
+  function fireChange() {
+    // Dispatch synthetic change so listeners (onchange) always fire,
+    // even when the selected index was already pointing at that option.
+    sel.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
   box.oninput = () => {
     const q = box.value.trim().toLowerCase()
     const digits = q.replace(/\D/g, '')
@@ -385,13 +392,32 @@ export function wireSearchableSelect(box, sel) {
       o.hidden = !(!q
         || (/[0-9]/.test(q) ? label.replace(/\D/g, '').includes(digits) : label.includes(q)))
     }
-    // Never leave a hidden option selected — the clerk has to be able to see
-    // what they are about to submit.
+    // Auto-advance to the first visible option when the current one is hidden.
     if (sel.selectedOptions[0] && sel.selectedOptions[0].hidden) {
       const first = options.find((o) => !o.hidden)
       sel.value = first ? first.value : ''
+      fireChange()
     }
   }
+
+  // Ensure selecting the very first real option always triggers onchange,
+  // even if it was the browser's pre-selected default.
+  sel.addEventListener('mousedown', () => {
+    sel._beforeValue = sel.value
+  })
+  sel.addEventListener('change', () => {
+    sel._beforeValue = sel.value
+  })
+  // Also handle click-to-same-option (no 'change' would fire natively).
+  sel.addEventListener('click', () => {
+    if (sel.value && sel.value !== '' && sel.value !== sel._beforeValue) {
+      sel._beforeValue = sel.value
+      fireChange()
+    } else if (sel.value && sel.value !== '') {
+      // Value is the same but user explicitly clicked — still fire.
+      fireChange()
+    }
+  })
 }
 
 // Real form modal: collects named fields, shows errors inline, never claims a

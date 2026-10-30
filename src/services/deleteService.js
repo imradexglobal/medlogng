@@ -19,7 +19,7 @@
 import { deleteDoc, doc, getDoc, getDocs, collection, query, where, db } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { logAudit } from './adminService.js'
-import { can } from '../features/admin/roles.js'
+import { can, isHospitalAdmin } from '../features/admin/roles.js'
 import { myActiveMembership } from './authService.js'
 
 export const DELETE_COLLECTIONS = {
@@ -209,11 +209,12 @@ export async function deleteImagingOrder(iid) {
 // ---- drugs (stock lots) -----------------------------------------------------
 // Zero stock only — anything else must go through a stock adjustment so the
 // movement ledger stays balanced.
-export async function deleteDrug(did) {
+export async function deleteDrug(did, { force = false } = {}) {
   requireDeleteCap()
   const d = await loadOwned(DELETE_COLLECTIONS.drug, did, 'This medicine')
   const stock = Number(d.stock) || 0
-  if (stock > 0) {
+  const isSuperAdmin = isHospitalAdmin(myActiveMembership())
+  if (stock > 0 && !(isSuperAdmin && force)) {
     throw new Error('This medicine still has ' + stock + ' unit(s) in stock — correct the stock to zero first so the movement ledger stays balanced.')
   }
   return runDelete(DELETE_COLLECTIONS.drug, did, {
@@ -223,12 +224,13 @@ export async function deleteDrug(did) {
 
 // ---- medication requests ----------------------------------------------------
 // Nothing dispensed at all — a partly issued script is the pharmacy's record.
-export async function deleteMedicationRequest(rid) {
+export async function deleteMedicationRequest(rid, { force = false } = {}) {
   requireDeleteCap()
   const r = await loadOwned(DELETE_COLLECTIONS.medicationRequest, rid, 'This prescription')
   const items = Array.isArray(r.items) ? r.items : []
   const issued = items.reduce((s, it) => s + (Number(it.dispensed_qty) || 0), 0)
-  if (issued > 0) {
+  const isSuperAdmin = isHospitalAdmin(myActiveMembership())
+  if (issued > 0 && !(isSuperAdmin && force)) {
     throw new Error(issued + ' unit(s) have already been dispensed on this script — a partly issued prescription cannot be deleted.')
   }
   return runDelete(DELETE_COLLECTIONS.medicationRequest, rid, {

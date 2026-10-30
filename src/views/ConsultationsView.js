@@ -314,7 +314,10 @@ export async function ConsultationsView(app, params = {}) {
     fillIndex.reset()
     more.reset()
     teardownListeners()
-    loadMore().then(subscribeLive)
+    loadMore().then(subscribeLive).catch((e) => {
+      console.warn('[consultations] initial load failed:', e?.message || e)
+      toast('Could not load consultations — check your connection')
+    })
   }
 
   // The bed currently held by an admission linked to this encounter, if any.

@@ -52,6 +52,35 @@ export function openPaymentModal({ invoice, onSuccess, onClose, editing = false,
           })
           closeModal()
           toast('Payment recorded — ' + result.status + ' (' + result.receiptNumber + ')')
+
+          // Automatically print official receipt upon successful payment
+          try {
+            const orgName = authStore.getState().activeOrgName || 'Hospital'
+            const staffName = authStore.getState().user?.displayName || 'Cashier'
+            const receiptHtml = receiptPrintHtml({
+              hospitalName: orgName,
+              payment: {
+                receipt_number: result.receiptNumber,
+                paid_at: Date.now(),
+                amount_kobo: Math.round(amount * 100),
+                method: v.method || 'Cash',
+                reference: (v.reference || '').trim(),
+                notes: (v.notes || '').trim(),
+                paid_by: staffName,
+              },
+              invoice: {
+                invoiceId: invoiceId,
+                patientName: patientName,
+                payer: invoice.payer || 'Self-pay',
+                outstanding: result.newOutstanding,
+              },
+              receivedBy: staffName,
+            })
+            printDocument('Receipt-' + result.receiptNumber, receiptHtml)
+          } catch (printErr) {
+            console.warn('[payment] receipt auto-print failed:', printErr?.message)
+          }
+
           if (onSuccess) onSuccess(result)
         } else {
           closeModal()

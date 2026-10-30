@@ -13,7 +13,10 @@ import { esc } from '../utils/sanitize.js'
 import { confirmDelete } from './deleteUi.js'
 import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
-import { deleteDrug } from '../services/deleteService.js'
+import { deleteDrug, deleteMedicationRequest } from '../services/deleteService.js'
+import { isHospitalAdmin } from '../features/admin/roles.js'
+import { myActiveMembership } from '../services/authService.js'
+import { openWalkInSaleModal } from '../components/PharmacyWalkInModal.js'
 import { navigate } from '../router.js'
 import { staffLabel } from '../lib/staffName.js'
 
@@ -66,6 +69,7 @@ shell(app, {
     subtitle: 'Catalogue · batches · stock · dispensing',
     actions:
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>' +
+      (caps.canDispense ? '<button class="btn" id="walkInSaleBtn" style="background:#0d9488;color:#fff">🛒 Walk-in Sale</button>' : '') +
       (caps.canDispense ? '<button class="btn" id="dispenseBtn">Dispense →</button>' : '') +
       (caps.canManageInventory ? '<button class="btn ghost" id="receiveBtn">Receive batch</button>' : '') +
       (caps.canManageInventory ? '<button class="btn" id="addDrugBtn">+ Add item</button>' : ''),
@@ -155,9 +159,10 @@ shell(app, {
         (r.lineCount > 2 ? ' +' + (r.lineCount - 2) + ' more' : '') + '</td>' +
       '<td>' + esc(r.dispensed) + ' / ' + esc(r.total) + '</td>' +
       '<td style="white-space:nowrap">' + statusBadge(r.status) +
-        kebabCell({ rowId: r.id, items: (caps.canDispense
-          ? [{ label: 'Open →', dataAction: 'open' }]
-          : []) }) +
+        kebabCell({ rowId: r.id, items: [
+          ...(caps.canDispense ? [{ label: 'Open →', dataAction: 'open' }] : []),
+          ...(isHospitalAdmin(myActiveMembership()) && canDeleteRecords() ? [{ label: 'Delete (Admin)', tone: 'danger', dataAction: 'delete-req' }] : []),
+        ] }) +
       '</td></tr>'
     ).join('')
     return '<p class="eyebrow" style="margin:18px 0 8px">Recently dispensed</p>' +
@@ -187,9 +192,10 @@ shell(app, {
         '<td>' + r.lineCount + '</td>' +
         '<td>' + (r.total ? esc(r.dispensed) + ' / ' + esc(r.total) : '—') + '</td>' +
         '<td>' + statusBadge(r.status) + (blocked ? ' <span class="pill bad">short</span>' : '') + '</td>' +
-        '<td>' + kebabCell({ rowId: r.id, items: (caps.canDispense && owed > 0
-          ? [{ label: 'Open →', dataAction: 'open' }]
-          : []) }) + '</td></tr>'
+        '<td>' + kebabCell({ rowId: r.id, items: [
+          ...(caps.canDispense && owed > 0 ? [{ label: 'Open →', dataAction: 'open' }] : (caps.canDispense ? [{ label: 'View →', dataAction: 'open' }] : [])),
+          ...(isHospitalAdmin(myActiveMembership()) && canDeleteRecords() ? [{ label: 'Delete (Admin)', tone: 'danger', dataAction: 'delete-req' }] : []),
+        ] }) + '</td></tr>'
     }).join('')
     pane.innerHTML =
       (caps.canManageInventory
@@ -209,6 +215,10 @@ shell(app, {
     if (nb) nb.onclick = () => navigate('/pharmacy/receive')
     wireKebabs(pane, (rowId, action) => {
       if (action === 'open') navigate('/pharmacy/requests/' + rowId)
+      if (action === 'delete-req') {
+        const r = requestBase.find((x) => x.id === rowId) || medicationRequests.find((x) => x.id === rowId)
+        confirmDelete('prescription for ' + (r?.patientName || 'patient'), () => deleteMedicationRequest(rowId, { force: true }), load)
+      }
     })
   }
 
@@ -238,7 +248,7 @@ shell(app, {
       if (action === 'edit') navigate('/pharmacy/drugs/' + rowId)
       if (action === 'delete') {
         const drug = drugs.find((d) => d.id === rowId)
-        confirmDelete('medicine ' + (drug ? drug.name : 'this item'), () => deleteDrug(rowId), load)
+        confirmDelete('medicine ' + (drug ? drug.name : 'this item'), () => deleteDrug(rowId, { force: true }), load)
       }
     })
   }
@@ -289,6 +299,10 @@ shell(app, {
   if (addBtn) addBtn.onclick = () => navigate('/pharmacy/drugs/new')
   const receiveBtn = document.getElementById('receiveBtn')
   if (receiveBtn) receiveBtn.onclick = () => navigate('/pharmacy/receive')
+  const walkInBtn = document.getElementById('walkInSaleBtn')
+  if (walkInBtn) {
+    walkInBtn.onclick = () => openWalkInSaleModal({ drugs, onSuccess: load })
+  }
   const dispenseBtn = document.getElementById('dispenseBtn')
   if (dispenseBtn) {
     dispenseBtn.onclick = () => {

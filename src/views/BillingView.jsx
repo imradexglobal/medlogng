@@ -151,7 +151,10 @@ export default async function BillingView(app, params = {}) {
     teardownListeners()
     loadPrices()
     loadPayments()
-    loadMore().then(subscribeLive)
+    loadMore().then(subscribeLive).catch((e) => {
+      console.warn('[billing] load failed:', e?.message || e)
+      toast('Could not load invoices — check your connection')
+    })
   }
 
   function getFilteredInvoices() {
@@ -415,8 +418,11 @@ export default async function BillingView(app, params = {}) {
 
     const rows = list.map((p) => {
       const priceNaira = (Number(p.price_kobo) || 0) / 100
-      return '<tr><td><strong>' + esc(p.name) + '</strong></td><td><span class="pill neutral">' + esc(p.category || 'Service') + '</span></td>' +
-        '<td><strong>' + esc(naira(priceNaira)) + '</strong></td>' +
+      const isZeroPrice = priceNaira === 0
+      return '<tr' + (isZeroPrice ? ' style="background:#fef9c3"' : '') + '><td><strong>' + esc(p.name) + '</strong>' +
+        (isZeroPrice ? ' <span class="pill warn" title="This item has a zero price — please update it">₦0 ⚠</span>' : '') +
+        '</td><td><span class="pill neutral">' + esc(p.category || 'Service') + '</span></td>' +
+        '<td><strong>' + (isZeroPrice ? '<span style="color:#b45309">₦0.00 — set price</span>' : esc(naira(priceNaira))) + '</strong></td>' +
         '<td>' + (canManage
           ? kebabCell({ rowId: p.id, items: [
               { label: 'Edit price', dataAction: 'edit-price' },
@@ -789,7 +795,7 @@ export default async function BillingView(app, params = {}) {
       const cat = document.getElementById('priceCat').value
       const amt = Number(document.getElementById('priceAmt').value)
       if (!name) { toast('Item name is required.'); return }
-      if (!Number.isFinite(amt) || amt < 0) { toast('Enter a valid price.'); return }
+      if (!Number.isFinite(amt) || amt <= 0) { toast('Price must be greater than ₦0. Enter the actual amount charged.'); return }
       try {
         if (id) await savePrice(activeOrg, { id, name, category: cat, priceKobo: Math.round(amt * 100) })
         else await savePrice(activeOrg, { name, category: cat, priceKobo: Math.round(amt * 100) })

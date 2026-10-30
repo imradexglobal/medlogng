@@ -8,7 +8,7 @@ import { authStore } from '../store/authStore.js'
 import {
   getLabOrder, collectItems, receiveItems, rejectItem, recollectItem,
   cancelItem, validateItem, releaseItem, releaseOrder, updateLabStatus,
-  myLabCaps,
+  myLabCaps, orderHasPayment,
 } from '../services/laboratoryService.js'
 import { getLabSettings } from '../services/labCatalogueService.js'
 import { createInvoiceForLabOrder } from '../services/billingService.js'
@@ -58,6 +58,7 @@ export async function LabOrderView(app, params = {}) {
   let order = null
   let labSettings = null
   let loadError = null
+  let orderPaid = false
 
   shell(app, {
     active: '/laboratory',
@@ -74,6 +75,7 @@ export async function LabOrderView(app, params = {}) {
       order = await getLabOrder(lid)
       loadError = null
       if (!order) loadError = new Error('That lab order no longer exists.')
+    if (order) { try { orderPaid = await orderHasPayment(lid) } catch { orderPaid = false } }
     } catch (e) {
       loadError = e
     }
@@ -103,10 +105,23 @@ export async function LabOrderView(app, params = {}) {
         bits.push(btn('reject', 'Reject / recollect', 'ghost sm'))
       }
     } else if (it.status === 'received') {
-      if (caps.canResult) bits.push('<a class="btn sm" href="#/laboratory/orders/' + esc(lid) + '/items/' + esc(it.item_id) + '">Enter result</a>')
+      if (caps.canResult) {
+        if (orderPaid) {
+          bits.push('<a class="btn sm" href="#/laboratory/orders/' + esc(lid) + '/items/' + esc(it.item_id) + '">Enter result</a>')
+        } else {
+          bits.push('<button class="btn sm" disabled title="Record a payment first before entering results" style="opacity:.5;cursor:not-allowed">Enter result 🔒</button>' +
+            '<a class="btn ghost sm" href="#/billing" title="Go to billing to record payment">Pay first →</a>')
+        }
+      }
       if (caps.canCollect) bits.push(btn('reject', 'Reject', 'ghost sm'))
     } else if (it.status === 'result_entered') {
-      if (caps.canResult) bits.push('<a class="btn ghost sm" href="#/laboratory/orders/' + esc(lid) + '/items/' + esc(it.item_id) + '">Edit result</a>')
+      if (caps.canResult) {
+        if (orderPaid) {
+          bits.push('<a class="btn ghost sm" href="#/laboratory/orders/' + esc(lid) + '/items/' + esc(it.item_id) + '">Edit result</a>')
+        } else {
+          bits.push('<button class="btn ghost sm" disabled title="Record a payment first" style="opacity:.5">Edit result 🔒</button>')
+        }
+      }
       if (caps.canVerify) bits.push(btn('validate', 'Validate', 'sm'))
     } else if (it.status === 'validated') {
       if (caps.canVerify) bits.push(btn('release', 'Release', 'sm'))
@@ -147,6 +162,7 @@ export async function LabOrderView(app, params = {}) {
       (order.billingStatus === 'invoiced' ? ' <span class="pill ok">Invoiced</span>' : ' <span class="pill warn">Unbilled</span>') +
       '<div class="mut" style="font-size:.8rem;margin-top:4px">' + fmtDate(order.orderedAt) + (staffLabel(order.orderedByName) ? ' · ' + esc(staffLabel(order.orderedByName)) : '') + '</div>' +
       '</div></div>' +
+      (!orderPaid ? '<div style="background:#fef9c3;border:1px solid #ca8a04;border-radius:6px;padding:10px 14px;margin:10px 0 0;font-size:.87rem"><strong>⚠ Payment not yet recorded</strong> — result entry is locked until a payment is made. <a href="#/billing">Go to Billing →</a></div>' : '') +
       (order.note ? '<p style="margin:10px 0 0"><span class="mut">Clinical note:</span> ' + esc(order.note) + '</p>' : '') +
       '<div class="mrow" style="margin-top:12px">' +
       '<button class="btn ghost" id="printReqBtn">🖨 Request slip</button>' +
@@ -167,7 +183,7 @@ export async function LabOrderView(app, params = {}) {
         (it.accession_no ? '<div class="mut" style="font-size:.78rem">Accession ' + esc(it.accession_no) + '</div>' : '') +
         (it.specimen_type ? '<div class="mut" style="font-size:.78rem">Specimen: ' + esc(it.specimen_type) + '</div>' : '') +
         '</div>' +
-        '<div style="text-align:right"><div>' + (it.price_kobo ? naira(it.price_kobo / 100) : '<span class="mut">—</span>') + '</div>' +
+        '<div style="text-align:right"><div>' + (it.price_kobo ? naira(it.price_kobo) : '<span class="mut">—</span>') + '</div>' +
         '<div class="mrow" style="justify-content:flex-end;margin-top:6px">' + itemActions(it) + '</div></div>' +
         '</div>' +
         (it.collection && it.collection.reject_reason ? '<p class="sub" style="color:#b91c1c;margin:6px 0 0">Rejected: ' + esc(it.collection.reject_reason) + '</p>' : '') +
@@ -204,7 +220,7 @@ export async function LabOrderView(app, params = {}) {
       bill.onclick = async () => {
         try {
           const inv = await createInvoiceForLabOrder(order)
-          toast('Invoice ' + inv.id.slice(0, 8) + ' created · ' + naira(inv.total_kobo / 100))
+          toast('Invoice ' + inv.id.slice(0, 8) + ' created · ' + naira(inv.total_kobo))
           reload()
         } catch (e) { toast(friendlyWriteError(e, 'Billing failed')) }
       }

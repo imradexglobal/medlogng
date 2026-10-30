@@ -166,7 +166,10 @@ export async function AdmissionsView(app, params = {}) {
     fillIndex.reset()
     more.reset()
     teardownListeners()
-    loadMore().then(subscribeLive)
+    loadMore().then(subscribeLive).catch((e) => {
+      console.warn('[admissions] load failed:', e?.message || e)
+      toast('Could not load admissions — check your connection')
+    })
   }
 
   function occupiedIn(wardName) {

@@ -193,8 +193,11 @@ export async function LaboratoryView(app) {
     hasMore = false
     more.reset()
     teardownListeners()
-    loadPatients().then(render)
-    loadMore().then(subscribeLive)
+    loadPatients().then(render).catch((e) => console.warn('[lab] patient list load failed:', e?.message || e))
+    loadMore().then(subscribeLive).catch((e) => {
+      console.warn('[lab] orders load failed:', e?.message || e)
+      toast('Could not load lab orders — check your connection')
+    })
   }
 
   function patientName(l) {

@@ -196,6 +196,8 @@ export async function PharmacyDrugFormView(app, params = {}) {
         const packErr = packSizeError(vals.pack_size)
         if (packErr) throw new Error(packErr)
         if (!vals.name) throw new Error('Drug name is required.')
+        const _spCheck = Number(vals.price || 0)
+        if (_spCheck <= 0) throw new Error('Selling price must be greater than ₦0. Enter the actual price charged to patients.')
 
         const sku = generateSku(vals.drug_code, vals.strength, vals.pack_size)
         if (!sku) throw new Error('Could not generate SKU. Check drug code, strength, and pack size.')

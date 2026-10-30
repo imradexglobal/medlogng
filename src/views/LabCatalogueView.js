@@ -123,7 +123,7 @@ export async function LabCatalogueView(app, params = {}) {
         '<td><strong>' + esc(t.name) + '</strong></td>' +
         '<td>' + esc(t.category) + '</td>' +
         '<td>' + esc(t.specimen_type) + '</td>' +
-        '<td>' + naira(t.price_kobo) + '</td>' +
+        '<td>' + naira(t.priceKobo || t.price_kobo) + '</td>' +
         '<td class="mut">' + (t.turnaround_hours ? esc(t.turnaround_hours) + 'h' : '—') + '</td>' +
         '<td class="mut">' + ((t.components || []).length || '—') + '</td>' +
         '<td>' + (t.active ? '<span class="pill ok">Active</span>' : '<span class="pill bad">Inactive</span>') + '</td>' +
@@ -276,7 +276,7 @@ export async function LabCatalogueView(app, params = {}) {
       '<label>Specimen type<input class="input" id="fSpecimen" list="specList" value="' + esc(editing.specimen_type) + '"><datalist id="specList">' +
       (settings?.specimen_types || DEFAULT_SPECIMEN_TYPES).map((c) => '<option value="' + esc(c) + '">').join('') + '</datalist></label>' +
       '</div><div class="frow">' +
-      '<label>Price (kobo) *<input class="input" id="fPrice" inputmode="numeric" value="' + esc(editing.price_kobo) + '"><span class="mut" style="font-size:.8rem">₦' + ((Number(editing.price_kobo) || 0) / 100).toFixed(2) + '</span></label>' +
+      '<label>Price (₦) *<input class="input" id="fPrice" type="number" step="0.01" min="0.01" placeholder="e.g. 5000.65" value="' + esc(((Number(editing.priceKobo || editing.price_kobo) || 0) / 100).toFixed(2)) + '"><span class="mut" style="font-size:.8rem">Enter amount in Naira (e.g. 2500 = ₦2,500)</span></label>' +
       '<label>Turnaround (hours)<input class="input" id="fTat" inputmode="numeric" value="' + esc(editing.turnaround_hours ?? '') + '"></label>' +
       '</div>' +
       '<label style="display:flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" id="fActive"' + (editing.active ? ' checked' : '') + '> Active (available on order forms)</label>' +
@@ -330,7 +330,7 @@ export async function LabCatalogueView(app, params = {}) {
     editing.name = g('fName').trim()
     editing.category = g('fCategory').trim()
     editing.specimen_type = g('fSpecimen').trim()
-    editing.price_kobo = Number(g('fPrice')) || 0
+    editing.price_kobo = Math.round(Number(g('fPrice')) * 100) || 0
     editing.turnaround_hours = g('fTat') === '' ? null : Number(g('fTat'))
     const act = document.getElementById('fActive')
     if (act) editing.active = act.checked

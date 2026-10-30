@@ -1,8 +1,11 @@
 // Dispense a prescription — full page (replaces the request-detail modal).
+import { canDeleteRecords, deleteMedicationRequest } from '../services/deleteService.js'
+import { isHospitalAdmin } from '../features/admin/roles.js'
+import { myActiveMembership } from '../services/authService.js'
 import { shell, statusBadge, toast, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
-  listOrgDrugs, listOrgRequests, dispense, reverseDispenseIssue, myPharmacyCaps,
+  listOrgDrugs, listOrgRequests, dispense, reverseDispenseIssue, myPharmacyCaps, updateRequestItems,
 } from '../services/pharmacyService.js'
 import { createInvoiceFromLines } from '../services/billingService.js'
 import { getPatient } from '../services/patientService.js'
@@ -62,6 +65,7 @@ export async function PharmacyRequestView(app, params = {}) {
   }
 
   function render() {
+    const isAdmin = isHospitalAdmin(myActiveMembership()) && canDeleteRecords()
     const anyOwed = req.items.some((l) => !l.external && R.lineOutstanding(l) > 0)
     const rows = req.items.map((l) => {
       const owed = R.lineOutstanding(l)
@@ -87,7 +91,8 @@ export async function PharmacyRequestView(app, params = {}) {
           ? '<span class="pill bad">only ' + esc(onHand) + ' on hand</span>'
           : '<input class="input" type="number" min="1" max="' + esc(owed) + '" value="' + esc(owed) +
             '" data-qty-for="' + esc(l.line_id) + '" style="width:96px" />') +
-          (R.toQty(l.dispensed_qty, 0) > 0 ? ' ' + reverseBtn : '')
+          (R.toQty(l.dispensed_qty, 0) > 0 ? ' ' + reverseBtn : '') +
+          (isAdmin ? ' <button type="button" class="btn danger sm" data-delete-line="' + esc(l.line_id) + '" title="Delete medicine (Admin)">🗑️</button>' : '')
 
       return '<tr' + (settled ? ' style="opacity:.55"' : '') + '>' +
         '<td><strong>' + esc(l.medicine || 'Unnamed item') + '</strong>' +
@@ -110,8 +115,45 @@ export async function PharmacyRequestView(app, params = {}) {
       '<p class="sub" style="margin-top:8px">Issued quantities go straight to stock. An issued medicine can be reversed — the units return to the shelf and the line unlocks for the prescriber.</p>' +
       '<div class="mrow" style="margin-top:14px">' +
       '<a class="btn ghost" href="#/pharmacy">Close</a>' +
+      (isAdmin ? '<button type="button" class="btn danger" id="reqAdminDelete" style="margin-left:auto">🗑️ Delete Prescription (Admin)</button>' : '') +
       (anyOwed ? '<button class="btn" id="reqDispense">Dispense selected lines →</button>' : '') +
       '</div>'
+
+    if (isAdmin) {
+      formEl.querySelectorAll('[data-delete-line]').forEach((b) => {
+        b.onclick = async () => {
+          const lineId = b.getAttribute('data-delete-line')
+          const line = req.items.find((l) => l.line_id === lineId)
+          if (!window.confirm('Delete "' + (line?.medicine || 'this medicine') + '" from this prescription?\n\nAs Hospital Admin, this permanently removes this drug from the prescription even if already issued or paid.')) return
+          b.disabled = true
+          try {
+            const next = req.items.filter((l) => l.line_id !== lineId)
+            await updateRequestItems(req.id, next, { force: true })
+            toast('Deleted ' + (line?.medicine || 'medicine') + ' from prescription')
+            await load()
+          } catch (err) {
+            b.disabled = false
+            toast('Could not delete line: ' + friendlyWriteError(err))
+          }
+        }
+      })
+
+      const delScriptBtn = document.getElementById('reqAdminDelete')
+      if (delScriptBtn) {
+        delScriptBtn.onclick = async () => {
+          if (!window.confirm('Are you sure you want to delete this ENTIRE prescription?\n\nAs Hospital Admin, this permanently removes the prescription even if already dispensed or paid.')) return
+          delScriptBtn.disabled = true
+          try {
+            await deleteMedicationRequest(req.id, { force: true })
+            toast('Prescription deleted by Hospital Admin')
+            navigate('/pharmacy')
+          } catch (err) {
+            delScriptBtn.disabled = false
+            toast('Could not delete prescription: ' + friendlyWriteError(err))
+          }
+        }
+      }
+    }
 
     formEl.querySelectorAll('[data-reverse-line]').forEach((b) => {
       b.onclick = async () => {

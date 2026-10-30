@@ -10,7 +10,7 @@ import {
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
-import { can } from '../features/admin/roles.js'
+import { can, isHospitalAdmin } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
 import { generateSku, isExactNameMatch, isSimilarName } from '../utils/sku.js'
@@ -931,11 +931,12 @@ export async function requestMedicationLines({ patientId, patientName = '', enco
 // and a quantity can never be dragged below what has already gone out. Only an
 // open script can be adjusted; a dispensed one is history and a correction
 // there is a new prescription, not a rewrite of the old one.
-export async function updateRequestItems(requestId, incomingLines) {
+export async function updateRequestItems(requestId, incomingLines, { force = false } = {}) {
   const { activeOrg } = authStore.getState()
   if (!activeOrg) throw new Error('No hospital selected.')
   const me = myActiveMembership()
-  if (!can(me, 'prescription.create')) {
+  const isSuperAdmin = isHospitalAdmin(me)
+  if (!can(me, 'prescription.create') && !(isSuperAdmin && force)) {
     throw new Error('Your role cannot prescribe (missing "prescription.create" capability).')
   }
   const snap = await getDoc(doc(db, REQUESTS, requestId))
@@ -943,7 +944,7 @@ export async function updateRequestItems(requestId, incomingLines) {
   const data = snap.data()
   if (data.organization_id !== activeOrg) throw new Error('This prescription belongs to a different hospital.')
   const current = normalizeRequest({ id: snap.id, ...data })
-  if (!isOpenRequest(current.status) && current.status !== REQUEST_STATUS.EXTERNAL) {
+  if (!isOpenRequest(current.status) && current.status !== REQUEST_STATUS.EXTERNAL && !(isSuperAdmin && force)) {
     throw new Error('This prescription has already been dispensed — start a new one instead.')
   }
 
@@ -958,19 +959,26 @@ export async function updateRequestItems(requestId, incomingLines) {
     takenIds.add(line.line_id)
     const prev = current.items.find((x) => x.line_id === line.line_id)
     const issued = prev ? toQty(prev.dispensed_qty, 0) : 0
-    if (issued > 0 && toQty(line.quantity, 1) < issued) {
+    if (issued > 0 && toQty(line.quantity, 1) < issued && !(isSuperAdmin && force)) {
       throw new Error('"' + (line.medicine || 'This medicine') + '" cannot be reduced below the ' + issued + ' already issued.')
     }
     return { ...line, dispensed_qty: issued }
   }).filter((line) => line.medicine || line.drug_id)
 
-  if (!next.length) throw new Error('A prescription must keep at least one medicine.')
+  if (!next.length) {
+    if (isSuperAdmin && force) {
+      // If admin dropped all lines, clear them out
+      await updateDoc(doc(db, REQUESTS, requestId), { items: [], status: 'cancelled', updated_at: serverTimestamp() })
+      return { id: requestId, items: [], status: 'cancelled' }
+    }
+    throw new Error('A prescription must keep at least one medicine.')
+  }
   // A line the pharmacy has already issued against is part of the dispensing
-  // record — the prescriber can edit it, but not make it disappear.
+  // record — the prescriber can edit it, but not make it disappear unless admin overrides.
   const missingIssued = current.items
     .filter((x) => toQty(x.dispensed_qty, 0) > 0)
     .filter((x) => !next.some((l) => l.line_id === x.line_id))
-  if (missingIssued.length) {
+  if (missingIssued.length && !(isSuperAdmin && force)) {
     throw new Error('"' + (missingIssued[0].medicine || 'A medicine') + '" has been partly issued and must stay on the prescription.')
   }
 

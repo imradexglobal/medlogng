@@ -257,10 +257,12 @@ export async function LabNewOrderView(app, params = {}) {
     const sel = root.querySelector('#patientSel')
     if (sel) {
       wireSearchableSelect(root.querySelector('#patientFilter'), sel)
-      sel.onchange = () => {
-        state.patient = state.patients.find((p) => p.pid === sel.value) || null
-        render()
+      function applyPatient() {
+        const found = state.patients.find((p) => p.pid === sel.value) || null
+        if (found) { state.patient = found; render() }
       }
+      sel.onchange = applyPatient
+      sel.addEventListener('click', applyPatient)
     }
 
     const cp = root.querySelector('#clearPatient')

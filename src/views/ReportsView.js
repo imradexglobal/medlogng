@@ -440,57 +440,297 @@ function renderConsultations(data) {
 }
 
 function renderLaboratory(data) {
-  const { labs } = data
+  const { labs, invoices } = data
 
+  // Build a fast invoice lookup by both id and invoiceId aliases
+  const invMap = {}
+  invoices.forEach((inv) => { invMap[inv.id] = inv; if (inv.invoiceId && inv.invoiceId !== inv.id) invMap[inv.invoiceId] = inv })
+
+  // ── camelCase fields from toLabRow ──────────────────────────────────────
+  // totalKobo, invoiceId, billingStatus, testPanel, tests[], patientName,
+  // orderedAt, status, priority, facility, createdAt
+
+  // ── Financial metrics ───────────────────────────────────────────────────
+  const totalBilledKobo = labs.reduce((s, l) => s + (l.totalKobo || 0), 0)
+  const invoicedLabs = labs.filter((l) => !!l.invoiceId)
+  const unbilledLabs = labs.filter((l) => !l.invoiceId)
+  const invoicedKobo = invoicedLabs.reduce((s, l) => s + (l.totalKobo || 0), 0)
+  const unbilledKobo = unbilledLabs.reduce((s, l) => s + (l.totalKobo || 0), 0)
+
+  let totalCollectedNaira = 0
+  let totalOutstandingNaira = 0
+  invoicedLabs.forEach((l) => {
+    const inv = invMap[l.invoiceId]
+    if (inv) { totalCollectedNaira += Number(inv.paid || 0); totalOutstandingNaira += Number(inv.outstanding || 0) }
+  })
+
+  // Revenue by test panel (split multi-test orders evenly per test)
+  const byTestRev = {}
+  labs.forEach((l) => {
+    const tests = Array.isArray(l.tests) && l.tests.length ? l.tests : (l.testPanel ? [l.testPanel] : ['(uncategorised)'])
+    const perKobo = tests.length ? Math.round((l.totalKobo || 0) / tests.length) : 0
+    tests.forEach((t) => {
+      if (!byTestRev[t]) byTestRev[t] = { count: 0, kobo: 0 }
+      byTestRev[t].count++
+      byTestRev[t].kobo += perKobo
+    })
+  })
+  const byTestArr = Object.entries(byTestRev).sort((a, b) => b[1].kobo - a[1].kobo)
+
+  // Billing status breakdown
+  const byBilling = {}
+  labs.forEach((l) => { const k = l.billingStatus || 'unbilled'; byBilling[k] = (byBilling[k] || 0) + 1 })
+
+  // Monthly trend — last 6 months
+  const now6 = Date.now()
+  const months6 = []
+  for (let m = 5; m >= 0; m--) {
+    const dd = new Date(now6); dd.setMonth(dd.getMonth() - m)
+    months6.push(dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0'))
+  }
+  const monthly6 = {}
+  months6.forEach((m) => { monthly6[m] = { count: 0, kobo: 0 } })
+  labs.forEach((l) => {
+    const ts = l.orderedAt || l.createdAt
+    if (!ts) return
+    const ym = new Date(ts).toISOString().slice(0, 7)
+    if (monthly6[ym]) { monthly6[ym].count++; monthly6[ym].kobo += (l.totalKobo || 0) }
+  })
+
+  // Outstanding lab invoices (invoiced but not fully paid)
+  const outstandingList = invoicedLabs
+    .map((l) => ({ l, inv: invMap[l.invoiceId] }))
+    .filter(({ inv }) => inv && Number(inv.outstanding || 0) > 0)
+    .sort((a, b) => (b.l.orderedAt || 0) - (a.l.orderedAt || 0))
+    .slice(0, 25)
+
+  // ── Technical / Operational metrics ───────────────────────────────────────
   const byStatus = {}
   labs.forEach((l) => { const k = l.status || 'order'; byStatus[k] = (byStatus[k] || 0) + 1 })
 
-  const byTest = {}
-  labs.forEach((l) => {
-    const tests = Array.isArray(l.tests) ? l.tests : (l.test_panel ? [l.test_panel] : [])
-    tests.forEach((t) => { byTest[t] = (byTest[t] || 0) + 1 })
+  const byPriority = {}
+  labs.forEach((l) => { const k = l.priority || 'Routine'; byPriority[k] = (byPriority[k] || 0) + 1 })
+
+  const byFacility = {}
+  labs.forEach((l) => { const k = l.facility || 'internal'; byFacility[k] = (byFacility[k] || 0) + 1 })
+
+  // Completion funnel rates
+  const COLLECTED_ST = ['sample_collected', 'received', 'result_entered', 'validated', 'released', 'verified']
+  const RESULT_ST = ['result_entered', 'validated', 'released', 'verified']
+  const RELEASED_ST = ['validated', 'released', 'verified']
+  const collectedCount = labs.filter((l) => COLLECTED_ST.includes(l.status)).length
+  const resultCount = labs.filter((l) => RESULT_ST.includes(l.status)).length
+  const releasedCount = labs.filter((l) => RELEASED_ST.includes(l.status)).length
+
+  // Revenue leakage: released/verified but never invoiced
+  const leakage = labs.filter((l) => RELEASED_ST.includes(l.status) && !l.invoiceId)
+
+  // Status funnel display order
+  const STATUS_FUNNEL = ['order', 'sample_collected', 'received', 'result_entered', 'validated', 'released', 'verified', 'cancelled', 'rejected']
+
+  // Full order log rows
+  const logRows = labs.map((l) => {
+    const testLabel = Array.isArray(l.tests) && l.tests.length ? l.tests.join(', ') : (l.testPanel || '—')
+    return [
+      l.patientName || '—', testLabel,
+      l.priority || 'Routine', l.facility || 'internal',
+      l.status || 'order', l.billingStatus || 'unbilled',
+      naira(Number(l.totalKobo || 0) / 100),
+      l.invoiceId ? l.invoiceId.slice(0, 8) : '—',
+      fmtDate(l.orderedAt || l.createdAt),
+    ]
   })
 
-  const totalValue = labs.reduce((t, l) => t + Number(l.total_kobo || 0) / 100, 0)
-
-  const rows = labs.map((l) => [
-    l.patientName || '—', l.test_panel || (Array.isArray(l.tests) ? l.tests.join(', ') : '—'),
-    statusPill(l.status), naira(Number(l.total_kobo || 0) / 100), l.invoice_id || '—',
-    fmtDate(l.orderedAt || l.createdAt),
-  ])
-
   const html =
-    '<div class="toolbar" style="margin-bottom:4px">' +
+    // ── Toolbar with sub-tab toggle ─────────────────────────────────────────
+    '<div class="toolbar" style="margin-bottom:4px;flex-wrap:wrap;gap:6px">' +
     '<button class="btn" id="rep-print-laboratory">Print Report</button>' +
     '<button class="btn ghost" id="rep-csv-laboratory">Export CSV</button>' +
+    '<span style="display:inline-flex;gap:4px;margin-left:8px">' +
+    '<button class="btn sm lab-sub on" data-lsub="financial">📊 Financial</button>' +
+    '<button class="btn ghost sm lab-sub" data-lsub="technical">⚗️ Technical</button>' +
+    '</span>' +
     '</div>' +
 
+    // ══════════════════════════════════════════════════════════════════
+    // FINANCIAL PANE
+    // ══════════════════════════════════════════════════════════════════
+    '<div id="lab-fin">' +
+
+    // KPI row
     '<div class="grid4">' +
-    '<div class="stat"><em>Lab orders</em><strong>' + labs.length + '</strong><span>in period</span></div>' +
-    '<div class="stat"><em>Verified</em><strong>' + (byStatus['verified'] || 0) + '</strong><span></span></div>' +
-    '<div class="stat"><em>Pending</em><strong>' + (byStatus['order'] || 0) + '</strong><span>awaiting result</span></div>' +
-    '<div class="stat"><em>Order value</em><strong>' + naira(totalValue) + '</strong><span>billed</span></div>' +
+    '<div class="stat"><em>Total lab revenue</em><strong>' + naira(totalBilledKobo / 100) + '</strong><span>' + labs.length + ' orders in period</span></div>' +
+    '<div class="stat"><em>Invoiced</em><strong>' + naira(invoicedKobo / 100) + '</strong><span>' + invoicedLabs.length + ' orders with invoice</span></div>' +
+    '<div class="stat"><em>Collected</em><strong style="color:var(--emr-ok,#1e7e34)">' + naira(totalCollectedNaira) + '</strong><span>paid against lab invoices</span></div>' +
+    '<div class="stat"><em>Unbilled</em><strong style="color:var(--emr-warn,#d97706)">' + naira(unbilledKobo / 100) + '</strong><span>' + unbilledLabs.length + ' orders not yet invoiced</span></div>' +
     '</div>' +
 
-    '<div class="card"><div class="card-head"><h3>By test panel</h3></div>' +
-    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Test / panel</th><th>Orders</th><th>Share</th></tr></thead><tbody>' +
-    Object.entries(byTest).map(([k, v]) => '<tr><td>' + esc(k) + '</td><td>' + v + '</td><td>' + Math.round((v / Math.max(1, labs.length)) * 100) + '%</td></tr>').join('') +
+    // Revenue by test panel
+    '<div class="card"><div class="card-head"><h3>Revenue by test / panel</h3>' +
+    '<span class="mut" style="font-size:.82rem;font-weight:400">Multi-test orders split proportionally per test</span></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr>' +
+    '<th>Test / panel</th><th>Orders</th><th>Revenue (₦)</th><th>Avg per order</th><th>Revenue share</th>' +
+    '</tr></thead><tbody>' +
+    (byTestArr.length
+      ? byTestArr.map(([name, v]) => {
+          const share = totalBilledKobo ? Math.round((v.kobo / totalBilledKobo) * 100) : 0
+          return '<tr>' +
+            '<td><strong>' + esc(name) + '</strong></td>' +
+            '<td>' + v.count + '</td>' +
+            '<td>' + naira(v.kobo / 100) + '</td>' +
+            '<td>' + naira(v.count ? Math.round(v.kobo / v.count) / 100 : 0) + '</td>' +
+            '<td><span style="display:inline-flex;align-items:center;gap:6px">' +
+            share + '%' +
+            '<span style="display:inline-block;height:8px;width:' + Math.max(4, Math.round(share * 0.8)) + 'px;background:var(--emr-accent,#2563eb);border-radius:4px;opacity:.55"></span>' +
+            '</span></td>' +
+            '</tr>'
+        }).join('')
+      : '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No lab orders in this period.</td></tr>'
+    ) +
     '</tbody></table></div></div>' +
 
-    '<div class="card"><div class="card-head"><h3>By status</h3></div>' +
-    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Status</th><th>Orders</th><th>Share</th></tr></thead><tbody>' +
-    Object.entries(byStatus).map(([k, v]) => '<tr><td>' + esc(k) + '</td><td>' + v + '</td><td>' + Math.round((v / Math.max(1, labs.length)) * 100) + '%</td></tr>').join('') +
+    // Two-column: billing status + monthly trend
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+
+    '<div class="card"><div class="card-head"><h3>Billing status breakdown</h3></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Status</th><th>Orders</th><th>Share</th><th>Value (₦)</th></tr></thead><tbody>' +
+    (Object.keys(byBilling).length
+      ? Object.entries(byBilling).map(([k, v]) => {
+          const kobo = labs.filter((l) => (l.billingStatus || 'unbilled') === k).reduce((s, l) => s + (l.totalKobo || 0), 0)
+          return '<tr><td>' + statusPill(k) + '</td><td>' + v + '</td><td>' + (labs.length ? Math.round((v / labs.length) * 100) : 0) + '%</td><td>' + naira(kobo / 100) + '</td></tr>'
+        }).join('')
+      : '<tr><td colspan="4" class="mut" style="text-align:center;padding:16px">No data.</td></tr>'
+    ) +
     '</tbody></table></div></div>' +
 
-    '<div class="card"><div class="card-head"><h3>Lab order log</h3></div>' +
-    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Patient</th><th>Test / panel</th><th>Status</th><th>Value</th><th>Invoice</th><th>Ordered</th></tr></thead><tbody>' +
-    rows.map((r) => '<tr><td>' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td><td>' + r[2] + '</td><td>' + r[3] + '</td><td>' + esc(r[4]) + '</td><td>' + esc(r[5]) + '</td></tr>').join('') +
-    '</tbody></table>' +
-    (labs.length === 0 ? '<p class="sub">No lab orders in this period.</p>' : '') +
-    '</div></div>'
+    '<div class="card"><div class="card-head"><h3>Monthly trend — last 6 months</h3></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Month</th><th>Orders</th><th>Revenue (₦)</th></tr></thead><tbody>' +
+    months6.map((m) => '<tr><td>' + m + '</td><td>' + monthly6[m].count + '</td><td>' + naira(monthly6[m].kobo / 100) + '</td></tr>').join('') +
+    '</tbody></table></div></div>' +
+    '</div>' +
+
+    // Outstanding lab invoices
+    '<div class="card">' +
+    '<div class="card-head"><h3>Outstanding lab invoices</h3>' +
+    (outstandingList.length
+      ? '<span class="pill bad" style="margin-left:8px">' + outstandingList.length + ' unpaid / part-paid</span>'
+      : '<span class="pill ok" style="margin-left:8px">All clear ✓</span>'
+    ) +
+    '</div>' +
+    (outstandingList.length
+      ? '<div class="tblwrap"><table class="tbl"><thead><tr>' +
+        '<th>Patient</th><th>Test / panel</th><th>Invoice ref</th><th>Billed</th><th>Paid</th><th>Outstanding</th><th>Ordered</th>' +
+        '</tr></thead><tbody>' +
+        outstandingList.map(({ l, inv }) => {
+          const testLabel = Array.isArray(l.tests) && l.tests.length ? l.tests.join(', ') : (l.testPanel || '—')
+          return '<tr>' +
+            '<td>' + esc(l.patientName || '—') + '</td>' +
+            '<td>' + esc(testLabel) + '</td>' +
+            '<td><code style="font-size:.8rem">' + esc(l.invoiceId ? l.invoiceId.slice(0, 8) : '—') + '</code></td>' +
+            '<td>' + naira(Number(l.totalKobo || 0) / 100) + '</td>' +
+            '<td>' + naira(inv ? Number(inv.paid || 0) : 0) + '</td>' +
+            '<td style="color:var(--emr-warn,#d97706);font-weight:600">' + naira(inv ? Number(inv.outstanding || 0) : 0) + '</td>' +
+            '<td>' + fmtDate(l.orderedAt || l.createdAt) + '</td>' +
+            '</tr>'
+        }).join('') +
+        '</tbody></table></div>'
+      : '<p class="sub" style="padding:16px 18px">All invoiced lab orders are fully settled. ✓</p>'
+    ) +
+    '</div>' +
+
+    '</div>' + // end #lab-fin
+
+    // ══════════════════════════════════════════════════════════════════
+    // TECHNICAL / OPERATIONAL PANE (hidden by default)
+    // ══════════════════════════════════════════════════════════════════
+    '<div id="lab-tech" style="display:none">' +
+
+    // Completion KPI row
+    '<div class="grid4">' +
+    '<div class="stat"><em>Total orders</em><strong>' + labs.length + '</strong><span>in selected period</span></div>' +
+    '<div class="stat"><em>Sample collected</em><strong>' + collectedCount + '</strong><span>' + (labs.length ? Math.round((collectedCount / labs.length) * 100) : 0) + '% rate</span></div>' +
+    '<div class="stat"><em>Results entered</em><strong>' + resultCount + '</strong><span>' + (labs.length ? Math.round((resultCount / labs.length) * 100) : 0) + '% completion</span></div>' +
+    '<div class="stat"><em>Released / verified</em><strong>' + releasedCount + '</strong><span>' + (labs.length ? Math.round((releasedCount / labs.length) * 100) : 0) + '% release rate</span></div>' +
+    '</div>' +
+
+    // Revenue leakage banner
+    (leakage.length
+      ? '<div class="card" style="border:2px solid var(--emr-warn,#d97706)">' +
+        '<div class="card-head"><h3>⚠ Revenue leakage — completed orders without invoice (' + leakage.length + ')</h3>' +
+        '<span class="mut" style="font-size:.82rem">These orders have results released but no invoice attached — billing is incomplete.</span>' +
+        '</div>' +
+        '<div class="tblwrap"><table class="tbl"><thead><tr>' +
+        '<th>Patient</th><th>Tests</th><th>Status</th><th>Value (at risk)</th><th>Ordered</th>' +
+        '</tr></thead><tbody>' +
+        leakage.slice(0, 25).map((l) => {
+          const testLabel = Array.isArray(l.tests) && l.tests.length ? l.tests.join(', ') : (l.testPanel || '—')
+          return '<tr>' +
+            '<td>' + esc(l.patientName || '—') + '</td>' +
+            '<td>' + esc(testLabel) + '</td>' +
+            '<td>' + statusPill(l.status) + '</td>' +
+            '<td style="color:var(--emr-warn,#d97706);font-weight:600">' + naira(Number(l.totalKobo || 0) / 100) + '</td>' +
+            '<td>' + fmtDate(l.orderedAt || l.createdAt) + '</td>' +
+            '</tr>'
+        }).join('') +
+        '</tbody></table></div></div>'
+      : '<div class="card" style="border:2px solid var(--emr-ok,#1e7e34)"><p class="sub" style="padding:14px 18px">✓ No released orders found without an invoice. Billing is complete for this period.</p></div>'
+    ) +
+
+    // Three-column: status funnel | priority | facility
+    '<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px">' +
+
+    '<div class="card"><div class="card-head"><h3>Order status funnel</h3></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Stage</th><th>Orders</th><th>Share</th></tr></thead><tbody>' +
+    STATUS_FUNNEL.filter((k) => byStatus[k]).map((k) =>
+      '<tr><td>' + statusPill(k) + '</td><td>' + byStatus[k] + '</td><td>' + (labs.length ? Math.round((byStatus[k] / labs.length) * 100) : 0) + '%</td></tr>'
+    ).join('') +
+    (Object.keys(byStatus).length === 0 ? '<tr><td colspan="3" class="mut" style="text-align:center;padding:16px">No orders.</td></tr>' : '') +
+    '</tbody></table></div></div>' +
+
+    '<div class="card"><div class="card-head"><h3>By priority</h3></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Priority</th><th>Orders</th><th>%</th></tr></thead><tbody>' +
+    Object.entries(byPriority).map(([k, v]) =>
+      '<tr><td><strong>' + esc(k) + '</strong></td><td>' + v + '</td><td>' + (labs.length ? Math.round((v / labs.length) * 100) : 0) + '%</td></tr>'
+    ).join('') +
+    '</tbody></table></div></div>' +
+
+    '<div class="card"><div class="card-head"><h3>By facility</h3></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr><th>Facility</th><th>Orders</th><th>%</th></tr></thead><tbody>' +
+    Object.entries(byFacility).map(([k, v]) =>
+      '<tr><td>' + esc(k) + '</td><td>' + v + '</td><td>' + (labs.length ? Math.round((v / labs.length) * 100) : 0) + '%</td></tr>'
+    ).join('') +
+    '</tbody></table></div></div>' +
+
+    '</div>' + // end 3-col
+
+    // Full order log
+    '<div class="card"><div class="card-head"><h3>Full order log</h3>' +
+    '<span class="mut" style="font-size:.82rem;font-weight:400">' + labs.length + ' orders</span></div>' +
+    '<div class="tblwrap"><table class="tbl"><thead><tr>' +
+    '<th>Patient</th><th>Test / panel</th><th>Priority</th><th>Facility</th>' +
+    '<th>Status</th><th>Billing</th><th>Value</th><th>Invoice ref</th><th>Ordered</th>' +
+    '</tr></thead><tbody>' +
+    logRows.map((r) =>
+      '<tr>' +
+      '<td>' + esc(r[0]) + '</td>' +
+      '<td>' + esc(r[1]) + '</td>' +
+      '<td>' + esc(r[2]) + '</td>' +
+      '<td>' + esc(r[3]) + '</td>' +
+      '<td>' + statusPill(r[4]) + '</td>' +
+      '<td>' + statusPill(r[5]) + '</td>' +
+      '<td>' + r[6] + '</td>' +
+      '<td><code style="font-size:.8rem">' + esc(r[7]) + '</code></td>' +
+      '<td>' + esc(r[8]) + '</td>' +
+      '</tr>'
+    ).join('') +
+    (labs.length === 0 ? '<tr><td colspan="9" class="mut" style="text-align:center;padding:22px 8px">No lab orders in this period.</td></tr>' : '') +
+    '</tbody></table></div></div>' +
+
+    '</div>' // end #lab-tech
 
   return html
 }
+
 
 function renderPharmacy(data) {
   const { drugs } = data
@@ -700,9 +940,46 @@ async function printReport(kind, data, rangeLabel, orgName) {
       break
     }
     case 'laboratory': {
-      const { labs } = data
-      const rows = labs.map((l) => [l.patientName || '—', l.test_panel || '—', l.status || 'order', naira(Number(l.total_kobo || 0) / 100), l.invoice_id || '—', fmtDate(l.orderedAt || l.createdAt)])
-      body = printTable(['Patient', 'Test / panel', 'Status', 'Value', 'Invoice', 'Ordered'], rows, 'Laboratory orders (' + labs.length + ' orders)')
+      const { labs: prtLabs, invoices: prtInvs } = data
+      const prtInvMap = {}
+      prtInvs.forEach((inv) => { prtInvMap[inv.id] = inv; if (inv.invoiceId) prtInvMap[inv.invoiceId] = inv })
+      const prtTotalKobo = prtLabs.reduce((s, l) => s + (l.totalKobo || 0), 0)
+      const prtInvoicedKobo = prtLabs.filter((l) => !!l.invoiceId).reduce((s, l) => s + (l.totalKobo || 0), 0)
+      const prtUnbilledKobo = prtLabs.filter((l) => !l.invoiceId).reduce((s, l) => s + (l.totalKobo || 0), 0)
+      let prtCollectedNaira = 0
+      prtLabs.forEach((l) => { const inv = prtInvMap[l.invoiceId]; if (inv) prtCollectedNaira += Number(inv.paid || 0) })
+      const prtResultCount = prtLabs.filter((l) => ['result_entered', 'validated', 'released', 'verified'].includes(l.status)).length
+      const prtReleasedCount = prtLabs.filter((l) => ['validated', 'released', 'verified'].includes(l.status)).length
+      const prtLeakage = prtLabs.filter((l) => ['validated', 'released', 'verified'].includes(l.status) && !l.invoiceId).length
+      const summaryRows = [
+        ['Total orders', String(prtLabs.length)],
+        ['Total lab revenue billed', naira(prtTotalKobo / 100)],
+        ['Invoiced', naira(prtInvoicedKobo / 100)],
+        ['Unbilled', naira(prtUnbilledKobo / 100)],
+        ['Collected from lab invoices', naira(prtCollectedNaira)],
+        ['Results entered', String(prtResultCount) + ' (' + (prtLabs.length ? Math.round((prtResultCount / prtLabs.length) * 100) : 0) + '%)'],
+        ['Released / verified', String(prtReleasedCount) + ' (' + (prtLabs.length ? Math.round((prtReleasedCount / prtLabs.length) * 100) : 0) + '%)'],
+        ['Revenue leakage (released, no invoice)', String(prtLeakage) + (prtLeakage > 0 ? ' ⚠' : ' ✓')],
+      ]
+      const orderRows = prtLabs.map((l) => {
+        const inv = prtInvMap[l.invoiceId]
+        const testLabel = Array.isArray(l.tests) && l.tests.length ? l.tests.join(', ') : (l.testPanel || '—')
+        return [
+          l.patientName || '—', testLabel,
+          l.priority || 'Routine', l.status || 'order',
+          l.billingStatus || 'unbilled', naira(Number(l.totalKobo || 0) / 100),
+          l.invoiceId ? l.invoiceId.slice(0, 8) : '—',
+          inv ? naira(Number(inv.outstanding || 0)) : '—',
+          fmtDate(l.orderedAt || l.createdAt),
+        ]
+      })
+      body =
+        printTable(['Metric', 'Value'], summaryRows, 'Laboratory Financial Summary') +
+        printTable(
+          ['Patient', 'Test / panel', 'Priority', 'Status', 'Billing', 'Value', 'Invoice ref', 'Outstanding', 'Ordered'],
+          orderRows,
+          'Lab order log (' + prtLabs.length + ' orders)'
+        )
       title = 'Laboratory Report'
       break
     }
@@ -764,7 +1041,9 @@ const CSV_HEADERS = {
   patients: ['MRN', 'Name', 'Sex', 'Age', 'Phone', 'Payer', 'Status', 'Registered'],
   appointments: ['Patient', 'Clinic', 'Doctor', 'Type', 'Status', 'Checked in', 'Date', 'Time'],
   consultations: ['Patient', 'Type', 'Clinician', 'Status', 'Chief complaint', 'Date'],
-  laboratory: ['Patient', 'Test / panel', 'Status', 'Value', 'Invoice', 'Ordered'],
+  laboratory_financial: ['Test / panel', 'Orders', 'Revenue (NGN)', 'Avg per order (NGN)', 'Revenue share %'],
+  laboratory_billing: ['Patient', 'Test / panel', 'Invoice ref', 'Billed (NGN)', 'Paid (NGN)', 'Outstanding (NGN)', 'Billing status', 'Ordered'],
+  laboratory_technical: ['Patient', 'Test / panel', 'Priority', 'Facility', 'Status', 'Billing status', 'Value (NGN)', 'Invoice ref', 'Ordered'],
   pharmacy: ['Drug', 'Code', 'Strength', 'SKU', 'Stock', 'Unit', 'Price', 'Stock value', 'Status'],
   admissions: ['Patient', 'Ward', 'Bed', 'Type', 'Status', 'Admitted', 'Discharged', 'Length of stay'],
 }
@@ -838,7 +1117,24 @@ export async function ReportsView(app) {
     if (printBtn) {
       printBtn.onclick = () => printReport(kind, d, rangeLabel, authStore.getState().activeOrgName || 'Hospital')
     }
-    if (csvBtn) {
+    // Wire Financial/Technical sub-tabs for the Laboratory report
+    if (kind === 'laboratory') {
+      document.querySelectorAll('.lab-sub').forEach((btn) => {
+        btn.onclick = () => {
+          document.querySelectorAll('.lab-sub').forEach((b) => {
+            b.classList.remove('on'); b.classList.add('ghost')
+          })
+          btn.classList.add('on'); btn.classList.remove('ghost')
+          const sub = btn.getAttribute('data-lsub')
+          const fin = document.getElementById('lab-fin')
+          const tech = document.getElementById('lab-tech')
+          if (fin) fin.style.display = sub === 'financial' ? '' : 'none'
+          if (tech) tech.style.display = sub === 'technical' ? '' : 'none'
+        }
+      })
+    }
+
+        if (csvBtn) {
       csvBtn.onclick = () => {
         switch (kind) {
           case 'overview': {
@@ -908,8 +1204,53 @@ export async function ReportsView(app) {
             break
           }
           case 'laboratory': {
-            const rows = d.labs.map((l) => [l.patientName || '—', l.test_panel || '—', l.status || 'order', String(Number(l.total_kobo || 0) / 100), l.invoice_id || '—', fmtDate(l.orderedAt || l.createdAt)])
-            exportCsv('medilog-report-laboratory.csv', CSV_HEADERS.laboratory, rows)
+            const { labs: csvLabs, invoices: csvInvoices } = d
+            const csvInvMap = {}
+            csvInvoices.forEach((inv) => { csvInvMap[inv.id] = inv; if (inv.invoiceId) csvInvMap[inv.invoiceId] = inv })
+            // Revenue by test panel
+            const csvByTest = {}
+            const csvTotalKobo = csvLabs.reduce((s, l) => s + (l.totalKobo || 0), 0)
+            csvLabs.forEach((l) => {
+              const tests = Array.isArray(l.tests) && l.tests.length ? l.tests : (l.testPanel ? [l.testPanel] : ['(uncategorised)'])
+              const perKobo = tests.length ? Math.round((l.totalKobo || 0) / tests.length) : 0
+              tests.forEach((t) => { if (!csvByTest[t]) csvByTest[t] = { count: 0, kobo: 0 }; csvByTest[t].count++; csvByTest[t].kobo += perKobo })
+            })
+            const testRows = Object.entries(csvByTest).sort((a, b) => b[1].kobo - a[1].kobo).map(([name, v]) => [
+              name, String(v.count),
+              String((v.kobo / 100).toFixed(2)),
+              String(v.count ? (v.kobo / 100 / v.count).toFixed(2) : '0.00'),
+              String(csvTotalKobo ? Math.round((v.kobo / csvTotalKobo) * 100) : 0) + '%',
+            ])
+            exportCsv('medilog-lab-revenue-by-test.csv', CSV_HEADERS.laboratory_financial, testRows)
+            // Billing & outstanding per order
+            const billingRows = csvLabs.map((l) => {
+              const inv = csvInvMap[l.invoiceId]
+              const testLabel = Array.isArray(l.tests) && l.tests.length ? l.tests.join(', ') : (l.testPanel || '—')
+              return [
+                l.patientName || '—', testLabel,
+                l.invoiceId ? l.invoiceId.slice(0, 8) : '—',
+                String((Number(l.totalKobo || 0) / 100).toFixed(2)),
+                String(inv ? Number(inv.paid || 0).toFixed(2) : '0.00'),
+                String(inv ? Number(inv.outstanding || 0).toFixed(2) : (Number(l.totalKobo || 0) / 100).toFixed(2)),
+                l.billingStatus || 'unbilled',
+                fmtDate(l.orderedAt || l.createdAt),
+              ]
+            })
+            exportCsv('medilog-lab-billing.csv', CSV_HEADERS.laboratory_billing, billingRows)
+            // Full technical log
+            const techRows = csvLabs.map((l) => {
+              const testLabel = Array.isArray(l.tests) && l.tests.length ? l.tests.join(', ') : (l.testPanel || '—')
+              return [
+                l.patientName || '—', testLabel,
+                l.priority || 'Routine', l.facility || 'internal',
+                l.status || 'order', l.billingStatus || 'unbilled',
+                String((Number(l.totalKobo || 0) / 100).toFixed(2)),
+                l.invoiceId ? l.invoiceId.slice(0, 8) : '—',
+                fmtDate(l.orderedAt || l.createdAt),
+              ]
+            })
+            exportCsv('medilog-lab-technical.csv', CSV_HEADERS.laboratory_technical, techRows)
+            toast('Lab CSVs exported (3 files: revenue by test, billing, technical log)')
             break
           }
           case 'pharmacy': {

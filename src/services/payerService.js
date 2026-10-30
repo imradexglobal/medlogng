@@ -107,6 +107,10 @@ export function cachedPayers() {
 }
 
 async function fetchFromCloud() {
+  // Only attempt Firestore read when a user session is active
+  // — avoids 'Missing or insufficient permissions' on the login page.
+  const { user } = await import('../store/authStore.js').then(m => m.authStore.getState())
+  if (!user || !user.uid) throw new Error('Not authenticated — skipping cloud fetch')
   const snap = await getDocs(query(collection(db, COLLECTION), limit(100)))
   return snap.docs.map(toPayerRow).filter((r) => r.name).sort(byOrder)
 }

@@ -1,4 +1,4 @@
-// Structured result entry for ONE ordered test (item).
+﻿// Structured result entry for ONE ordered test (item).
 // The form is rendered from the item's FROZEN configuration snapshot — never
 // from the live catalogue — so what is entered always matches what was ordered
 // and what will print. Flags (L/H) preview live from the snapshot reference.
@@ -7,7 +7,7 @@
 // Route: #/laboratory/orders/:id/items/:itemId
 import { shell, toast, wireToast } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
-import { getLabOrder, saveItemResult, myLabCaps } from '../services/laboratoryService.js'
+import { getLabOrder, saveItemResult, myLabCaps, orderHasPayment } from '../services/laboratoryService.js'
 import { esc } from '../utils/sanitize.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { resolveReferenceFor, computeFlag, FLAG_LABELS } from '../features/labs/domain.js'
@@ -19,6 +19,7 @@ export async function LabResultView(app, params = {}) {
   let item = null
   let patient = null
   let loadError = null
+  let paymentCleared = false
   const values = {}   // componentId -> { value, remark }
 
   shell(app, {
@@ -44,6 +45,8 @@ export async function LabResultView(app, params = {}) {
         patient = await getPatient(order.patientId)
       } catch { patient = null }
     }
+    // Check payment status
+    try { paymentCleared = await orderHasPayment(lid) } catch { paymentCleared = false }
     if (!keepValues && item && item.result && item.result.values) {
       for (const [cid, v] of Object.entries(item.result.values)) {
         values[cid] = { value: v.value ?? '', remark: v.remark ?? '' }
@@ -143,6 +146,18 @@ export async function LabResultView(app, params = {}) {
     }
     if (!item) { root.innerHTML = '<div class="card">Loading…</div>'; return }
 
+    // Block result entry if no payment has been recorded for this order
+    if (!paymentCleared) {
+      root.innerHTML =
+        '<div class="card">' +
+        '<h3 style="margin:0;color:#b45309">⚠ Payment required</h3>' +
+        '<p class="sub" style="margin:8px 0 0">A payment must be recorded and confirmed on the invoice before lab results can be entered for this order.</p>' +
+        '<div class="mrow" style="margin-top:14px">' +
+        '<a class="btn ghost" href="#/laboratory/orders/' + esc(lid) + '">← Back to order</a>' +
+        '<a class="btn" href="#/billing">Go to Billing →</a>' +
+        '</div></div>'
+      return
+    }
     if (!caps.canResult) {
       root.innerHTML = '<div class="card"><p class="sub">Your role cannot enter lab results (missing <code>lab.result.enter</code> capability).</p><a class="btn ghost" href="#/laboratory/orders/' + esc(lid) + '">← Order</a></div>'
       return

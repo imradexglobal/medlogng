@@ -144,6 +144,11 @@ export function normalizeCaps(caps) {
   return arr
 }
 
+export function isHospitalAdmin(membership) {
+  if (!membership || membership.status !== 'active') return false
+  return membership.role === 'hospital_admin' || (membership.capabilities || []).includes('*')
+}
+
 export function isOrgAdmin(membership) {
   return can(membership, 'admin.roles.manage')
 }

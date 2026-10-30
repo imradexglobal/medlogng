@@ -45,7 +45,7 @@ export async function savePrice(orgId, { id, name, category, priceKobo, active =
   }
   if (!name || !name.trim()) throw new Error('Item name is required.')
   const kobo = Math.round(Number(priceKobo) || 0)
-  if (kobo < 0) throw new Error('Price cannot be negative.')
+  if (kobo <= 0) throw new Error('Price must be greater than \u20a60. Enter the actual amount charged for this item.')
   const now = serverTimestamp()
   const data = {
     organization_id: orgId,

@@ -25,6 +25,38 @@ import {
 import { currentStaffName } from '../lib/staffName.js'
 
 const LABS = 'lab_orders'
+// ---- payment check for result entry ----------------------------------------
+// Returns true if the lab order has at least one payment recorded against it.
+// Used to gate result entry: payment must exist before results can be entered.
+export async function orderHasPayment(orderId) {
+  if (!orderId) return false
+  try {
+    // Check payments collection for any payment linked to this order directly
+    const paySnap = await getDocs(query(collection(db, 'payments'), where('lab_order_id', '==', orderId)))
+    if (!paySnap.empty) return true
+    // Also check invoices linked to this order — if any has paid_kobo > 0, payment recorded
+    const invSnap = await getDocs(query(collection(db, 'invoices'), where('lab_order_id', '==', orderId)))
+    for (const d of invSnap.docs) {
+      if ((d.data().paid_kobo || 0) > 0) return true
+    }
+    // Fall back: check billing_status on the order itself
+    const orderSnap = await getDoc(doc(db, 'lab_orders', orderId))
+    if (orderSnap.exists()) {
+      const r = orderSnap.data()
+      // If billing_status is 'invoiced' and invoice has been paid, allow entry
+      if (r.invoice_id) {
+        const iSnap = await getDoc(doc(db, 'invoices', r.invoice_id))
+        if (iSnap.exists() && (iSnap.data().paid_kobo || 0) > 0) return true
+      }
+    }
+    return false
+  } catch (e) {
+    console.warn('[lab] payment check failed:', e && e.message)
+    return false
+  }
+}
+
+
 
 // Catalogue offered by the order forms (single source of truth). Free text is
 // still accepted by the services, so adding here only widens the picker.
