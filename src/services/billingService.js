@@ -2,7 +2,7 @@
 // Invoices + payments + price catalogue + NHIA/HMO claims
 // CRITICAL: Preserves existing billing calculations - do not change charge/discount logic
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, orderBy, limit, startAfter,
+  db, collection, query, where, getDocs, getDoc, doc, setDoc, updateDoc, serverTimestamp, orderBy, limit, startAfter, runTransaction,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
@@ -348,11 +348,16 @@ export async function recordPayment(input) {
   // Record the payment transaction. The lab-order tie rides along so the
   // order's payment gate can be checked without reading this collection —
   // and so the gate itself can be stamped (see below).
+  // ATOMIC: the invoice update and the payment write happen in a single
+  // Firestore transaction. If the payment row fails to write, the invoice
+  // update is rolled back — the invoice never claims money that has no
+  // payment row, and the ledger stays balanced.
   const labOrderId = invoice.raw?.lab_order_id
     || (invoice.raw?.source_type === 'lab_order' ? invoice.raw.source_id : '')
   const paymentId = doc(collection(db, PAYMENTS)).id
   const receiptNumber = 'REC-' + paymentId.slice(0, 8).toUpperCase()
-  await setDoc(doc(db, PAYMENTS, paymentId), {
+
+  const paymentData = {
     invoice_id: iid,
     invoice_number: iid,
     lab_order_id: labOrderId || '',
@@ -367,6 +372,15 @@ export async function recordPayment(input) {
     paid_at: serverTimestamp(),
     organization_id: activeOrg,
     notes: input.notes || '',
+  }
+
+  await runTransaction(db, async (t) => {
+    t.update(doc(db, INVOICES, iid), {
+      paid_kobo: newPaidKobo,
+      status: status,
+      updated_at: serverTimestamp(),
+    })
+    t.set(doc(db, PAYMENTS, paymentId), paymentData)
   })
 
   // Mirror the payment onto the lab order so the lab bench — which cannot
@@ -426,67 +440,4 @@ export async function listOrgPaymentsPage(orgId, { pageSize = PAYMENTS_PAGE, cur
   return { rows: docs.map((d) => ({ id: d.id, ...d.data() })), hasMore, cursor: next }
 }
 
-// ---- edit a previously saved payment -------------------------------------
-// Adjusts the invoice's paid_kobo by the difference and updates the payment
-// record (amount, method, reference, notes). The original payment is never deleted — the
-// ledger stays intact because the invoice total is recomputed from the delta.
-export async function updatePayment(paymentId, { amount_kobo, method, reference, notes }) {
-  const { activeOrg, user } = authStore.getState()
-  if (!activeOrg) throw new Error('No hospital selected.')
-  const caps = myBillingCaps()
-  if (!caps.canPayment) {
-    throw new Error('Your role cannot edit payments (missing "billing.payment" capability).')
-  }
 
-  const paymentSnap = await getDoc(doc(db, PAYMENTS, paymentId))
-  if (!paymentSnap.exists()) throw new Error('Payment not found.')
-  const payment = paymentSnap.data()
-  if (payment.organization_id !== activeOrg) throw new Error('This payment belongs to a different hospital.')
-
-  const newAmount = Math.round(Number(amount_kobo) || 0)
-  if (newAmount < 0) throw new Error('Amount cannot be negative.')
-
-  const oldAmount = Number(payment.amount_kobo || 0)
-  const delta = newAmount - oldAmount
-
-  // Get current invoice
-  const invoice = await getInvoice(payment.invoice_id)
-  if (!invoice) throw new Error('Linked invoice not found.')
-
-  const currentPaid = invoice.raw?.paid_kobo || 0
-  const newPaidKobo = currentPaid + delta
-  const totalKobo = invoice.raw?.total_kobo || 0
-  const outstandingKobo = totalKobo - newPaidKobo
-
-  let status = 'unpaid'
-  if (outstandingKobo <= 0) {
-    status = 'paid'
-  } else if (outstandingKobo < totalKobo) {
-    status = 'part-paid'
-  }
-
-  // Update the invoice's paid_kobo by the delta
-  await updateDoc(doc(db, INVOICES, payment.invoice_id), {
-    paid_kobo: newPaidKobo,
-    status: status,
-    updated_at: serverTimestamp(),
-  })
-
-  // Update the payment record
-  await updateDoc(doc(db, PAYMENTS, paymentId), {
-    amount_kobo: newAmount,
-    amount_naira: newAmount / 100,
-    method: method || payment.method || 'Cash',
-    reference: reference != null ? reference : (payment.reference || ''),
-    notes: notes != null ? notes : (payment.notes || ''),
-    updated_at: serverTimestamp(),
-  })
-
-  try {
-    await logAudit({ action: 'payment.edited', organizationId: activeOrg, patientId: invoice.patientId, details: 'Payment ' + paymentId + ' · ₦' + (oldAmount / 100).toLocaleString('en-NG') + ' → ₦' + (newAmount / 100).toLocaleString('en-NG') })
-  } catch (e) {
-    console.warn('[billing] audit append failed:', e?.message)
-  }
-
-  return { invoiceId: payment.invoice_id, paymentId, amount: newAmount / 100, newOutstanding: Math.max(0, outstandingKobo / 100), status }
-}

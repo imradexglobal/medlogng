@@ -41,7 +41,7 @@ export function myEncounterCaps() {
     // Narrow bump of `status` alone (nurse triage) — held by doctors too,
     // since they hold `encounter.edit`.
     canBumpStatus: canEdit || can(me, 'encounter.status.advance'),
-    canClose: canEdit || can(me, 'encounter.close'),
+    canClose: canEdit,
   }
 }
 
@@ -90,18 +90,35 @@ export function isOpenEncounter(row) {
 }
 
 // Returns the patient's open encounter in this hospital (most recent first),
-// or null when the patient has no open encounter. Scoped to `orgId` when the
-// doc carries `organization_id` so legacy rows without one still match.
+// or null when the patient has no open encounter. Uses a targeted query
+// for open statuses to avoid loading all encounters and filtering client-side.
 export async function findOpenEncounterForPatient(pid, orgId = '') {
   if (!pid) return null
-  const rows = await listPatientEncounters(pid)
-  const open = rows.filter((r) => {
-    if (!isOpenEncounter(r)) return false
-    const rowOrg = r.raw?.organization_id || ''
-    if (orgId && rowOrg && rowOrg !== orgId) return false
-    return true
+  const openStatuses = ['arrived', 'vitals-taken', 'in-consultation', 'open', 'waiting']
+  // Query for encounters with open statuses, scoped to org when possible
+  const baseQuery = query(
+    collection(db, ENCOUNTERS),
+    where('patient_id', '==', pid),
+    where('status', 'in', openStatuses)
+  )
+  // If orgId provided, add org filter (needs index: patient_id + organization_id + status)
+  const q = orgId
+    ? query(baseQuery, where('organization_id', '==', orgId))
+    : baseQuery
+  const snap = await getDocs(q)
+  if (snap.empty) return null
+  // Return most recent open encounter
+  let latest = null
+  let latestTs = 0
+  snap.docs.forEach((d) => {
+    const data = d.data()
+    const ts = data.created_at?.toMillis ? data.created_at.toMillis() : (data.created_at || 0)
+    if (ts > latestTs) {
+      latestTs = ts
+      latest = toEncounterRow({ ...data, id: d.id })
+    }
   })
-  return open.length ? open[0] : null
+  return latest
 }
 
 function formatEncounterWhen(row) {
@@ -223,7 +240,7 @@ export async function createEncounter(input) {
     patient_name: input.patient_name || patient.name || '',
     organization_id: activeOrg,
     appointment_id: input.appointment_id || '',
-    status: input.status || 'arrived',
+    status: mapLegacyStatus(input.status) || 'arrived',
     type: input.type || '',
     clinician: input.clinician || '',
     chief_complaint: input.chief_complaint || '',
@@ -332,17 +349,35 @@ export async function addDiagnosis(encounterId, diagnosis) {
 }
 
 // ---- update note -----------------------------------------------------------
+export function normalizeStatusKey(status) {
+  if (!status) return ''
+  return String(status).trim().toLowerCase()
+}
+
+export function mapLegacyStatus(status) {
+  const lower = normalizeStatusKey(status)
+  const legacyMap = {
+    'open': 'arrived',
+    'Open': 'arrived',
+    'CLOSSED': 'closed',
+    'Closed': 'closed',
+  }
+  return legacyMap[lower] || lower
+}
+
 export async function updateEncounterNote(encounterId, note) {
   requireEncounterEdit()
   // The current status is needed to know whether the note actually moves the
   // encounter into consultation.
   const encSnap = await getDoc(doc(db, ENCOUNTERS, encounterId))
   const currentStatus = encSnap.exists() ? (encSnap.data().status || '') : ''
+  const normalizedStatus = normalizeStatusKey(currentStatus)
   await updateDoc(doc(db, ENCOUNTERS, encounterId), {
-    chief_complaint: note || '',
+    clinical_note: note || '',
+    chief_complaint: note ? '' : (encSnap.exists() ? encSnap.data().chief_complaint || '' : ''),
     updated_at: serverTimestamp(),
   })
-  await advanceTo(encounterId, currentStatus, 'note')
+  await advanceTo(encounterId, normalizedStatus, 'note')
   return true
 }
 

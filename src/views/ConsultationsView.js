@@ -3,7 +3,7 @@ import { shell, formModal, toast, closeModal, wireToast, openModal, statusBadge 
 import { authStore } from '../store/authStore.js'
 import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
-  myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META,
+  myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META, normalizeStatusKey, mapLegacyStatus,
 } from '../services/consultationService.js'
 import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
@@ -39,13 +39,13 @@ import { deleteEncounter } from '../services/deleteService.js'
 const STATUS_FLOW = ENCOUNTER_STATUS_FLOW_META
 
 function encLabel(status) {
-  const m = STATUS_FLOW.find((s) => s.key === status)
+  const m = STATUS_FLOW.find((s) => s.key === normalizeStatusKey(status))
   return m ? m.label : (status || 'Unknown')
 }
 
 function encBadge(status) {
-  const m = STATUS_FLOW.find((s) => s.key === status)
-  if (!m) return '<span class="pill">' + esc(status || 'Unknown') + '</span>'
+  const m = STATUS_FLOW.find((s) => s.key === normalizeStatusKey(status))
+  if (!m) return '<span class="pill">' + esc(normalizeStatusKey(status) || 'Unknown') + '</span>'
   return '<span class="pill ' + m.tone + '">' + esc(m.label) + '</span>'
 }
 
@@ -75,6 +75,21 @@ function waitTone(secs) {
   if (secs <= 900) return 'ok'      // <= 15 min
   if (secs <= 1800) return 'warn'   // 15-30 min
   return 'bad'                      // > 30 min
+}
+
+// Announce status changes to screen readers
+function announceStatusChange(message) {
+  const liveRegion = document.getElementById('liveRegion')
+  if (liveRegion) {
+    liveRegion.setAttribute('aria-live', 'polite')
+    liveRegion.textContent = message
+    liveRegion.hidden = false
+    // Hide after announcement is complete
+    setTimeout(() => {
+      liveRegion.hidden = true
+      liveRegion.textContent = ''
+    }, 5000)
+  }
 }
 
 export async function ConsultationsView(app, params = {}) {
@@ -160,7 +175,7 @@ export async function ConsultationsView(app, params = {}) {
       // Compact labels so all five tabs share one row with no sideways scroll
       // (title= carries the full name; .enc-tabs flex rules enforce the fit).
       '<div class="tabs enc-tabs" id="encTabs">' +
-      '<button data-wt="overview" class="on" title="Overview">Overview</button>' +
+      '<button data-wt="overview" class="on" title="Overview" aria-selected="true">Overview</button>' +
       '<button data-wt="note" title="Clinical note (SOAP)">SOAP note</button>' +
       '<button data-wt="plan" title="Treatment plan">Plan <span class="pill ok" id="planDot" hidden>✓</span></button>' +
       '<button data-wt="rx" title="Prescriptions">Rx <span class="pill info" id="rxCount" hidden>0</span></button>' +
@@ -201,7 +216,8 @@ export async function ConsultationsView(app, params = {}) {
   function patientMeta(e) {
     const p = pIndex.get(e.patientId)
     if (!p) {
-      return { pid: e.patientId || '', name: e.patientName || 'Unknown patient', mrn: '—', sex: '', age: '', dob: '', phone: '', phone_key: '', payer: '', allergy: '' }
+      return { pid: e.patientId || '', name: e.patientName || 'Unknown patient', mrn: '—', sex: '', age: '', dob: '', phone: '', phone_key: '', payer: '', allergy: '',
+        encounterType: e.type || '', clinician: e.clinician || '', triagePriority: '', lastActivity: '' }
     }
     return {
       pid: p.pid,
@@ -216,6 +232,11 @@ export async function ConsultationsView(app, params = {}) {
       phone_key: p.phone_key || '',
       payer: p.payer || '',
       allergy: p.allergy || '',
+      // Clinical details from the encounter
+      encounterType: e.type || '',
+      clinician: e.clinician || '',
+      triagePriority: e.status !== '' ? encLabel(e.status) : '',
+      lastActivity: e.createdAt ? waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0) : ''
     }
   }
 
@@ -331,8 +352,18 @@ export async function ConsultationsView(app, params = {}) {
     return activeBedByPatient.get(enc.patientId) || null
   }
 
-  let noteDirty = false
-  function visibleEncounters() {
+let noteDirty = false
+let searchTimeout = null
+
+// Debounced search - 300ms delay to prevent excessive re-renders
+function debouncedVisibleEncounters() {
+  clearTimeout(searchTimeout)
+  searchTimeout = setTimeout(() => {
+    renderQueue()
+  }, 300)
+}
+
+function visibleEncounters() {
     const q = String(document.getElementById('qSearch')?.value || '').trim().toLowerCase()
     const mode = document.getElementById('qStatus')?.value || 'open'
     return encounters.filter((e) => {
@@ -367,31 +398,38 @@ export async function ConsultationsView(app, params = {}) {
         ? '<div style="margin-top:4px"><span class="pill ok" title="Admitted to ' + esc(b.wardName) + ' · ' + esc(b.bedNumber) + '">🛏 ' +
           esc(String(b.wardName || '').slice(0, 14)) + ' · ' + esc(b.bedNumber) + '</span></div>'
         : ''
-      return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '">' +
+      // Build clinical details row for the status cell - include encounter type and triage info
+      const clinicalInfo = [
+        m.encounterType ? '<span class="mut" title="Encounter type: ' + esc(m.encounterType) + '">' + esc(m.encounterType.slice(0, 8)) + '</span>' : '',
+        m.triagePriority ? '<span class="mut" title="Triage: ' + esc(m.triagePriority) + '">' + esc(m.triagePriority.slice(0, 6)) + '</span>' : ''
+      ].filter(Boolean).join(' ')
+      return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '" role="button" aria-label="Encounter for ' + esc(m.name) + ', status: ' + encLabel(e.status) + '" tabindex="0">' +
         '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
         '<td><div>' + esc(m.mrn) + '</div><div class="mut">' + esc(who || 'No demographics on file') + '</div>' +
         (m.phone ? '<div class="mut">' + esc(m.phone) + '</div>' : '') + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
-        '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
+        '<td>' + encBadge(e.status) + clinicalInfo + bedBadge + '</td></tr>'
     }).join('')
-    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter</td></tr>') + '</tbody>'
+    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
       r.onclick = () => {
-        if (noteDirty && !window.confirm('You have an unsaved note. Switch encounters anyway?')) return
         noteDirty = false
-        selectedEncounter = encounters.find((e) => e.id === r.getAttribute('data-id')) || null
+        selectedEncounter = encounters.find((e) => e.id === r.dataset.id) || null
         renderQueue()
         renderWorkspace()
+        announceStatusChange('Encounter selected: ' + (selectedEncounter ? patientMeta(selectedEncounter).name : 'none'))
       }
       r.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          if (noteDirty && !window.confirm('You have an unsaved note. Switch encounters anyway?')) return
           noteDirty = false
-          selectedEncounter = encounters.find((e) => e.id === r.getAttribute('data-id')) || null
+          selectedEncounter = encounters.find((e) => e.id === r.dataset.id) || null
           renderQueue()
           renderWorkspace()
+          announceStatusChange('Encounter selected: ' + (selectedEncounter ? patientMeta(selectedEncounter).name : 'none'))
+          // Return focus to the clicked row for continued keyboard navigation
+          r.focus()
         }
       })
     })
@@ -403,14 +441,28 @@ export async function ConsultationsView(app, params = {}) {
   // strip and the action bar below it stay pinned in place.
   function showWsTab(name) {
     wsTab = name
-    document.querySelectorAll('#encTabs button').forEach((b) =>
-      b.classList.toggle('on', b.getAttribute('data-wt') === name))
+    document.querySelectorAll('#encTabs button').forEach((b) => {
+      b.classList.toggle('on', b.getAttribute('data-wt') === name)
+      b.setAttribute('aria-selected', b.getAttribute('data-wt') === name)
+    })
     document.querySelectorAll('#encWsBody [data-wp]').forEach((p) => {
       p.hidden = p.getAttribute('data-wp') !== name
     })
+    // Return focus to the previously focused element or the first tab button
+    const focusedEl = document.activeElement
+    if (focusedEl && focusedEl.tagName === 'BUTTON' && focusedEl.closest('#encTabs')) {
+      // Already focused on a tab, keep it
+    } else {
+      const firstTab = document.querySelector('#encTabs button')
+      if (firstTab) firstTab.focus()
+    }
   }
   document.querySelectorAll('#encTabs button').forEach((b) => {
-    b.onclick = () => showWsTab(b.getAttribute('data-wt'))
+    b.onclick = () => {
+      showWsTab(b.getAttribute('data-wt'))
+      // Announce tab change to screen readers
+      announceStatusChange('Workspace tab changed to ' + b.getAttribute('data-wt'))
+    }
   })
 
   function renderWorkspace() {
@@ -440,6 +492,7 @@ export async function ConsultationsView(app, params = {}) {
       const delSlot0 = document.getElementById('delEncSlot')
       if (delSlot0) delSlot0.innerHTML = ''
       paintFlow(-1)
+      announceStatusChange('No encounter selected - use the queue to select a patient')
       return
     }
     const e = selectedEncounter
@@ -534,7 +587,7 @@ export async function ConsultationsView(app, params = {}) {
           '</div>'
         : ''
     }
-    if (noteEl && document.activeElement !== noteEl) noteEl.value = e.chiefComplaint ? 'S: ' + e.chiefComplaint : ''
+    if (noteEl && document.activeElement !== noteEl) noteEl.value = e.clinical_note ? 'S: ' + e.clinical_note : (e.chiefComplaint ? 'S: ' + e.chiefComplaint : '')
     // The saved plan is data, not an editor — show it read-only when present so
     // "Plan set" is backed by something the prescriber can actually read back.
     const planBox = document.getElementById('planBox')

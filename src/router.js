@@ -95,7 +95,10 @@ export async function handleRoute() {
   const found = matchRoute(window.location.hash)
   if (!found) { navigate('/login'); return }
   const { route, params } = found
-  const key = route.path + '?' + JSON.stringify(params)
+  // Tab query on the patient chart is handled in-view. Including it in the
+  // mount key would remount the whole 360 page on every tab click.
+  const { tab: _tab, ...routeParams } = params
+  const key = route.path + '?' + JSON.stringify(routeParams)
   // Only latch AFTER the guards below: they early-return without rendering, and
   // latching first would make the later retry (auth becoming ready) a no-op and
   // strand the user on the boot splash.

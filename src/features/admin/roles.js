@@ -15,6 +15,7 @@ export const ALL_CAPS = [
   'lab.result.verify',
   'lab.catalogue.manage',
   'appointment.create',
+  'appointment.update',
   'beds.manage',
   'documents.upload',
   'prescription.dispense',

@@ -2,6 +2,7 @@
 import { authStore } from '../store/authStore.js'
 import { logout, myActiveMembership } from '../services/authService.js'
 import { navigate } from '../router.js'
+import { can } from '../features/admin/roles.js'
 import { esc } from '../utils/sanitize.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { onUpdate, getSyncMode } from '../services/clinicalOutbox.js'
@@ -9,16 +10,16 @@ import { createAllergyTagInput } from './AllergyTagInput.js'
 import { getHostNetworkInfo } from '../services/hostService.js'
 
 export const NAV = [
-  { path: '/', label: 'Dashboard', icon: '▦' },
-  { path: '/patients', label: 'Patients', icon: '◉' },
-  { path: '/appointments', label: 'Appointments', icon: '◷' },
-  { path: '/consultations', label: 'Consultations', icon: '✚' },
-  { path: '/admissions', label: 'Admissions', icon: '▤' },
-  { path: '/laboratory', label: 'Laboratory', icon: '♳' },
-  { path: '/pharmacy', label: 'Pharmacy', icon: '💊' },
-  { path: '/billing', label: 'Billing', icon: '₦' },
-  { path: '/reports', label: 'Reports', icon: '📊' },
-  { path: '/admin', label: 'Administration', icon: '⚙' },
+  { path: '/', label: 'Dashboard', icon: '▦', cap: null },
+  { path: '/patients', label: 'Patients', icon: '◉', cap: ['patient.create', 'patient.demographics.update'] },
+  { path: '/appointments', label: 'Appointments', icon: '◷', cap: ['appointment.create', 'appointment.update'] },
+  { path: '/consultations', label: 'Consultations', icon: '✚', cap: ['encounter.create', 'encounter.edit', 'encounter.status.advance'] },
+  { path: '/admissions', label: 'Admissions', icon: '▤', cap: ['beds.manage'] },
+  { path: '/laboratory', label: 'Laboratory', icon: '♳', cap: ['lab.order', 'lab.sample.collect', 'lab.result.enter', 'lab.result.verify', 'lab.catalogue.manage'] },
+  { path: '/pharmacy', label: 'Pharmacy', icon: '💊', cap: ['prescription.dispense', 'prescription.create', 'medication.administer'] },
+  { path: '/billing', label: 'Billing', icon: '₦', cap: ['billing.invoice', 'billing.payment'] },
+  { path: '/reports', label: 'Reports', icon: '📊', cap: null },
+  { path: '/admin', label: 'Administration', icon: '⚙', cap: ['admin.roles.manage', 'admin.devices.manage'] },
 ]
 
 export function statusBadge(s) {
@@ -68,9 +69,11 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
           '<span><strong>MediLog NG</strong><em id="sideOrg">' + esc(org) + '</em></span>' +
           '<button class="iconbtn side-close only-mobile" id="sideClose" aria-label="Close navigation">✕</button></div>' +
         '<nav class="side-nav" aria-label="Main">' +
-          NAV.map((n) => '<a href="#' + n.path + '" class="' + (n.path === active ? 'on' : '') + '"' +
-            (n.path === active ? ' aria-current="page"' : '') + '>' +
-            '<span class="ic" aria-hidden="true">' + n.icon + '</span>' + esc(n.label) + '</a>').join('') +
+          NAV
+            .filter((n) => n.cap == null || n.cap.every((c) => can(me, c)))
+            .map((n) => '<a href="#' + n.path + '" class="' + (n.path === active ? 'on' : '') + '"' +
+              (n.path === active ? ' aria-current="page"' : '') + '>' +
+              '<span class="ic" aria-hidden="true">' + n.icon + '</span>' + esc(n.label) + '</a>').join('') +
         '</nav>' +
         '<div class="side-foot">' +
           '<div class="sync"><span class="dot" id="syncDot"></span><span><strong id="syncState" aria-live="polite">' +

@@ -7,7 +7,8 @@
   "description": "MediLog NG — EMR for Nigerian hospitals (offline-first web + Android + Electron desktop)",
   "scripts": {
     "smoke": "node scripts/smoke.mjs",
-    "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/administration.test.mjs && node scripts/test/lab.imaging.test.mjs && node scripts/test/lab.lims.test.mjs && node scripts/test/delete.service.test.mjs && node scripts/test/billing.print.test.mjs",
+    "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/administration.test.mjs && node scripts/test/lab.imaging.test.mjs && node scripts/test/lab.lims.test.mjs && node scripts/test/delete.service.test.mjs && node scripts/test/billing.print.test.mjs && node scripts/test/firestore.rules.test.mjs && node scripts/test/admission.session.test.mjs",
+    "test:e2e": "playwright test e2e/onboarding.spec.js",
     "test": "node scripts/smoke.mjs && npm run test:services",
     "test:hub": "node scripts/test/hub.smoke.mjs",
     "hub": "node hub/server.js",
@@ -37,7 +38,8 @@
     "electron": "^34.0.0",
     "electron-builder": "^25.1.8",
     "firebase-tools": "^15.17.0",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "@playwright/test": "^1.45.0"
   },
   "engines": {
     "node": ">=20"

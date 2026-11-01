@@ -328,7 +328,9 @@ export function openEncounterExistsError(existing) {
 // equality filter (no composite index needed) fetches a patient's rows.
 export async function listPatientDocs(coll, pid, { limitN = 50 } = {}) {
   try {
-    const snap = await getDocs(query(collection(db, coll), where('patient_id', '==', pid), limit(limitN)))
+    const constraints = [where('patient_id', '==', pid)]
+    if (Number.isFinite(limitN) && limitN > 0) constraints.push(limit(limitN))
+    const snap = await getDocs(query(collection(db, coll), ...constraints))
     const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     rows.sort((a, b) => tsMillis(b.created_at) - tsMillis(a.created_at))
     return { rows, error: null }

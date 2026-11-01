@@ -36,10 +36,12 @@ export async function logout() {
 }
 
 export async function setActiveOrg(orgId, orgName) {
-  const store = authStore.getState()
-  store.activeOrg = orgId
-  store.activeOrgName = orgName || ''
-  await saveLastLogin(store.user.email)
+  const user = authStore.getState().user
+  // Persist the hospital choice through the observable store. Mutating the
+  // returned state object directly updated this tab only, so a page refresh
+  // restored an empty activeOrg and made hospital-scoped views look unlinked.
+  authStore.setState({ activeOrg: orgId || null, activeOrgName: orgName || '' })
+  if (user?.email) await saveLastLogin(user.email)
 }
 
 export function myActiveMembership() {
@@ -70,23 +72,26 @@ export function initAuthListener() {
   // router guard gates on `ready`, so this is the ONLY place that flips it —
   // an empty stub here left the app on the boot splash forever.
   onAuthStateChanged(auth, async (u) => {
-    let memberships = []
+    const previous = authStore.getState()
+    const sameUser = Boolean(u && previous.user?.uid === u.uid)
+    let memberships = sameUser ? previous.memberships : []
+    let membershipLoadSucceeded = !u
     if (u) {
-      // Never let a dead connection stall the boot: race the membership read
-      // against a hard deadline. getDocsTolerant already falls back to the
-      // IndexedDB cache on timeout; this deadline only covers the case where
-      // the cache is empty too (cold first load, offline).
-      memberships = await Promise.race([
-        loadMemberships(u.uid).catch(() => []),
-        new Promise((res) => setTimeout(() => res([]), 8000)),
-      ])
+      try {
+        memberships = await loadMemberships(u.uid)
+        membershipLoadSucceeded = true
+      } catch (e) {
+        // A read failure is not evidence that membership was revoked. Keep
+        // same-user cached memberships and the saved hospital selection.
+        console.warn('[auth] membership refresh failed; keeping saved access state:', e?.message || e)
+      }
     }
-    const store = authStore.getState()
-    // Keep the active hospital across reloads when the user is still a
-    // member; otherwise drop it so HospitalChoiceView re-picks.
-    let activeOrg = store.activeOrg
-    let activeOrgName = store.activeOrgName
-    if (activeOrg && !memberships.some((m) => m.organization_id === activeOrg && m.status === 'active')) {
+    let activeOrg = sameUser ? previous.activeOrg : null
+    let activeOrgName = sameUser ? previous.activeOrgName : ''
+    const selectedMembershipActive = memberships.some((m) => m.status === 'active' && m.organization_id === activeOrg)
+    // Clear a selection only after a successful membership read confirms the
+    // user no longer has any active hospital membership.
+    if (activeOrg && membershipLoadSucceeded && !selectedMembershipActive) {
       activeOrg = null
       activeOrgName = ''
     }
@@ -147,14 +152,40 @@ export async function registerNewHospital(data) {
       role: 'hospital_admin',
       capabilities: ['*'],
     })
+    // Persist active org in auth store so the user is immediately logged-in
+    authStore.setState({
+      activeOrg: orgId,
+      activeOrgName: data.name,
+    })
   }
   return orgId
 }
 
 export async function registerJoinHospital(data) {
-  // Join existing hospital by sending invitation
+  // Join an existing hospital by creating a PENDING membership. The
+  // organization_memberships create rule allows any signed-in user to create
+  // their own membership with status 'pending' — no admin.roles.manage needed.
+  // The admin later approves it (moves to 'active' with the right role).
   const orgId = data.organizationId
-  await createInvite(orgId, data.email, data.role, { name: data.name })
+  const u = auth.currentUser
+  if (!u) throw new Error('Not signed in')
+  const mshipId = orgId + '_' + u.uid
+  await setDoc(doc(db, 'organization_memberships', mshipId), {
+    user_id: u.uid,
+    organization_id: orgId,
+    status: 'pending',
+    role: data.role || 'receptionist',
+    capabilities: [],
+    staff_name: data.name || '',
+    email: data.email || '',
+    created_at: serverTimestamp(),
+    updated_at: serverTimestamp(),
+  })
+  // Persist the org so the user sees their pending request in the UI
+  authStore.setState({
+    activeOrg: orgId,
+    activeOrgName: '',
+  })
   return true
 }
 

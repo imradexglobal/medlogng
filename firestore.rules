@@ -187,7 +187,10 @@ match /patients/{pid} {
   allow create: if signedIn()
     && request.resource.data.surname is string
     && request.resource.data.status == 'active';
+  // Pin update to the patient.demographics capability and org membership.
   allow update: if signedIn()
+    && hasCap(resource.data.organization_id, 'patient.demographics.update')
+    && resource.data.organization_id == request.resource.data.organization_id
     && !(resource.data.status == 'merged_into' && request.resource.data.merged_into != resource.data.merged_into);
   // Patients are a global registry stamped with the org that FIRST
   // registered them — only that hospital's data.delete holders can remove
@@ -269,7 +272,7 @@ match /diagnoses/{id} {
 }
 match /clinical_notes/{id} {
   allow read: if signedIn();
-  allow create: if hasCap(resource.data.organization_id, 'encounter.create');
+  allow create: if hasCap(request.resource.data.organization_id, 'encounter.create');
   allow update: if hasCap(resource.data.organization_id, 'encounter.edit');
   allow delete: if canDelete(resource.data.organization_id);
 }
@@ -292,7 +295,7 @@ match /documents/{id} {
   allow delete: if canDelete(resource.data.organization_id);
 }
 match /medication_requests/{id} {
-  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
+  allow read: if resource.data.organization_id is string && (hasCap(resource.data.organization_id, 'prescription.dispense') || hasCap(resource.data.organization_id, 'medication.administer'));
   allow create: if hasCap(request.resource.data.organization_id, 'prescription.create');
   // Pharmacists (prescription.dispense) may mark a request issued and record what
   // has gone out per line. Only fulfilment fields may change — patient,
@@ -313,10 +316,10 @@ match /medication_requests/{id} {
   allow delete: if canDelete(resource.data.organization_id);
 }
 // One doc per dose actually given to the patient (who, what, when, route, site).
-  // Append-only, like dispensations: a mistake is corrected by a reversal event,
-  // never by rewriting the record of care that happened.
-match /medication_requests/{id} {
-  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
+// Append-only, like dispensations: a mistake is corrected by a reversal event,
+// never by rewriting the record of care that happened.
+match /medication_administrations/{id} {
+  allow read: if resource.data.organization_id is string && (hasCap(resource.data.organization_id, 'prescription.dispense') || hasCap(resource.data.organization_id, 'medication.administer'));
   allow create: if hasCap(request.resource.data.organization_id, 'medication.administer');
   allow update, delete: if false;
 }
@@ -329,6 +332,12 @@ match /dispensations/{id} {
 match /stock_lots/{id} {
   allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
   allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  // Stock counts, batch/expiry and status only — never the org pin.
+  allow update: if resource.data.organization_id is string
+    && resource.data.organization_id == request.resource.data.organization_id
+    && hasCap(resource.data.organization_id, 'prescription.dispense')
+    && request.resource.data.diff(resource.data).changedKeys()
+      .hasOnly(['name', 'drug_code', 'strength', 'pack_size', 'sku', 'unit', 'stock', 'price', 'purchase_price', 'batch', 'expiry', 'status', 'supplier', 'updated_at']);
   // Client refuses while stock > 0 so the movement ledger stays balanced.
   allow delete: if canDelete(resource.data.organization_id);
 }
@@ -559,7 +568,7 @@ match /audit_events/{id} {
   allow create: if signedIn() && request.resource.data.actor_user_id == uid();
   // AdminView and super-admins may read the audit feed.
   allow read: if signedIn() && (isSuper()
-    || (request.auth.token.email_verified && /* future: org check */ true));
+    || hasCap(resource.data.organization_id, 'admin.roles.manage'));
   allow update, delete: if false;
 }
 // Sync cursors — per-device, authenticated.

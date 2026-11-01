@@ -27,7 +27,15 @@ export async function HospitalChoiceView(app) {
         await setActiveOrg(only.organization_id, org?.name || only.organization_id)
       } catch {}
     }
-    navigate('/')
+    // Only navigate to '/' if activeOrg was set; otherwise go to hospital-choice
+    // so the user can select their hospital. This handles the case where the
+    // auth listener's membership race condition clears activeOrg before it's saved.
+    const { activeOrg: currentActiveOrg } = authStore.getState()
+    if (currentActiveOrg) {
+      navigate('/')
+    } else {
+      navigate('/hospital-choice')
+    }
     return
   }
 

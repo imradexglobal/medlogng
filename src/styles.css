@@ -604,6 +604,19 @@ a { color: var(--primary); }
 .allergy-tags-display .mut { color: #94a3b8; font-style: italic; }
 
 /* ===== Patient Dashboard ===== */
+.pd-history-note { padding: 9px 12px; border-radius: 8px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; font-size: .82rem; }
+.pd-updated { margin: -8px 0 0; color: var(--emr-muted); font-size: .74rem; text-align: right; }
+.pd-vital-time { margin-top: 5px; color: var(--emr-muted); font-size: .68rem; }
+.pd-context-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.pd-context-card { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--emr-line); border-radius: 9px; background: #fff; text-decoration: none; }
+.pd-context-card span { color: var(--emr-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
+.pd-context-card strong { color: var(--emr-ink); font-size: .86rem; }
+.pd-context-card:hover { border-color: var(--emr-teal); }
+.pd-context-active { border-color: #fcd34d; background: #fffbeb; }
+.pd-consent-list { display: grid; gap: 8px; margin: 10px 0; }
+.pd-consent-list article { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 9px; border: 1px solid var(--emr-line); border-radius: 8px; font-size: .82rem; }
+.pd-consent-list article span { color: var(--emr-muted); }
+.pd-consent-list article p { grid-column: 1 / -1; margin: 0; color: var(--emr-muted); }
 .dashboard-pane { display: flex; flex-direction: column; gap: 16px; }
 
 /* Vitals Snapshot Grid */
@@ -824,4 +837,98 @@ a { color: var(--primary); }
   .feed-filter select.input { min-width: 160px; }
   .feed-item { grid-template-columns: 32px 1fr; }
   .feed-meta { grid-column: span 2; flex-direction: row; justify-content: space-between; align-items: center; width: 100%; }
+}
+
+/* Patient 360 — tabs, feed, charts, empty states */
+.tabs[role="tablist"] button[aria-selected="true"] {
+  color: var(--emr-teal-d);
+  border-color: var(--emr-teal);
+}
+.phead-main { flex: 1; min-width: 220px; }
+.phead-side { min-width: 180px; }
+.pavatar-wrap { display: inline-flex; }
+.pd-idkv { grid-template-columns: 1fr 1fr; }
+.pd-payer { min-width: 140px; padding: 4px 8px; font-size: .82rem; }
+.allergy { position: relative; padding-right: 36px; }
+.allergy-dismiss {
+  position: absolute; right: 8px; top: 6px; border: 0; background: transparent;
+  color: inherit; cursor: pointer; font-size: 1rem; line-height: 1;
+}
+.allergy-none { background: #f8fafc; border-color: var(--emr-line); color: var(--emr-muted); }
+.pstatus.ok { background: #dcfce7; color: #166534; }
+.pstatus.warn { background: #fef3c7; color: #92400e; }
+.pstatus.info { background: #e0f2fe; color: #075985; }
+.vital-trend.na { color: var(--emr-muted); }
+.feed-item.is-clickable { cursor: pointer; }
+.feed-item.is-clickable:focus-visible { outline: 2px solid var(--emr-teal); outline-offset: 2px; }
+.pd-toolbar {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  margin-bottom: 12px;
+}
+.pd-search { max-width: 260px; }
+.pd-caption {
+  caption-side: top; text-align: left; font-weight: 700; font-size: .78rem;
+  color: var(--emr-muted); padding: 0 0 8px;
+}
+.pd-empty { text-align: center; padding: 28px 16px; }
+.pd-empty-icon { font-size: 1.6rem; margin-bottom: 8px; }
+.pd-perm, .pd-offline, .pd-notice {
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; font-size: .85rem;
+}
+.pd-perm { background: #f8fafc; border: 1px solid var(--emr-line); color: var(--emr-muted); }
+.pd-offline { background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; }
+.pd-notice { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+.pd-ok { color: #047857; }
+.pd-bad { color: #b91c1c; }
+.pd-gap { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.pd-allergy-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pd-filter-label { margin: 0; display: flex; align-items: center; gap: 8px; }
+.pd-seg { display: inline-flex; gap: 4px; }
+.pd-seg .btn.on { border-color: var(--emr-teal); color: var(--emr-teal-d); }
+.pill-btn { border: 0; background: transparent; padding: 0; cursor: pointer; }
+.pd-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.pd-chart-card h4 { margin: 0 0 8px; font-size: .82rem; }
+.pd-spark { width: 100%; height: 88px; }
+.pd-spark-line { stroke: var(--emr-teal); stroke-width: 2; }
+.pd-spark-range { display: flex; justify-content: space-between; font-size: .7rem; color: var(--emr-muted); }
+.pd-adm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.pd-adm-card {
+  background: #fff; border: 1px solid var(--emr-line); border-radius: 12px; padding: 12px 14px;
+}
+.pd-adm-card p { margin: 6px 0 0; font-size: .85rem; }
+.pd-adm-top { display: flex; align-items: center; gap: 8px; }
+.pd-bed-badge {
+  background: #f0fdfa; border: 1px solid var(--emr-teal); color: var(--emr-teal-d);
+  border-radius: 999px; padding: 2px 10px; font-size: .75rem; font-weight: 700;
+}
+.photo-dropzone {
+  border: 1.5px dashed var(--emr-line); border-radius: 12px; padding: 16px; text-align: center;
+}
+.photo-dropzone.on { border-color: var(--emr-teal); background: #f0fdfa; }
+.photo-preview { margin-top: 10px; }
+.pd-doc-preview { max-width: 100%; max-height: 60vh; display: block; margin: 0 auto; }
+.pd-doc-frame { width: 100%; min-height: 50vh; border: 1px solid var(--emr-line); }
+.pd-section { margin-top: 16px; }
+.pd-section h4 {
+  margin: 0 0 8px; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--emr-muted);
+}
+.pd-pre { white-space: pre-wrap; border: 1px solid var(--emr-line); border-radius: 8px; padding: 8px 10px; }
+.pd-kv3 { grid-template-columns: 1fr 1fr 1fr; }
+.pd-full { grid-column: 1 / -1; }
+.pd-kv4 { grid-template-columns: repeat(4, 1fr); }
+.pd-modal-note { margin: 0 0 10px; }
+.skel-card { min-height: 88px; }
+.btn.is-busy { position: relative; pointer-events: none; opacity: .75; }
+.btn.is-busy::after {
+  content: ''; width: 12px; height: 12px; margin-left: 8px; display: inline-block;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: pd-spin .6s linear infinite; vertical-align: -1px;
+}
+@keyframes pd-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 640px) {
+  .phead-main { min-width: 0; }
+  .pd-kv3, .pd-kv4 { grid-template-columns: 1fr 1fr; }
+  .pd-search { max-width: none; flex: 1; }
+  .pd-doc-frame { min-height: 70vh; }
 }

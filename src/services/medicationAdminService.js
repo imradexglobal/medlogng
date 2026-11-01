@@ -61,9 +61,11 @@ export async function listEncounterAdministrations(encounterId) {
 
 // Every dose given during one inpatient stay (ward trail).
 export async function listSessionAdministrations(sessionId) {
-  if (!sessionId) return []
+  const { activeOrg } = authStore.getState()
+  if (!activeOrg || !sessionId) return []
   const snap = await getDocs(query(
     collection(db, DOSES),
+    where('organization_id', '==', activeOrg),
     where('admission_session_id', '==', sessionId),
   ))
   return sortDoses(snap.docs.map((d) => toDoseRow({ ...d.data(), id: d.id })))
