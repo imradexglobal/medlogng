@@ -97,7 +97,7 @@ export async function RegisterPatientView(app) {
       actions: currentStep > 0 ? '<button class="btn ghost" id="backBtn">← Back</button>' : '<a class="btn ghost" href="#/patients">← Cancel</a>',
       body: `
         <div class="reg-container">
-          <div class="progress-bar" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100" aria-label="Step ${currentStep + 1} of ${STEPS.length} — ${step.label}">
             <div class="progress-fill" style="width: ${progress}%"></div>
             <div class="progress-steps">
               ${STEPS.map((s, i) => `<span class="step-dot ${i < currentStep ? 'done' : ''} ${i === currentStep ? 'active' : ''}" data-step="${i}">${i < currentStep ? '✓' : s.icon}</span>`).join('')}

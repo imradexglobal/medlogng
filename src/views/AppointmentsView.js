@@ -1,5 +1,5 @@
 // Appointments — day schedule with Firestore persistence (offline-first, cached).
-import { shell, statusBadge, formModal, toast, closeModal, wireToast } from '../components/shell.js'
+import { shell, statusBadge, formModal, toast, closeModal, wireToast, skeletonCard } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
   listOrgAppointments, listOrgAppointmentsPage, subscribeOrgAppointments, createAppointment, updateAppointmentStatus, myAppointmentCaps,
@@ -58,14 +58,15 @@ export async function AppointmentsView(app) {
     actions:
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>' +
       (caps.canCreate ? '<button class="btn" id="bookBtn">+ Book appointment</button>' : ''),
-    body:
+body:
+      '<div style="padding:24px">' + skeletonCard(4) + '</div>' +
       '<div class="grid4"><div class="stat"><em>Scheduled</em><strong id="appoint-scheduled">0</strong><span>today across clinics</span></div>' +
       '<div class="stat"><em>Checked-in</em><strong id="appoint-checked-in">0</strong><span>queue updated live</span></div>' +
       '<div class="stat"><em>No-shows</em><strong id="appoint-noshow">0</strong><span>follow-up list ready</span></div>' +
       '<div class="stat"><em>Total</em><strong id="appoint-total">0</strong><span>all appointments</span></div></div>' +
       '<div class="card"><div class="toolbar" style="gap:10px;align-items:flex-start">' +
       '<label class="fld" style="margin:0"><span>Date</span><input type="date" id="appt-date" class="input" style="width:170px;padding:8px 10px;border:1px solid var(--emr-line);border-radius:10px;font-size:.86rem" /></label>' +
-      '<input type="search" id="appt-search" placeholder="Search patient by name, MRN or phone…" class="input" style="width:250px;padding:8px 12px;border:1px solid var(--emr-line);border-radius:10px;font-size:.86rem" />' +
+      '<input type="search" id="appt-search" aria-label="Search appointments by patient or MRN" placeholder="Search patient by name, MRN or phone…" class="input" style="width:250px;padding:8px 12px;border:1px solid var(--emr-line);border-radius:10px;font-size:.86rem" />' +
       '<div class="chips" id="appt-chips">' +
       ['All', ...CLINICS].map((c, i) => '<button class="chip' + (i === 0 ? ' on' : '') + '" data-c="' + esc(c) + '">' + esc(c) + '</button>').join('') +
       '</div></div>' +

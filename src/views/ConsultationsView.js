@@ -4,7 +4,6 @@ import { authStore } from '../store/authStore.js'
 import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
   myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META,
-  ENCOUNTER_TYPES, createEncounter, findOpenEncounterForPatient,
 } from '../services/consultationService.js'
 import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
@@ -12,7 +11,6 @@ import {
 } from '../services/admissionService.js'
 import { myLabCaps } from '../services/laboratoryService.js'
 import { listOrgDrugs, findOpenRequest, listRequestsForEncounter, updateRequestItems } from '../services/pharmacyService.js'
-import { getClinicalStaff } from '../services/authService.js'
 import { administerDose, myAdminCaps } from '../services/medicationAdminService.js'
 import { openPrescriptionModal } from '../features/pharmacy/prescriptionModal.js'
 import * as R from '../features/pharmacy/requests.js'
@@ -138,14 +136,14 @@ export async function ConsultationsView(app, params = {}) {
     title: 'Consultations',
     subtitle: 'Arrival → Vitals → Consultation → Diagnosis → Plan → Close',
     actions:
-      '<button class="btn" id="newEncB">+ New encounter</button>' +
+      '<button class="btn" id="newEncB">+ Start encounter</button>' +
       '<button class="btn ghost" id="refreshBtn">↻ Refresh</button>',
     body:
       // Both panels are viewport-height on desktop (.consult-grid): the queue
       // scrolls in its own box and the workspace scrolls between its tab strip
       // and its fixed action bar, so neither drags the whole page around.
       '<div class="grid2x consult-grid"><div class="card"><div class="card-head"><h3>Encounter queue</h3><span class="pill info" id="enc-count">0 open</span></div>' +
-      '<div class="toolbar" style="margin:0 0 8px"><div style="position:relative;display:inline-block"><input class="input" id="qSearch" placeholder="Search patient, MRN or mobile…" style="max-width:240px"><button type="button" id="qClear" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--emr-muted);cursor:pointer;font-size:1.2rem;line-height:1;padding:0" hidden>✕</button></div>' +
+      '<div class="toolbar" style="margin:0 0 8px"><div style="position:relative;display:inline-block"><input class="input" id="qSearch" aria-label="Search encounters by patient, MRN or mobile" placeholder="Search patient, MRN or mobile…" style="max-width:240px"><button type="button" id="qClear" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--emr-muted);cursor:pointer;font-size:1.2rem;line-height:1;padding:0" hidden>✕</button></div>' +
       '<select class="input" id="qStatus" style="max-width:170px"><option value="open" selected>Open encounters</option><option value="closed">Closed</option><option value="all">All</option>' +
       STATUS_FLOW.map((s) => '<option value="' + s.key + '">' + esc(s.label) + '</option>').join('') + '</select></div>' +
       '<div class="tblwrap"><table class="tbl" id="enc-tbl"><thead><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr></thead><tbody>' +
@@ -386,6 +384,16 @@ export async function ConsultationsView(app, params = {}) {
         renderQueue()
         renderWorkspace()
       }
+      r.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          if (noteDirty && !window.confirm('You have an unsaved note. Switch encounters anyway?')) return
+          noteDirty = false
+          selectedEncounter = encounters.find((e) => e.id === r.getAttribute('data-id')) || null
+          renderQueue()
+          renderWorkspace()
+        }
+      })
     })
     ensureVisibleMeta()
   }
@@ -826,87 +834,11 @@ export async function ConsultationsView(app, params = {}) {
   }
 
   // ---- start a new encounter from the queue page ---------------------------
-  // Same modal shape as PatientsView / PatientDetailView, but reached without
-  // leaving the worklist: pick the patient, clinician, type and complaint, then
-  // deep-link straight into the new encounter's workspace.
-  async function openNewEncounter() {
-    const { activeOrg } = authStore.getState()
-    if (!activeOrg) { toast('No hospital selected'); return }
-    if (!caps.canCreate) { toast('Your role cannot create encounters (missing "encounter.create").'); return }
-
-    // Patients for the picker: labels carry MRN + phone so the searchable
-    // select can match name, ID or mobile — the same haystack the patient page
-    // uses. One bounded page is enough for the picker; a new patient is
-    // registered on the Patients page first.
-    let patientOpts = []
-    try {
-      const pats = await listOrgPatientsPage(activeOrg, { pageSize: 200 }).then((r) => r.rows)
-      patientOpts = pats.map((p) => ({
-        value: p.pid,
-        label: p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key),
-      }))
-    } catch (e) {
-      console.warn('[consultations] patient picker load failed:', e?.message)
-    }
-    if (!patientOpts.length) { toast('No patients registered yet — add one on the Patients page first.'); return }
-
-    // Clinical staff for the clinician dropdown, with a free-text fallback so
-    // an encounter is never blocked by incomplete staff records.
-    let staff = []
-    try { staff = await getClinicalStaff(activeOrg) } catch (e) { console.warn('[consultations] staff load failed:', e?.message) }
-    const clinicianField = staff.length
-      ? { name: 'clinician', label: 'Clinician', type: 'select', options: staff, required: true, searchable: staff.length > 1, searchPlaceholder: 'Name or role…' }
-      : { name: 'clinician', label: 'Clinician (no staff on file — type a name)', required: true, placeholder: 'e.g. Dr. N. Eze' }
-
-    formModal({
-      title: 'Start encounter',
-      submitLabel: 'Open encounter →',
-      fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, searchable: patientOpts.length > 1, searchPlaceholder: 'Name, MRN or mobile…' },
-        { name: 'type', label: 'Type', type: 'select', options: ENCOUNTER_TYPES, required: true },
-        clinicianField,
-        { name: 'chief_complaint', label: 'Chief complaint', full: true, required: true, placeholder: 'e.g. Fever, headache, chest pain…' },
-      ],
-      onSubmit: async (v) => {
-        const pid = String(v.patient_id || '').trim()
-        if (!pid) throw new Error('Select a patient.')
-        const patient = patientOpts.find((o) => o.value === pid)
-        const pName = patient ? patient.label.split(' · ')[0] : ''
-
-        // Duplicate guard before write: spare the user a rejected submission.
-        try {
-          const existing = await findOpenEncounterForPatient(pid, activeOrg)
-          if (existing) {
-            openModal('Open encounter already exists',
-              '<p class="sub"><strong>' + esc(pName) + '</strong> already has an open encounter' +
-              (existing.id ? ' (' + String(existing.id).slice(0, 8) + '…)' : '') +
-              ' · ' + esc(existing.status || 'Open') + '. Close it before opening a new one.</p>' +
-              '<div class="mrow"><button class="btn ghost" data-close>Cancel</button>' +
-              '<a class="btn" href="#/consultations?enc=' + encodeURIComponent(existing.id) + '" data-close>Go to encounter →</a></div>')
-            document.querySelectorAll('#modalBody [data-close]').forEach((b) => { b.onclick = closeModal })
-            return
-          }
-        } catch (e) {
-          console.warn('[consultations] open-encounter pre-check failed:', e?.message)
-        }
-
-        try {
-          const created = await createEncounter({
-            patient_id: pid,
-            patient_name: pName,
-            status: 'arrived',
-            type: v.type || '',
-            clinician: v.clinician || '',
-            chief_complaint: v.chief_complaint || '',
-          })
-          closeModal()
-          toast('Encounter opened for ' + esc(pName))
-          navigate('/consultations?enc=' + encodeURIComponent(created.id))
-        } catch (e) {
-          throw new Error(friendlyWriteError(e))
-        }
-      },
-    })
+  // One shared full-page form for EVERY entry point (queue, patient list,
+  // patient chart): same fields, same duplicate guard, and it deep-links
+  // straight into the new encounter's workspace.
+  function openNewEncounter() {
+    navigate('/encounters/new')
   }
 
   function openDiagnosisForm() {

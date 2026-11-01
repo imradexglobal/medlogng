@@ -117,7 +117,7 @@ export async function EditPatientView(app, params) {
       actions: '<a class="btn ghost" href="#/patients/' + pid + '">← Back to patient</a>',
       body: `
         <div class="reg-container">
-          <div class="progress-bar" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar" role="progressbar" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100" aria-label="Step ${currentStep + 1} of ${EDIT_STEPS.length} — ${step.label}">
             <div class="progress-fill" style="width: ${progress}%"></div>
             <div class="progress-steps">
               ${EDIT_STEPS.map((s, i) => `<span class="step-dot ${i < currentStep ? 'done' : ''} ${i === currentStep ? 'active' : ''}" data-step="${i}">${i < currentStep ? '✓' : s.icon}</span>`).join('')}

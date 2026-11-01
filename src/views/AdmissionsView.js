@@ -94,7 +94,7 @@ export async function AdmissionsView(app, params = {}) {
       '<div class="card"><div class="card-head"><h3>Wards</h3><span class="pill" id="adm-ward-count">0 wards</span></div>' +
       '<div class="wardgrid" id="adm-wards"><p class="sub">Loading…</p></div></div>' +
       '<div class="card"><div class="card-head"><h3 id="adm-tbl-title">Current admissions</h3></div>' +
-      '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="admSearch" placeholder="Search patient, ward, bed, doctor or MRN…" style="max-width:240px">' +
+      '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="admSearch" aria-label="Search admissions by patient, ward, bed or doctor" placeholder="Search patient, ward, bed, doctor or MRN…" style="max-width:240px">' +
       '<select class="input" id="admStatus" style="max-width:170px"><option value="active" selected>Active</option><option value="discharged">Discharged</option><option value="all">All admissions</option></select></div>' +
       '<div class="tblwrap"><table class="tbl" id="adm-tbl"><thead><tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th>From encounter</th><th style="width:120px">Actions</th></tr></thead><tbody>' +
       '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +

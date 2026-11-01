@@ -4,7 +4,7 @@
 // Patients, Appointments, Consultations, Laboratory, Pharmacy, Admissions.
 // All data is read directly from Firestore, scoped to the active hospital,
 // filtered by the selected date range, and exportable to CSV or printable.
-import { shell, toast, wireToast } from '../components/shell.js'
+import { shell, toast, wireToast, skeletonCard } from '../components/shell.js'
 import { printDocument } from '../lib/print.js'
 import { authStore } from '../store/authStore.js'
 import { esc } from '../utils/sanitize.js'
@@ -1074,6 +1074,7 @@ export async function ReportsView(app) {
       '<button class="btn ghost sm" id="rep-clear">Clear</button>' +
       '<button class="btn" id="rep-refresh">↻ Refresh</button>',
     body: '' +
+      '<div class="skeleton-card-div" style="padding:24px">' + skeletonCard(4) + '</div>' +
       '<div class="toolbar" style="margin-bottom:8px">' +
       '<p class="sub" id="rep-status">Loading…</p>' +
       '</div>' +

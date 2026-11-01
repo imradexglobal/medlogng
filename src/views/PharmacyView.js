@@ -1,5 +1,5 @@
 // Pharmacy with Firestore persistence (offline-first, cached).
-import { shell, statusBadge, toast, wireToast } from '../components/shell.js'
+import { shell, statusBadge, toast, wireToast, skeletonCard } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
   listOrgDrugs, listOrgDispense, myPharmacyCaps,
@@ -43,6 +43,7 @@ export async function PharmacyView(app) {
   let dispenseRecords = []
   let medicationRequests = []
   let tab = 'Inventory'
+  let loading = false
 
   // The queue is what is still owed, so it holds open AND partly-issued
   // scripts. All-external scripts are listed too (so the pharmacist can see the
@@ -62,6 +63,10 @@ export async function PharmacyView(app) {
     medicationRequests = requestBase.filter(queueFilter)
     render()
   }
+
+  const initialBody = loading
+    ? '<div style="padding:24px">' + skeletonCard(4) + '</div>'
+    : null
 
 shell(app, {
     active: '/pharmacy',
@@ -86,7 +91,10 @@ shell(app, {
   async function load() {
     try {
       const [d, disp, reqs] = await Promise.all([
-        listOrgDrugs(activeOrg),
+        listOrgDrugs(activeOrg).catch(() => {
+          console.warn('[pharmacy] drug list unavailable due to permissions')
+          return []
+        }),
         listOrgDispense(activeOrg).catch(() => []),
         // The queue is what is still owed, so it holds open AND partly-issued
         // scripts. All-external scripts ride along so the pharmacist sees the
@@ -204,7 +212,7 @@ shell(app, {
         : '') +
       '<p class="eyebrow" style="margin:0 0 8px">Prescriptions awaiting dispensing</p>' +
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Patient</th><th>Medicines</th><th>Lines</th><th>Issued</th><th>Status</th><th style="width:100px">Actions</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No prescriptions waiting</td></tr>') + '</tbody></table></div>' +
+      (rows || '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">No prescriptions waiting. <a class="btn" href="#/pharmacy/receive">+ Add prescription</a></td></tr>') + '</tbody></table></div>' +
       '<p class="sub" style="margin-top:10px">One row per prescription. Open it to see every medicine and issue them one line at a time.</p>' +
       // A dispensed script leaves the working queue above, but the pharmacy
       // still needs a way back into one: opening it here is how an issued
@@ -242,7 +250,7 @@ shell(app, {
     }).join('')
     pane.innerHTML =
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Medicine</th><th>Stock</th><th>Expiry</th><th>Cost ₦</th><th>Sell ₦</th><th>Margin</th><th>Status</th><th style="width:100px">Actions</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="8" class="mut" style="text-align:center;padding:22px 8px">No drugs in catalogue</td></tr>') + '</tbody></table></div>' +
+      (rows || '<tr><td colspan="8" class="mut" style="text-align:center;padding:22px 8px">No drugs in catalogue. <a class="btn" href="#/pharmacy/drugs/new">+ Add first medicine</a></td></tr>') + '</tbody></table></div>' +
       '<p class="sub" style="margin-top:10px">Prescribe ≠ Dispense — prescriptions queue on the Receive tab for a pharmacist to issue.</p>'
     wireKebabs(pane, (rowId, action) => {
       if (action === 'edit') navigate('/pharmacy/drugs/' + rowId)
@@ -277,7 +285,7 @@ shell(app, {
     ).join('')
     pane.innerHTML =
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Ticket</th><th>Patient</th><th>Items</th><th>By</th><th>Status</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No dispense records</td></tr>') + '</tbody></table></div>'
+      (rows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No dispense records. <a class="btn" href="#/pharmacy/receive">+ Dispense medication</a></td></tr>') + '</tbody></table></div>'
   }
 
   function renderBatches() {
@@ -291,7 +299,7 @@ shell(app, {
     ).join('')
     pane.innerHTML =
       '<div class="tblwrap"><table class="tbl"><thead><tr><th>Batch</th><th>Medicine</th><th>Qty</th><th>Expiry</th><th>Status</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No batch data</td></tr>') + '</tbody></table></div>'
+      (rows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No batch data. <a class="btn" href="#/pharmacy/drugs/new">+ Add medicine to catalogue</a></td></tr>') + '</tbody></table></div>'
   }
 
   document.getElementById('refreshBtn').onclick = load

@@ -214,7 +214,7 @@ export default async function BillingView(app, params = {}) {
 
     const toolbarHtml =
       '<div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;background:#f9fafb;padding:10px 12px;border-radius:6px;border:1px solid #e5e7eb">' +
-        '<input class="input" id="invSearchInput" placeholder="🔍 Search patient, invoice ID…" value="' + esc(invSearch) + '" style="max-width:240px" />' +
+        '<input class="input" id="invSearchInput" aria-label="Search invoices by patient or invoice ID" placeholder="🔍 Search patient, invoice ID…" value="' + esc(invSearch) + '" style="max-width:240px" />' +
         '<select class="input" id="invStatusSelect" style="max-width:140px">' +
           '<option value="all"' + (invStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
           '<option value="unpaid"' + (invStatusFilter === 'unpaid' ? ' selected' : '') + '>Unpaid</option>' +
@@ -325,7 +325,7 @@ export default async function BillingView(app, params = {}) {
 
     const toolbarHtml =
       '<div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;background:#f9fafb;padding:10px 12px;border-radius:6px;border:1px solid #e5e7eb">' +
-        '<input class="input" id="paySearchInput" placeholder="🔍 Search receipt #, patient, ref…" value="' + esc(paySearch) + '" style="max-width:240px" />' +
+        '<input class="input" id="paySearchInput" aria-label="Search receipts by patient or receipt number" placeholder="🔍 Search receipt #, patient, ref…" value="' + esc(paySearch) + '" style="max-width:240px" />' +
         '<select class="input" id="payMethodSelect" style="max-width:140px">' +
           '<option value="all"' + (payMethodFilter === 'all' ? ' selected' : '') + '>All methods</option>' +
           '<option value="Cash"' + (payMethodFilter === 'Cash' ? ' selected' : '') + '>Cash</option>' +
@@ -403,7 +403,7 @@ export default async function BillingView(app, params = {}) {
 
     const toolbarHtml =
       '<div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:12px;background:#f9fafb;padding:10px 12px;border-radius:6px;border:1px solid #e5e7eb">' +
-        '<input class="input" id="priceSearchInput" placeholder="🔍 Search service / item…" value="' + esc(priceSearch) + '" style="max-width:240px" />' +
+        '<input class="input" id="priceSearchInput" aria-label="Search billing items by service or item name" placeholder="🔍 Search service / item…" value="' + esc(priceSearch) + '" style="max-width:240px" />' +
         '<select class="input" id="priceCatSelect" style="max-width:140px">' +
           '<option value="all"' + (priceCatFilter === 'all' ? ' selected' : '') + '>All categories</option>' +
           '<option value="Service"' + (priceCatFilter === 'Service' ? ' selected' : '') + '>Service</option>' +
@@ -647,7 +647,7 @@ export default async function BillingView(app, params = {}) {
     const modalHtml =
       '<div class="fgrid">' +
       '<label class="fld full"><span>Patient</span>' +
-      '<input class="input" id="invPatientFilter" placeholder="Search patient by name, MRN or mobile…" autocomplete="off" style="margin-bottom:6px">' +
+      '<input class="input" id="invPatientFilter" aria-label="Search patients by name, MRN or mobile" placeholder="Search patient by name, MRN or mobile…" autocomplete="off" style="margin-bottom:6px">' +
       '<select class="input" id="invPatientSel"><option value="">— Select patient —</option>' +
       patientOpts.map((o) => '<option value="' + esc(o.value) + '" data-label="' + esc(o.label) + '"' + (o.value === (pre ? pre.pid : '') ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') +
       '</select></label>' +

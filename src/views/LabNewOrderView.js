@@ -176,7 +176,7 @@ export async function LabNewOrderView(app, params = {}) {
         (state.patient.phone ? '<div class="mut" style="font-size:.82rem">' + esc(formatPhone(state.patient.phone, state.patient.phone_key)) + '</div>' : '') +
         '</div><button class="btn ghost sm" id="clearPatient">Change</button></div></div>'
       : '<div class="card"><label class="fld full"><span>Patient</span>' +
-        '<input class="input" id="patientFilter" placeholder="Search patient by name, ID or mobile…" autocomplete="off" style="margin-bottom:6px">' +
+        '<input class="input" id="patientFilter" aria-label="Search patients by name, ID or mobile" placeholder="Search patient by name, ID or mobile…" autocomplete="off" style="margin-bottom:6px">' +
         '<select class="input" id="patientSel"><option value="">— Select patient —</option>' +
         state.patients.map((p) => {
           const label = p.name + ' · ' + (p.mrn || p.pid) + ' · ' + formatPhone(p.phone, p.phone_key)

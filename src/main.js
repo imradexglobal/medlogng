@@ -23,6 +23,7 @@ const RegisterPatientView = () => import('./views/RegisterPatientView.js').then(
 const EditPatientView = () => import('./views/EditPatientView.js').then((m) => m.EditPatientView)
 const AppointmentsView = () => import('./views/AppointmentsView.js').then((m) => m.AppointmentsView)
 const ConsultationsView = () => import('./views/ConsultationsView.js').then((m) => m.ConsultationsView)
+const StartEncounterView = () => import('./views/StartEncounterView.js').then((m) => m.StartEncounterView)
 const AdmissionsView = () => import('./views/AdmissionsView.js').then((m) => m.AdmissionsView)
 const AdmitView = () => import('./views/AdmitView.js').then((m) => m.AdmitView)
 const AdmissionWorkspaceView = () => import('./views/AdmissionWorkspaceView.js').then((m) => m.AdmissionWorkspaceView)
@@ -52,6 +53,9 @@ registerRoute('/patients/:id', PatientDetailView, { auth: true })
 registerRoute('/patients/:id/edit', EditPatientView, { auth: true })
 registerRoute('/appointments', AppointmentsView, { auth: true })
 registerRoute('/consultations', ConsultationsView, { auth: true })
+// Full-page Start-encounter form (not a nav entry — reached from the queue,
+// patient list and patient chart, which pass the patient via ?pid=).
+registerRoute('/encounters/new', StartEncounterView, { auth: true })
 // `/admissions/new` must be registered before `/admissions/:id` — the router
 // matches in registration order, and the wildcard would otherwise swallow
 // "new", opening the workspace with id "new" ("admission could not be loaded").
@@ -130,7 +134,15 @@ authStore.subscribe(async (s) => {
   }
   const hash = (window.location.hash || '').replace(/^#/, '')
   if (!hash || hash === '/' || hash === '/welcome') {
-    const target = s.user ? '/' : '/login'
+    // A signed-in user with memberships but no hospital selected has to pick
+    // one — that is the ONLY place setActiveOrg() runs. Routing straight to
+    // "/" here used to land every fresh login on DashboardView, which shows
+    // "your account is not linked to a hospital" even though memberships
+    // exist. Send them to the chooser instead.
+    const hasActive = s.memberships.some((m) => m.status === 'active')
+    const target = !s.user ? '/login'
+      : (s.activeOrg || !hasActive) ? '/'
+      : '/hospital-choice'
     navigate(target)
     // navigate() only fires hashchange when the hash actually changes. If we
     // are already sitting on the target (e.g. cold load at #/ while signed in),

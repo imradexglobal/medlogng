@@ -125,7 +125,7 @@ export async function LaboratoryView(app) {
       '<span class="fstep" data-stage="completed">Result</span><span class="farrow">→</span>' +
       '<span class="fstep" data-stage="verified">Validate</span><span class="farrow">→</span>' +
       '<span class="fstep" data-stage="cancelled">Release</span></div>' +
-      '<div class="toolbar"><div class="patient-filter" style="flex:1;min-width:220px"><input class="input" id="patientFilterInput" placeholder="Filter by patient…" value="' + esc(searchQuery) + '"></div>' +
+      '<div class="toolbar"><div class="patient-filter" style="flex:1;min-width:220px"><input class="input" id="patientFilterInput" aria-label="Filter lab orders by patient" placeholder="Filter by patient…" value="' + esc(searchQuery) + '"></div>' +
       '<div class="chips" id="stages">' + STAGES.map((s, i) => '<button class="chip' + (i === 0 ? ' on' : '') + '" data-stage="' + esc(s.value) + '">' + esc(s.label) + '</button>').join('') + '</div></div>' +
       '<div id="loadError" class="card" style="display:none;text-align:center;padding:24px"><p class="sub">Failed to load lab orders.</p><button class="btn ghost" id="retryBtn">Retry</button></div>' +
       '<div class="tblwrap"><table class="tbl" id="lab-tbl"><thead><tr><th>Order</th><th>Patient</th><th>Tests</th><th>Stage</th><th>Priority</th><th>Billing</th><th>Date</th><th style="width:140px">Actions</th></tr></thead><tbody>' +
@@ -318,6 +318,13 @@ export async function LaboratoryView(app) {
         if (e.target.closest('a, button')) return
         window.location.hash = '#/laboratory/orders/' + row.getAttribute('data-open')
       }
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          if (e.target.closest('a, button')) return
+          window.location.hash = '#/laboratory/orders/' + row.getAttribute('data-open')
+        }
+      })
     })
     wireKebabs(tbl, async (rowId, action) => {
       const l = labOrders.find((x) => x.id === rowId)

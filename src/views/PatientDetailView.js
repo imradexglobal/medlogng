@@ -34,31 +34,6 @@ const TABS = ['Dashboard', 'Personal Data', 'Blood & Allergies', 'Next of Kin', 
 const SEXES = [{ value: '', label: 'Not set' }, 'Female', 'Male']
 const BLOOD_GROUPS = [{ value: '', label: 'Not set' }, 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 
-// Common presenting complaints offered in the Start-encounter Reason field.
-// Same UX as the allergy picker on patient registration: search, click or
-// Enter to add a pill, free text still allowed for anything not on the list.
-// Merged at runtime with reasons this patient's past encounters actually
-// carried, so a returning patient's usual complaints sit at the front.
-const COMMON_COMPLAINTS = [
-  'Fever', 'Headache', 'Cough', 'Cough with blood', 'Catarrh', 'Sore throat',
-  'Chest pain', 'Shortness of breath', 'Difficulty breathing', 'Palpitations',
-  'Abdominal pain', 'Stomach upset', 'Heartburn', 'Nausea', 'Vomiting',
-  'Diarrhea', 'Constipation', 'Poor appetite', 'Weight loss', 'Weight gain',
-  'Fatigue', 'Weakness', 'Dizziness', 'Fainting', 'Seizure', 'Insomnia',
-  'Back pain', 'Joint pain', 'Neck pain', 'Shoulder pain', 'Knee pain',
-  'Numbness', 'Tingling', 'Swelling of legs', 'Swelling of face', 'Swelling',
-  'Urinary frequency', 'Burning urination', 'Dark urine', 'Yellow eyes',
-  'Rash', 'Itching', 'Hives', 'Bleeding', 'Night sweats',
-  'Ear pain', 'Ear discharge', 'Eye pain', 'Red eye', 'Blurred vision',
-  'Tooth pain', 'Missed period', 'Vaginal discharge', 'Pelvic pain',
-  'Painful menstruation', 'Heavy menstruation', 'Infertility concern',
-  'Hypertension review', 'Diabetes review', 'Asthma review', 'Malaria symptoms',
-  'Typhoid symptoms', 'COVID-19 symptoms', 'Anaemia symptoms',
-  'Antenatal follow-up', 'Postnatal review', 'Family planning',
-  'Immunization', 'Medication refill', 'Lab results review',
-  'Injury', 'Road traffic accident', 'Follow-up review',
-]
-
 function ms(t) {
   return t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : 0)
 }
@@ -601,7 +576,7 @@ export async function PatientDetailView(app, params = {}) {
 
     // Quick actions (capability-gated)
     const quickActions = []
-    if (canEncounter) quickActions.push('<button class="btn" id="dashEncBtn">Start Encounter</button>')
+    if (canEncounter) quickActions.push('<button class="btn" id="dashEncBtn">Start encounter</button>')
     if (canVitals) quickActions.push('<button class="btn" id="dashVitalsBtn">Record Vitals</button>')
     if (canDx) quickActions.push('<button class="btn ghost" id="dashDxBtn">+ Diagnosis</button>')
     if (canRx) quickActions.push('<button class="btn ghost" id="dashRxBtn">+ Prescription</button>')
@@ -1356,98 +1331,14 @@ function paneHtml(t) {
       : none)
   }
 
-  function openEncounterBlockedModal(existing) {
-    const ref = existing?.id ? String(existing.id).slice(0, 8) + '…' : ''
-    const status = s(existing?.status || 'Open')
-    const type = s(existing?.encounter_type || existing?.type || existing?.reason || 'Encounter')
-    openModal('Open encounter already exists',
-      '<p class="sub"><strong>' + esc(p.name || 'This patient') + '</strong> already has an open encounter' +
-      (ref ? ' (' + esc(ref) : '') + (status ? ' · ' + esc(status) : '') + (ref ? ')' : '') +
-      (type ? ' — ' + esc(type) : '') + '. Close it before opening a new one.</p>' +
-      '<div class="mrow"><button class="btn ghost" data-close>Cancel</button>' +
-      '<button class="btn ghost" id="goEncTab">View encounters</button>' +
-      '<a class="btn" href="#/consultations' + (existing?.id ? '?enc=' + encodeURIComponent(existing.id) : '') + '" data-close>Go to Consultations →</a></div>')
-    document.querySelectorAll('#modalBody [data-close]').forEach((b) => { b.onclick = closeModal })
-    const goTab = document.getElementById('goEncTab')
-    if (goTab) {
-      goTab.onclick = async () => {
-        closeModal()
-        document.querySelectorAll('#ptabs button').forEach((x) => x.classList.toggle('on', x.getAttribute('data-t') === 'Encounters'))
-        await render('Encounters')
-      }
-    }
-  }
-
-  async function openEncounter() {
-    // Duplicate guard (UX): the service also rejects, but checking first
-    // spares the user filling the form only to be told to close the old one.
-    const { activeOrg } = authStore.getState()
-    if (!activeOrg) { toast('No hospital selected'); return }
-    try {
-      const existing = await findOpenEncounterForPatient(pid, activeOrg)
-      if (existing) {
-        openEncounterBlockedModal(existing)
-        return
-      }
-    } catch (e) {
-      console.warn('[patient] open-encounter pre-check failed:', e?.message)
-    }
-    // Clinical staff for the dropdown, plus the reasons this patient's past
-    // encounters actually carried — a returning patient's usual complaints
-    // should be one click away, ahead of the generic common list.
-    let staff = []
-    let pastReasons = []
-    try {
-      staff = await getClinicalStaff(activeOrg)
-    } catch (e) {
-      toast('Failed to load clinical staff: ' + friendlyPatientError(e))
-      return
-    }
-    try {
-      const past = await listPatientDocs('encounters', pid)
-      pastReasons = (past.rows || []).flatMap((en) =>
-        String(en.reason || en.chief_complaint || '').split(/[,;]+/))
-    } catch {
-      // The common list alone is a perfectly good fallback.
-    }
-    const reasonSuggestions = [...new Set(
-      [...pastReasons.map((r) => r.trim()).filter(Boolean), ...COMMON_COMPLAINTS],
-    )]
-    const clinicianOptions = staff.length > 0 ? staff : [{ value: '', label: 'No clinical staff found — add staff in Administration' }]
-    formModal({
-      title: 'Start encounter',
-      submitLabel: 'Open encounter',
-      fields: [
-        { name: 'encounter_type', label: 'Type', type: 'select', options: ['General Outpatient Department (GOPD) review', 'Follow-up', 'Antenatal', 'Emergency', 'Consultation'] },
-        { name: 'clinician', label: 'Clinician', type: 'select', options: clinicianOptions, required: true },
-        {
-          // Same searchable pill input as the patient-allergy field: type to
-          // filter common complaints, Enter/click adds them, free text still
-          // allowed. Saved joined with ', ' so every existing reader of
-          // `reason` (queue, chart tables, timeline) keeps working.
-          name: 'reason', label: 'Reason / chief complaint', type: 'tags', full: true, required: true,
-          options: reasonSuggestions,
-          placeholder: 'Search common complaints, or type your own — Enter adds',
-        },
-      ],
-      onSubmit: async (v) => {
-        const reason = String(v.reason || '').trim()
-        if (!reason) throw new Error('Add at least one reason for this encounter.')
-        await createPatientDoc('encounters', pid, {
-          encounter_type: v.encounter_type, clinician_name: v.clinician || '',
-          reason,
-          // Canonical status, matching what the Consultations queue walks.
-          // `Open` was rejected by updateEncounterStatus's whitelist, so an
-          // encounter opened here could never be advanced or closed.
-          status: 'arrived',
-        }, 'encounter.create')
-        closeModal()
-        toast('Encounter opened and saved to Firestore')
-        loadCache.Encounters = null
-        loadCache.Timeline = null
-        await render('Encounters')
-      },
-    })
+  // The Start-encounter form is a shared full-page route (also used by the
+  // Consultations queue and the patient list) — same fields, same duplicate
+  // guard, same follow-through (deep-link straight into the encounter
+  // workspace).
+  function openEncounter() {
+    const q = '?pid=' + encodeURIComponent(pid) +
+      (p?.name ? '&name=' + encodeURIComponent(p.name) : '')
+    window.location.hash = '#/encounters/new' + q
   }
 
   function openEdit() {
@@ -1565,6 +1456,13 @@ function paneHtml(t) {
         const raw = (loadCache.Encounters?.rows || []).find((x) => x.id === row.getAttribute('data-enc-row'))
         if (raw) openEncounterDetail(raw)
       }
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          const raw = (loadCache.Encounters?.rows || []).find((x) => x.id === row.getAttribute('data-enc-row'))
+          if (raw) openEncounterDetail(raw)
+        }
+      })
     })
 
     // Dashboard-specific handlers

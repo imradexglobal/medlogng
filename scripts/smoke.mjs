@@ -610,13 +610,21 @@ for (const view of ['AppointmentsView', 'BillingView', 'AdmissionsView']) {
   assert.ok(/matchesPatient/.test(labSrc), 'LaboratoryView search joins through matchesPatient (mobile reachable)')
 }
 
-// Encounters are started ONLY from the Patients page. Consultations is a queue
-// + workspace, so it must not carry its own start-encounter form/patient picker.
+// Encounters are started through ONE full-page form (#/encounters/new,
+// StartEncounterView) that every entry point navigates to — no per-view
+// modal/pop-up forms, and the page is deliberately not a nav entry.
 {
-  const src = fs.readFileSync(new URL('../src/views/ConsultationsView.js', import.meta.url), 'utf8')
-  assert.ok(!/openStartForm|id="startBtn"/.test(src), 'ConsultationsView has no start-encounter form')
-  const patientsView = fs.readFileSync(new URL('../src/views/PatientsView.js', import.meta.url), 'utf8')
-  assert.ok(/openEncounterModal/.test(patientsView), 'PatientsView still starts encounters')
+  const page = fs.readFileSync(new URL('../src/views/StartEncounterView.js', import.meta.url), 'utf8')
+  const main = fs.readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+  assert.ok(/registerRoute\('\/encounters\/new'/.test(main), 'Start-encounter page is routed')
+  assert.ok(/createEncounter\(/.test(page), 'the page creates the encounter')
+  assert.ok(!/formModal\(/.test(page), 'the page renders its own form, not a modal popup')
+  for (const view of ['ConsultationsView', 'PatientsView', 'PatientDetailView']) {
+    const src = fs.readFileSync(new URL('../src/views/' + view + '.js', import.meta.url), 'utf8')
+    assert.ok(/encounters\/new/.test(src), view + ' navigates to the shared Start-encounter page')
+    assert.ok(!/createEncounter\(/.test(src), view + ' does not create encounters itself')
+    assert.ok(!/createPatientDoc\('encounters'/.test(src), view + ' does not write encounters with legacy field names')
+  }
 }
 
 // The filter must be digit-aware, or '+234 803 123 4567' is unreachable by

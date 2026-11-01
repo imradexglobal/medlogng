@@ -539,14 +539,21 @@ a { color: var(--primary); }
 .tag-list { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 120px; }
 .allergy-tag {
   display: inline-flex; align-items: center; gap: 6px;
+  /* Rectangular chip (not an oval) that never exceeds the field: a tag that
+     doesn't fit the current row wraps whole to the next line instead. */
+  max-width: 100%;
   background: var(--primary); color: #fff;
-  padding: 4px 10px 4px 8px; border-radius: 999px;
-  font-size: 0.8rem; font-weight: 600; line-height: 1;
+  padding: 5px 10px 5px 8px; border-radius: 6px;
+  font-size: 0.8rem; font-weight: 600; line-height: 1.2;
   animation: tagPop 0.15s ease;
 }
 @keyframes tagPop { from { opacity: 0; transform: scale(0.8); } to { opacity: 1; transform: scale(1); } }
 
-.tag-text { white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+/* Full text, always: no 180px truncation. The chip grows to fit its label;
+   nowrap keeps a single tag on one line, and only a tag longer than the
+   whole field ellipsizes at the container edge (min-width:0 lets the flex
+   item shrink instead of overflowing). */
+.tag-text { white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tag-remove {
   width: 20px; height: 20px; border-radius: 50%;
   background: rgba(255,255,255,0.25); border: none; color: #fff;
@@ -587,10 +594,11 @@ a { color: var(--primary); }
   display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px;
 }
 .allergy-tag-display {
-  display: inline-flex; align-items: center;
+  display: inline-flex; align-items: center; max-width: 100%;
+  white-space: nowrap; overflow: hidden;
   background: #fef2f2; color: #b91c1c;
-  padding: 4px 10px; border-radius: 999px;
-  font-size: 0.8rem; font-weight: 600; line-height: 1;
+  padding: 5px 10px; border-radius: 6px;
+  font-size: 0.8rem; font-weight: 600; line-height: 1.2;
   border: 1px solid #fecaca;
 }
 .allergy-tags-display .mut { color: #94a3b8; font-style: italic; }
@@ -653,6 +661,33 @@ a { color: var(--primary); }
 @media (max-width: 1024px) {
   .dashboard-grid { grid-template-columns: 1fr; }
   .progress-feed { position: static; max-height: none; }
+}
+
+/* ---- Dashboard redesign: three-question layout ----------------------------- */
+
+.dash-layout { display: grid; gap: 12px; margin-bottom: 16px; }
+
+.attention-list { display: flex; flex-direction: column; gap: 8px; }
+
+.attention-item {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 12px 14px; border: 1px solid var(--emr-line);
+  border-radius: var(--r); background: #fff; text-decoration: none; color: inherit;
+}
+.attention-item:hover { background: #f0fdfa; border-color: var(--emr-teal); }
+.attention-item.tone-warn { border-left: 4px solid var(--emr-warn); }
+.attention-item.tone-bad { border-left: 4px solid var(--emr-bad); }
+.attention-item > div { flex: 1; min-width: 0; }
+.attention-item .mut { font-size: .75rem; }
+
+.empty-state { text-align: center; padding: 32px 16px; }
+.empty-state p { margin: 0 0 8px; color: var(--emr-muted); line-height: 1.5; }
+.empty-state .sub { font-size: .9rem; }
+
+@media (max-width: 860px) {
+  .dash-layout { gap: 10px; }
+  .attention-item { padding: 10px 12px; }
+  .empty-state { padding: 24px 12px; }
 }
 
 /* Clinical Summary Cards */

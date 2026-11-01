@@ -52,6 +52,7 @@ export function createAllergyTagInput(container, options = {}) {
   let wrapperEl = null
   let suggestionBoxEl = null
   let tagListEl = null
+  let onOutsidePointer = null
 
   function getFilteredSuggestions(queryText) {
     const q = normalizeAllergy(queryText).toLowerCase()
@@ -109,6 +110,18 @@ export function createAllergyTagInput(container, options = {}) {
     bindEvents()
   }
 
+  // Single add path for every trigger (suggestion pointerdown / click, Enter).
+  // Dedupes case-insensitively and returns whether a tag was actually added.
+  function addTag(raw) {
+    const val = normalizeAllergy(raw)
+    if (!val || tags.some(t => t.toLowerCase() === val.toLowerCase())) return false
+    tags.push(val)
+    inputEl.value = ''
+    suggestionIndex = -1
+    notifyChange()
+    return true
+  }
+
   function bindEvents() {
     if (!inputEl) return
 
@@ -126,9 +139,16 @@ export function createAllergyTagInput(container, options = {}) {
       updateSuggestions()
     })
 
+    // While the pointer is down ON the suggestion list (touch: pointerdown
+    // precedes the tap's blur/click and may still turn into a scroll), the
+    // blur timer must NOT hide the list out from under the incoming click.
+    let pointerOnList = false
+
     inputEl.addEventListener('blur', (e) => {
-      // Delay to allow click on suggestions
+      // Delay to allow click on suggestions (the list is a SIBLING of the
+      // input box, so :focus-within never covers it).
       setTimeout(() => {
+        if (pointerOnList) return
         if (!wrapperEl?.matches(':focus-within')) {
           isFocused = false
           suggestionIndex = -1
@@ -138,17 +158,16 @@ export function createAllergyTagInput(container, options = {}) {
       }, 150)
     })
 
-    // Add tag on Enter
+    // Add tag on Enter — an arrow-highlighted suggestion wins over the typed
+    // text, so "press Enter to pick it" behaves the way it reads on screen.
     inputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault()
-        const val = normalizeAllergy(inputEl.value)
-        if (val && !tags.some(t => t.toLowerCase() === val.toLowerCase())) {
-          tags.push(val)
-          inputEl.value = ''
-          suggestionIndex = -1
-          notifyChange()
-        }
+        const items = suggestionBoxEl?.querySelectorAll('.suggestion-item')
+        const picked = (suggestionIndex >= 0 && items && items[suggestionIndex])
+          ? items[suggestionIndex].textContent
+          : inputEl.value
+        addTag(picked)
       } else if (e.key === 'Backspace' && !inputEl.value && tags.length > 0) {
         e.preventDefault()
         tags.pop()
@@ -190,18 +209,46 @@ export function createAllergyTagInput(container, options = {}) {
       }
     })
 
-    // Click suggestion - event delegation on suggestionBoxEl
+    // Pick a suggestion.
+    //   mouse/pen — pointerdown fires BEFORE the input would blur, so the tag
+    //               is committed right there; preventDefault keeps focus (and
+    //               the list) exactly where it was. No race at all.
+    //   touch     — pointerdown can still turn into a scroll of the list, so
+    //               the add waits for the tap's click event; the blur timer
+    //               above skips hiding while the pointer is down on the list
+    //               so the list survives long enough for the click to land
+    //               (previously it went display:none first and the tap hit
+    //               nothing — "select does not add").
+    // The dedupe in addTag makes it safe if both paths run (compat mouse
+    // events after a touch tap).
+    const suggestionAt = (e) => e.target.closest('.suggestion-item')
+
+    suggestionBoxEl?.addEventListener('pointerdown', (e) => {
+      const item = suggestionAt(e)
+      if (!item) return
+      if (e.pointerType === 'touch') { pointerOnList = true; return }
+      addTag(item.textContent)
+      e.preventDefault() // keep focus in the input; list stays open
+    })
     suggestionBoxEl?.addEventListener('click', (e) => {
-      const item = e.target.closest('.suggestion-item')
-      if (item) {
-        const val = normalizeAllergy(item.textContent)
-        if (val && !tags.some(t => t.toLowerCase() === val.toLowerCase())) {
-          tags.push(val)
-          inputEl.value = ''
-          notifyChange()
-        }
-        inputEl.focus()
-      }
+      const item = suggestionAt(e)
+      pointerOnList = false
+      if (!item) return
+      addTag(item.textContent)
+      inputEl.focus()
+    })
+
+    // Tapping/clicking anywhere outside the field closes the list — also
+    // covers a touch-scroll that started on the list and produced no click.
+    // Registered on focus, released in hideSuggestions, so nothing leaks
+    // across the many modal instances this component is mounted into.
+    onOutsidePointer = (e) => {
+      pointerOnList = false
+      if (!container.contains(e.target)) hideSuggestions()
+    }
+    inputEl.addEventListener('focus', () => {
+      document.removeEventListener('pointerdown', onOutsidePointer, true)
+      document.addEventListener('pointerdown', onOutsidePointer, true)
     })
   }
 
@@ -228,6 +275,10 @@ export function createAllergyTagInput(container, options = {}) {
   }
 
   function hideSuggestions() {
+    // Release the outside-tap listener too — it only exists to close a list
+    // that is still up after a blurred input (touch), and hideSuggestions is
+    // the single place every hide path goes through.
+    if (onOutsidePointer) document.removeEventListener('pointerdown', onOutsidePointer, true)
     if (suggestionBoxEl) suggestionBoxEl.style.display = 'none'
   }
 
@@ -282,7 +333,10 @@ export function createAllergyTagInput(container, options = {}) {
       if (hiddenInputEl) hiddenInputEl.value = JSON.stringify(tags)
     },
     updateSuggestions: setAllSuggestions,
-    destroy: () => { container.innerHTML = '' },
+    destroy: () => {
+      if (onOutsidePointer) document.removeEventListener('pointerdown', onOutsidePointer, true)
+      container.innerHTML = ''
+    },
   }
 }
 

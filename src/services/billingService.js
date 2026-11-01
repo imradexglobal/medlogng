@@ -253,6 +253,7 @@ export async function createInvoiceFromLines(input) {
     encounter_id: input.encounter_id || '',
     source_type: String(input.source_type || '').trim(),
     source_id: String(input.source_id || '').trim(),
+    lab_order_id: String(input.lab_order_id || input.source_id || '').trim(),
     created_by: user?.uid || null,
     created_by_name: currentStaffName(),
     created_at: now,
@@ -289,6 +290,7 @@ export async function createInvoiceForLabOrder(labOrder, opts = {}) {
     pa_code: opts.pa_code || '',
     source_type: 'lab_order',
     source_id: labOrder.id,
+    lab_order_id: labOrder.id,
     lines: billable.map((it) => ({
       label: it.test_name || 'Lab test',
       category: 'Lab',
@@ -299,7 +301,7 @@ export async function createInvoiceForLabOrder(labOrder, opts = {}) {
     })),
   })
   const { stampLabInvoice } = await import('./laboratoryService.js')
-  await stampLabInvoice(labOrder.id, invoice.id)
+  await stampLabInvoice(labOrder.id, invoice.id, { totalKobo: invoice.total_kobo })
   return invoice
 }
 
@@ -314,7 +316,11 @@ export async function recordPayment(input) {
 
   const iid = input.invoice_id
   if (!iid) throw new Error('Invoice is required.')
-  const amountKobo = Number(input.amount_kobo || input.amount || 0)
+  // Integer kobo, validated BEFORE the invoice is touched — the rules require
+  // `amount_kobo is int && > 0`, and a denied write after the invoice update
+  // would leave the invoice claiming money that has no payment row.
+  const amountKobo = Math.round(Number(input.amount_kobo || input.amount || 0) || 0)
+  if (amountKobo <= 0) throw new Error('Payment amount must be greater than zero.')
 
   // Get current invoice
   const invoice = await getInvoice(iid)
@@ -339,12 +345,17 @@ export async function recordPayment(input) {
     updated_at: serverTimestamp(),
   })
 
-  // Record the payment transaction
+  // Record the payment transaction. The lab-order tie rides along so the
+  // order's payment gate can be checked without reading this collection —
+  // and so the gate itself can be stamped (see below).
+  const labOrderId = invoice.raw?.lab_order_id
+    || (invoice.raw?.source_type === 'lab_order' ? invoice.raw.source_id : '')
   const paymentId = doc(collection(db, PAYMENTS)).id
   const receiptNumber = 'REC-' + paymentId.slice(0, 8).toUpperCase()
   await setDoc(doc(db, PAYMENTS, paymentId), {
     invoice_id: iid,
     invoice_number: iid,
+    lab_order_id: labOrderId || '',
     patient_id: invoice.patientId || '',
     patient_name: invoice.patientName || '',
     amount_kobo: amountKobo,
@@ -357,6 +368,18 @@ export async function recordPayment(input) {
     organization_id: activeOrg,
     notes: input.notes || '',
   })
+
+  // Mirror the payment onto the lab order so the lab bench — which cannot
+  // read payments/invoices — sees the result-entry gate open. Best-effort:
+  // a missing/deleted order must not roll back a payment that already landed.
+  if (labOrderId) {
+    try {
+      const { stampLabOrderPayment } = await import('./laboratoryService.js')
+      await stampLabOrderPayment(labOrderId, newPaidKobo)
+    } catch (e) {
+      console.warn('[billing] lab order payment stamp failed:', e?.message)
+    }
+  }
 
   try {
     await logAudit({ action: 'payment.recorded', organizationId: activeOrg, patientId: invoice.patientId, details: 'Payment ' + paymentId + ' (' + receiptNumber + ') - ₦' + (amountKobo / 100).toLocaleString('en-NG') })

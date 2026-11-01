@@ -1,3 +1,4 @@
+rules_version = '2';
 // MediLog NG — Firestore Rules (Spark plan: no Cloud Functions).
 //
 // READ MODEL (accepted MVP risk, see docs/upgrade-functions.md P0-1):
@@ -21,32 +22,164 @@
 // where their own membership carries the capability. Append-only ledgers
 // (payments, dispensations, stock movements, audit events, result images) do
 // not use this — their delete rules stay `if false`.
-function canDelete(orgId) {
-  return hasCap(orgId, 'data.delete');
-}
 
-// Super-admin check.
-function isSuper() {
-  return request.auth != null
-    && exists(/databases/$(database)/documents/platform_admins/$(request.auth.uid));
-}
+service cloud.firestore {
+  match /databases/{database}/documents {
+  // Helper functions live INSIDE the service/match scope so path variables
+  // like $(database) resolve — declaring them at file top level makes
+  // get()/exists() fail with "invalid variable name" at evaluation time.
 
-// Membership lookup: returns the membership doc snapshot for the given org.
-// The doc id is always `{orgId}_{uid}`.
-function myMship(orgId) {
-  return get(/databases/$(database)/documents/organization_memberships/$(orgId + '_' + request.auth.uid)).data;
-}
+  function canDelete(orgId) {
+    return hasCap(orgId, 'data.delete');
+  }
 
-// Capability check: the caller must hold the named capability in their
-// active membership, OR be a super-admin.
-function hasCap(orgId, cap) {
-  return signedIn() && (isSuper() || (
-    myMship(orgId).status == 'active'
-    && (cap in myMship(orgId).capabilities || '*' in myMship(orgId).capabilities)
-  ));
-}
+  // Super-admin check.
+  function isSuper() {
+    return request.auth != null
+      && exists(/databases/$(database)/documents/platform_admins/$(request.auth.uid));
+  }
 
-// ---- Clinical collections (global read, gated write) ----
+  // Membership lookup: returns the membership doc snapshot for the given org.
+  // The doc id is always `{orgId}_{uid}`.
+  function myMship(orgId) {
+    return get(/databases/$(database)/documents/organization_memberships/$(orgId + '_' + request.auth.uid)).data;
+  }
+
+  function signedIn() {
+    return request.auth != null;
+  }
+  function uid() {
+    return request.auth.uid;
+  }
+
+  // Capability check: the caller must hold the named capability in their
+  // active membership, OR be a super-admin.
+  function hasCap(orgId, cap) {
+    return signedIn() && (isSuper() || (
+      myMship(orgId).status == 'active'
+      && (cap in myMship(orgId).capabilities || '*' in myMship(orgId).capabilities)
+    ));
+  }
+
+  // ---- Org metadata & memberships ----
+
+  match /platform_admins/{id} {
+    allow read, write: if false;
+  }
+
+  match /organizations/{orgId} {
+    allow read: if signedIn();
+    // New hospitals activate immediately: the creator may create with
+    // status 'active' (created_by must be themselves). Anything else
+    // stays 'pending'. Joins can never self-activate (see below).
+    // Creation must stay possible — registerNewHospital() writes this doc
+    // from the client (Spark plan, no Admin SDK).
+    allow create: if signedIn()
+      && request.resource.data.name is string
+      && request.resource.data.status in ['pending', 'active']
+      && (request.resource.data.status == 'pending'
+        || request.resource.data.created_by == uid());
+    // Profile edits (name, type, state, lga) are an org-admin action.
+    allow update: if signedIn()
+      && (isSuper() || hasCap(orgId, 'admin.roles.manage'));
+    allow delete: if false;
+  }
+
+  match /organization_memberships/{mship} {
+    allow read: if signedIn() && (
+      resource.data.user_id == uid()
+      || myMship(resource.data.organization_id).status == 'active'
+      || isSuper()
+    );
+    // Self-registration: deterministic id, own uid. Joining an existing
+    // hospital is always 'pending'. Only the creator of a brand-new
+    // organization (organizations/{orgId}.created_by == self) may create
+    // their founding membership as 'active' — a new hospital is live
+    // immediately, nobody can self-activate into someone else's hospital.
+    allow create: if signedIn()
+      && mship == request.resource.data.organization_id + '_' + uid()
+      && request.resource.data.user_id == uid()
+      && request.resource.data.status in ['pending', 'active']
+      && (request.resource.data.status == 'pending'
+        || get(/databases/$(database)/documents/organizations/$(request.resource.data.organization_id)).data.created_by == uid());
+    allow update: if signedIn() && (
+      // Admin path: full member management (role/capabilities/status).
+      // An admin can NEVER change their own role/capabilities/status —
+      // only the other admin can (prevents self-demotion lockouts and
+      // self-promotion). Own-flag clears use the self paths below.
+      ((isSuper() || (hasCap(resource.data.organization_id, 'admin.roles.manage')
+        && (mship != resource.data.organization_id + '_' + uid()
+          || request.resource.data.diff(resource.data).changedKeys().hasOnly(['updated_at']))))
+        && request.resource.data.status in ['pending', 'active', 'rejected', 'suspended'])
+      // Self path: a member may rename themselves — `staff_name` is the
+      // display name shown on records and reports (admins rename anyone
+      // through the admin path above). Nothing else may change.
+      || (mship == resource.data.organization_id + '_' + uid()
+        && resource.data.user_id == uid()
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['staff_name', 'updated_at'])
+        && request.resource.data.staff_name is string
+        && request.resource.data.staff_name.size() > 0
+        && request.resource.data.staff_name.size() <= 80)
+      // Self path: a member may only clear their own must_change_password
+      // flag after changing password — nothing else may change.
+      || (mship == resource.data.organization_id + '_' + uid()
+        && resource.data.user_id == uid()
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['must_change_password'])
+        && resource.data.must_change_password == true
+        && request.resource.data.must_change_password == false)
+      // Self path: a member may only clear their own
+      // email_verification_required flag once Firebase Auth confirms the
+      // email is verified — nothing else may change.
+      || (mship == resource.data.organization_id + '_' + uid()
+        && resource.data.user_id == uid()
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['email_verification_required'])
+        && request.auth.token.email_verified == true
+        && request.resource.data.email_verification_required == false)
+      // Self-resave for members with '*' capabilities
+      // Allows re-saving membership to resolve permission issues (e.g., when
+      // membership capabilities are not properly recognized by Firestore rules).
+      // Members with '*' already have all capabilities, so this is safe — they
+      // cannot lock themselves out or promote themselves beyond their.
+      || (mship == resource.data.organization_id + '_' + uid()
+        && resource.data.user_id == uid()
+        && myMship(resource.data.organization_id).status == 'active'
+        && '*' in myMship(resource.data.organization_id).capabilities
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          'capabilities', 'status', 'updated_at'
+        ]))
+    );
+    allow delete: if false;
+  }
+
+  // Staff invites: admin pre-approves (email + role); the invitee sets
+  // their own password at signup and claims the invite by matching email.
+  // No backend, no Admin SDK — Spark compatible.
+  match /staff_invites/{inviteId} {
+    allow read: if signedIn() && (isSuper()
+      || hasCap(resource.data.organization_id, 'admin.roles.manage')
+      || request.auth.token.email == resource.data.email);
+    allow create: if signedIn()
+      && hasCap(request.resource.data.organization_id, 'admin.roles.manage')
+      && request.resource.data.email is string
+      && request.resource.data.role is string
+      && request.resource.data.status == 'pending';
+    allow update: if signedIn() && (
+      (isSuper() || hasCap(resource.data.organization_id, 'admin.roles.manage'))
+      // Invitee accepts their own pending invite — status only.
+      || (request.auth.token.email == resource.data.email
+        && resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['status'])
+        && request.resource.data.status == 'accepted')
+    );
+    allow delete: if false;
+  }
+
+  match /roles/{roleId} {
+    allow read: if signedIn();
+    allow write: if isSuper();
+  }
+
+  // ---- Clinical collections (global read, gated write) ----
 
 // Canonical registry: open reads; guarded merges (never un-merge via client).
 match /patients/{pid} {
@@ -159,7 +292,7 @@ match /documents/{id} {
   allow delete: if canDelete(resource.data.organization_id);
 }
 match /medication_requests/{id} {
-  allow read: if signedIn();
+  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
   allow create: if hasCap(request.resource.data.organization_id, 'prescription.create');
   // Pharmacists (prescription.dispense) may mark a request issued and record what
   // has gone out per line. Only fulfilment fields may change — patient,
@@ -180,27 +313,27 @@ match /medication_requests/{id} {
   allow delete: if canDelete(resource.data.organization_id);
 }
 // One doc per dose actually given to the patient (who, what, when, route, site).
-// Append-only, like dispensations: a mistake is corrected by a reversal event,
-// never by rewriting the record of care that happened.
-match /medication_administrations/{id} {
-  allow read: if signedIn();
+  // Append-only, like dispensations: a mistake is corrected by a reversal event,
+  // never by rewriting the record of care that happened.
+match /medication_requests/{id} {
+  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
   allow create: if hasCap(request.resource.data.organization_id, 'medication.administer');
   allow update, delete: if false;
 }
 match /dispensations/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
   allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
   allow update: if false;
   allow delete: if false;
 }
 match /stock_lots/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
   allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
   // Client refuses while stock > 0 so the movement ledger stays balanced.
   allow delete: if canDelete(resource.data.organization_id);
 }
 match /stock_movements/{id} {
-  allow read: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
+  allow read: if resource.data.organization_id is string && hasCap(resource.data.organization_id, 'prescription.dispense');
   allow create: if hasCap(request.resource.data.organization_id, 'prescription.dispense');
   allow update, delete: if false;
 }
@@ -216,7 +349,21 @@ match /lab_orders/{id} {
     && (hasCap(resource.data.organization_id, 'lab.order')
       || hasCap(resource.data.organization_id, 'lab.sample.collect')
       || hasCap(resource.data.organization_id, 'lab.result.enter')
-      || hasCap(resource.data.organization_id, 'lab.result.verify'))
+      || hasCap(resource.data.organization_id, 'lab.result.verify')
+      // Billing writes to an order are bookkeeping STAMPS only, pinned by
+      // affectedKeys().hasOnly() so a cashier (billing caps, no lab caps)
+      // can never touch workflow state (items/status/results):
+      //   billing.invoice → the invoice tie written by stampLabInvoice
+      //   billing.payment → the denormalised paid marker written by
+      //                     recordPayment so the lab bench — which cannot
+      //                     read payments/invoices — can see the payment
+      //                     gate open (see orderHasPayment).
+      || (hasCap(resource.data.organization_id, 'billing.invoice')
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['invoice_id', 'billing_status', 'invoice_total_kobo', 'updated_at']))
+      || (hasCap(resource.data.organization_id, 'billing.payment')
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['paid_kobo', 'payment_recorded_at', 'updated_at'])))
   // Client refuses invoiced orders and orders carrying released results.
   allow delete: if canDelete(resource.data.organization_id);
 }
@@ -225,7 +372,7 @@ match /lab_orders/{id} {
 match /lab_test_catalogue/{id} {
   allow read: if signedIn();
   allow create: if hasCap(request.resource.data.organization_id, 'lab.catalogue.manage');
-  allow update: if hasCap(resource.resource.organization_id, 'lab.catalogue.manage')
+  allow update: if hasCap(resource.data.organization_id, 'lab.catalogue.manage')
     && resource.data.organization_id == request.resource.data.organization_id;
   // Safe at any time: live orders carry frozen snapshots of the test
   // configuration, so removing the catalogue entry never rewrites history.
@@ -326,7 +473,17 @@ match /admission_plan_items/{id} {
 match /invoices/{id} {
   allow read: if hasCap(resource.data.organization_id, 'billing.invoice');
   allow create: if hasCap(request.resource.data.organization_id, 'billing.invoice');
-  allow update: if hasCap(resource.data.organization_id, 'billing.invoice');
+  // Updating an invoice needs billing.invoice — except for the payment path:
+  // recordPayment (client-checked against billing.payment) only ever touches
+  // paid_kobo/status/updated_at, so a payment-only role can record money
+  // without gaining full invoice-edit rights. Either way the org pin stops
+  // an invoice being moved between hospitals.
+  allow update: if hasCap(resource.data.organization_id, 'billing.invoice')
+      && request.resource.data.organization_id == resource.data.organization_id
+    || (hasCap(resource.data.organization_id, 'billing.payment')
+      && request.resource.data.organization_id == resource.data.organization_id
+      && request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['paid_kobo', 'status', 'updated_at']));
   // Client refuses invoices with money received (paid_kobo > 0).
   allow delete: if canDelete(resource.data.organization_id);
 }
@@ -383,7 +540,7 @@ match /devices/{deviceId} {
         || hasCap(resource.data.organization_id, 'admin.roles.manage')))
     || (resource.data.user_id == uid()
       && request.resource.data.user_id == uid()
-      && request.resource.data.status == data.data.status)
+      && request.resource.data.status == resource.data.status)
   );
   allow delete: if false;
 }
@@ -415,4 +572,6 @@ match /notifications_inbox/{id} {
   allow create: if signedIn();
   allow update: if signedIn() && resource.data.recipient_user_id == uid();
   allow delete: if false;
+}
+}
 }

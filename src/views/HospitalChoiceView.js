@@ -14,24 +14,36 @@ export async function HospitalChoiceView(app) {
   const activeMemberships = memberships.filter((m) => m.status === 'active')
 
   if (activeMemberships.length <= 1) {
-    // Only one active hospital, go directly there
-    if (activeOrg) {
-      try { await setActiveOrg(activeOrg, activeOrgName || activeOrg) } catch {}
+    // Only one active hospital — set it as active and go to the dashboard.
+    // This branch used to navigate to '/' without ever calling setActiveOrg,
+    // so a single-hospital user landed on DashboardView with activeOrg == null
+    // and saw "your account is not linked to a hospital" despite having a
+    // membership. The store starts null on every fresh load, so it MUST be
+    // written here (and on every boot, via the router).
+    const only = activeMemberships[0]
+    if (only) {
+      try {
+        const org = await loadOrganization(only.organization_id)
+        await setActiveOrg(only.organization_id, org?.name || only.organization_id)
+      } catch {}
     }
     navigate('/')
     return
   }
 
-  // Build hospital options
+  // Resolve each hospital independently so every option shows its own name.
+  const orgNames = await Promise.all(activeMemberships.map(async (m) => {
+    const org = await loadOrganization(m.organization_id)
+    return [m.organization_id, org?.name || m.organization_id]
+  }))
+  const nameByOrgId = new Map(orgNames)
   let hospitalOptions = ''
   activeMemberships.forEach((m) => {
-    const orgName = activeOrgName || m.organization_id // will be resolved async below
     const isCurrent = m.organization_id === activeOrg
-    hospitalOptions += '<option value="' + m.organization_id + '"' + (isCurrent ? ' selected' : '') + '>'
-    hospitalOptions += esc(m.organization_id || 'Unknown Hospital')
-    hospitalOptions += ' (' + m.role + ') - ' + (m.status === 'active' ? 'active' : m.status) + '</option>'
+    hospitalOptions += '<option value="' + esc(m.organization_id) + '"' + (isCurrent ? ' selected' : '') + '>'
+    hospitalOptions += esc(nameByOrgId.get(m.organization_id) || m.organization_id)
+    hospitalOptions += ' (' + esc(m.role || 'member') + ')</option>'
   })
-
   app.innerHTML =
     '<div class="topbar"><strong>MedLogNg</strong>' +
     '<span>' + esc(currentStaffName() || user.email || '') + ' <button id="out" class="btn btn-ghost btn-sm">Sign out</button></span></div>' +

@@ -26,33 +26,91 @@ import { currentStaffName } from '../lib/staffName.js'
 
 const LABS = 'lab_orders'
 // ---- payment check for result entry ----------------------------------------
-// Returns true if the lab order has at least one payment recorded against it.
+// Returns true once at least one payment has been recorded for the order
+// (or the order was invoiced at zero value — nothing to collect).
 // Used to gate result entry: payment must exist before results can be entered.
+//
+// WHY THE DENORMALISED STAMP: lab members cannot read `payments`/`invoices`
+// (firestore.rules gates both behind billing capabilities — and unscoped
+// queries on them are denied outright, since their rules key on
+// organization_id). So the paid state is mirrored onto the `lab_orders` doc
+// by recordPayment() (payment) and stampLabInvoice() (zero-value invoice),
+// and checked FIRST here — lab_orders is readable by any signed-in member.
+// The financial reads further down remain as fallbacks for billing-capable
+// users and to backfill the stamp on orders paid before stamping existed.
 export async function orderHasPayment(orderId) {
   if (!orderId) return false
+  const { activeOrg } = authStore.getState()
+  let raw = null
   try {
-    // Check payments collection for any payment linked to this order directly
-    const paySnap = await getDocs(query(collection(db, 'payments'), where('lab_order_id', '==', orderId)))
-    if (!paySnap.empty) return true
-    // Also check invoices linked to this order — if any has paid_kobo > 0, payment recorded
-    const invSnap = await getDocs(query(collection(db, 'invoices'), where('lab_order_id', '==', orderId)))
-    for (const d of invSnap.docs) {
-      if ((d.data().paid_kobo || 0) > 0) return true
-    }
-    // Fall back: check billing_status on the order itself
-    const orderSnap = await getDoc(doc(db, 'lab_orders', orderId))
-    if (orderSnap.exists()) {
-      const r = orderSnap.data()
-      // If billing_status is 'invoiced' and invoice has been paid, allow entry
-      if (r.invoice_id) {
-        const iSnap = await getDoc(doc(db, 'invoices', r.invoice_id))
-        if (iSnap.exists() && (iSnap.data().paid_kobo || 0) > 0) return true
-      }
-    }
-    return false
+    const orderSnap = await getDoc(doc(db, LABS, orderId))
+    if (orderSnap.exists()) raw = orderSnap.data()
   } catch (e) {
     console.warn('[lab] payment check failed:', e && e.message)
     return false
+  }
+  if (raw) {
+    // 1) Denormalised stamp on the order itself — works for every role.
+    if (raw.payment_recorded_at || (Number(raw.paid_kobo) || 0) > 0) return true
+    if (raw.billing_status === 'invoiced' && raw.invoice_total_kobo != null && Number(raw.invoice_total_kobo) <= 0) return true
+    // 2) Invoice read — requires billing.invoice; also backfills the stamp for
+    //    invoices paid/zero-valued before payment stamping existed.
+    if (raw.invoice_id) {
+      try {
+        const iSnap = await getDoc(doc(db, 'invoices', raw.invoice_id))
+        if (iSnap.exists()) {
+          const inv = iSnap.data()
+          if ((inv.paid_kobo || 0) > 0) { backfillOrderPaidStamp(orderId, inv.paid_kobo); return true }
+          if ((inv.total_kobo || 0) <= 0) { backfillOrderPaidStamp(orderId, 0, inv.total_kobo); return true }
+        }
+      } catch { /* no billing.invoice capability — the stamp above is authoritative */ }
+    }
+  }
+  if (!activeOrg) return false
+  // 3) Query fallbacks for billing-capable users. Each query MUST carry the
+  //    organization_id equality (required by those collections' rules) and
+  //    runs in its own try/catch so one permission denial cannot hide the rest.
+  try {
+    const paySnap = await getDocs(query(collection(db, 'payments'),
+      where('organization_id', '==', activeOrg), where('lab_order_id', '==', orderId)))
+    if (!paySnap.empty) {
+      const paid = paySnap.docs.reduce((s, d) => s + (Number(d.data().amount_kobo) || 0), 0)
+      backfillOrderPaidStamp(orderId, paid)
+      return true
+    }
+  } catch { /* no billing.payment capability */ }
+  try {
+    const invSnap = await getDocs(query(collection(db, 'invoices'),
+      where('organization_id', '==', activeOrg), where('lab_order_id', '==', orderId)))
+    for (const d of invSnap.docs) {
+      if ((d.data().paid_kobo || 0) > 0) return true
+    }
+  } catch { /* no billing.invoice capability */ }
+  try {
+    const invSnap2 = await getDocs(query(collection(db, 'invoices'),
+      where('organization_id', '==', activeOrg), where('source_type', '==', 'lab_order'), where('source_id', '==', orderId)))
+    for (const d of invSnap2.docs) {
+      if ((d.data().paid_kobo || 0) > 0) return true
+    }
+  } catch { /* no billing.invoice capability */ }
+  return false
+}
+
+// Best-effort, one-time: mirror a payment detected via the financial
+// collections onto the order doc so lab members (who cannot read those
+// collections) see the gate open too. Only writes while the stamp is missing;
+// any failure is swallowed — it must never fail the payment check itself.
+async function backfillOrderPaidStamp(orderId, paidKobo, totalKobo) {
+  try {
+    const patch = { updated_at: serverTimestamp() }
+    if (Number(paidKobo) > 0) {
+      patch.paid_kobo = Math.round(Number(paidKobo) || 0)
+      patch.payment_recorded_at = serverTimestamp()
+    }
+    if (totalKobo != null) patch.invoice_total_kobo = Math.round(Number(totalKobo) || 0)
+    await updateDoc(doc(db, LABS, orderId), patch)
+  } catch (e) {
+    console.warn('[lab] payment stamp backfill failed:', e && e.message)
   }
 }
 
@@ -965,11 +1023,36 @@ export async function addLabVerification(labId, verifiedById, verifiedByName) {
 
 // ---- billing stamp ------------------------------------------------------------
 // Called by the billing integration after an invoice is created for an order.
-export async function stampLabInvoice(labId, invoiceId) {
-  requireLabUpdate()
+// This is a BILLING act: a cashier (billing.invoice, no lab caps) must be able
+// to raise and link an invoice for a lab order. The rules pin the capability
+// to these bookkeeping fields only (affectedKeys().hasOnly), so workflow
+// state stays out of reach. `totalKobo` is denormalised too so a zero-value
+// invoice can clear the payment gate without a payment existing.
+export async function stampLabInvoice(labId, invoiceId, opts = {}) {
+  const me = myActiveMembership()
+  if (!can(me, 'lab.order') && !can(me, 'lab.sample.collect')
+    && !can(me, 'lab.result.enter') && !can(me, 'lab.result.verify')
+    && !can(me, 'billing.invoice')) {
+    throw new Error('Your role cannot link invoices to lab orders (needs "billing.invoice" or a laboratory capability). Ask an administrator.')
+  }
   await updateDoc(doc(db, LABS, labId), {
     invoice_id: invoiceId,
     billing_status: 'invoiced',
+    ...(opts.totalKobo != null ? { invoice_total_kobo: Math.round(Number(opts.totalKobo) || 0) } : {}),
+    updated_at: serverTimestamp(),
+  })
+  return true
+}
+
+// Called by recordPayment AFTER a payment lands on an invoice tied to this
+// order. Denormalises the paid state onto the order doc because lab members
+// cannot read payments/invoices (firestore.rules) — without this the payment
+// gate in orderHasPayment would never open for the lab bench. Rules allow a
+// billing.payment holder to touch only these stamp fields.
+export async function stampLabOrderPayment(labId, paidKobo) {
+  await updateDoc(doc(db, LABS, labId), {
+    paid_kobo: Math.max(0, Math.round(Number(paidKobo) || 0)),
+    payment_recorded_at: serverTimestamp(),
     updated_at: serverTimestamp(),
   })
   return true

@@ -1,18 +1,14 @@
 // Patients registry — real Firestore reads/writes (offline-first, cached).
-import { shell, statusBadge, toast, wireToast, formModal, closeModal } from '../components/shell.js'
+import { shell, statusBadge, toast, wireToast } from '../components/shell.js'
 import { navigate } from '../router.js'
 import { authStore } from '../store/authStore.js'
 import { listOrgPatientsPage, myPatientCaps, friendlyPatientError, formatPhone,
-  searchPatientsGlobally, parseSearchTerm, matchesPatient,
-  getPatient, findOpenEncounterForPatient, patientHasClinicalTrail,
+  searchPatientsGlobally, parseSearchTerm, matchesPatient, patientHasClinicalTrail,
 } from '../services/patientService.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { payerOptions } from '../services/payerService.js'
-import { createEncounter, ENCOUNTER_TYPES } from '../services/consultationService.js'
-import { getClinicalStaff } from '../services/authService.js'
 import { esc } from '../utils/sanitize.js'
 import { fmtDate } from '../utils/format.js'
-import { friendlyWriteError } from '../utils/errors.js'
 import { confirmDelete } from './deleteUi.js'
 import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { deletePatient } from '../services/deleteService.js'
@@ -62,7 +58,7 @@ export async function PatientsView(app) {
       '<button class="btn ghost" id="exportBtn">Export CSV</button>',
     body:
       '<div class="card"><div class="toolbar">' +
-      '<div class="search"><input id="q" class="input" placeholder="Search all hospitals — name, ID, MRN or phone…" /></div>' +
+      '<div class="search"><input id="q" class="input" aria-label="Search all hospitals" placeholder="Search all hospitals — name, ID, MRN or phone…" /></div>' +
       '<div class="chips" id="chips"></div></div>' +
       '<div id="ptbl"></div>' +
       '<p class="sub" id="pcount" style="margin-top:10px">Loading…</p>' +
@@ -202,6 +198,13 @@ export async function PatientsView(app) {
         if (e.target.closest('.kebab-trigger, .kebab-item, .rowSel')) return
         window.location.hash = '#/patients/' + tr.getAttribute('data-pid')
       }
+      tr.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          if (e.target.closest('.kebab-trigger, .kebab-item, .rowSel')) return
+          window.location.hash = '#/patients/' + tr.getAttribute('data-pid')
+        }
+      })
     })
 
     // Pre-check delete: if the patient has clinical trail, block with a clear
@@ -251,7 +254,7 @@ export async function PatientsView(app) {
             ? '<span class="pill ok">Your Hospital</span>'
             : '<span class="pill info">Other Hospital</span>') + '</td>' +
           '<td>' + kebabCell({ rowId: esc(r.pid), items: [
-            { label: 'Start Encounter', dataAction: 'encounter' },
+            { label: 'Start encounter', dataAction: 'encounter' },
             { label: 'Delete', tone: 'danger', dataAction: 'delete' }
           ] }) + '</td>' +
           '</tr>').join('')
@@ -292,7 +295,7 @@ export async function PatientsView(app) {
     // Pre-check delete: block if the patient has clinical trail.
     wireKebabs(tableHost, async (rowId, action) => {
       if (action === 'encounter') {
-        openEncounterModal(rowId)
+        openStartEncounter(rowId)
         return
       }
       if (action !== 'delete') return
@@ -379,50 +382,14 @@ export async function PatientsView(app) {
 
   await loadMore()
 
-  async function openEncounterModal(pid) {
-    const { activeOrg } = authStore.getState()
-    if (!activeOrg) { toast('No hospital selected'); return }
-    try {
-      const existing = await findOpenEncounterForPatient(pid, activeOrg)
-      if (existing) {
-        toast('This patient already has an open encounter at your hospital.')
-        return
-      }
-    } catch (e) {
-      console.warn('[search] open-encounter check failed:', e?.message)
-    }
-    getClinicalStaff(activeOrg).then((staff) => {
-      const clinicianOptions = staff.length > 0 ? staff : [{ value: '', label: 'No clinical staff found' }]
-      formModal({
-        title: 'Start Encounter',
-        submitLabel: 'Open encounter →',
-        fields: [
-          { name: 'type', label: 'Type', type: 'select', options: ENCOUNTER_TYPES },
-          { name: 'clinician', label: 'Clinician', type: 'select', options: clinicianOptions, required: true },
-          { name: 'chief_complaint', label: 'Chief complaint', full: true, placeholder: 'e.g. Fever, headache…' },
-        ],
-        onSubmit: async (v) => {
-          try {
-            const patient = await getPatient(pid)
-            const created = await createEncounter({
-              patient_id: pid,
-              patient_name: patient ? patient.name : '',
-              status: 'arrived',
-              type: v.type || '',
-              clinician: v.clinician || '',
-              chief_complaint: v.chief_complaint || '',
-            })
-            closeModal()
-            toast('Encounter started')
-            navigate('/consultations?enc=' + encodeURIComponent(created.id))
-          } catch (e) {
-            throw new Error(friendlyWriteError(e))
-          }
-        },
-      })
-    }).catch((e) => {
-      toast('Failed to load clinical staff: ' + friendlyWriteError(e))
-    })
+  // The Start-encounter form is a shared full-page route (also used by the
+  // Consultations queue and the patient chart) — same fields, same duplicate
+  // guard, same follow-through (deep-link into the encounter workspace).
+  function openStartEncounter(pid) {
+    const row = rows.find((r) => r.pid === pid) || searchResults.find((r) => r.pid === pid)
+    const q = '?pid=' + encodeURIComponent(pid) +
+      (row?.name ? '&name=' + encodeURIComponent(row.name) : '')
+    navigate('/encounters/new' + q)
   }
 
   // Export the currently loaded patient rows to CSV.

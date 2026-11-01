@@ -11,7 +11,8 @@ import {
   myLabCaps, orderHasPayment,
 } from '../services/laboratoryService.js'
 import { getLabSettings } from '../services/labCatalogueService.js'
-import { createInvoiceForLabOrder } from '../services/billingService.js'
+import { createInvoiceForLabOrder, getInvoice } from '../services/billingService.js'
+import { openPaymentModal } from '../components/PaymentModal.js'
 import { can } from '../features/admin/roles.js'
 import { myActiveMembership } from '../services/authService.js'
 import { esc } from '../utils/sanitize.js'
@@ -75,7 +76,7 @@ export async function LabOrderView(app, params = {}) {
       order = await getLabOrder(lid)
       loadError = null
       if (!order) loadError = new Error('That lab order no longer exists.')
-    if (order) { try { orderPaid = await orderHasPayment(lid) } catch { orderPaid = false } }
+      if (order) { try { orderPaid = await orderHasPayment(lid) } catch { orderPaid = false } }
     } catch (e) {
       loadError = e
     }
@@ -109,8 +110,12 @@ export async function LabOrderView(app, params = {}) {
         if (orderPaid) {
           bits.push('<a class="btn sm" href="#/laboratory/orders/' + esc(lid) + '/items/' + esc(it.item_id) + '">Enter result</a>')
         } else {
-          bits.push('<button class="btn sm" disabled title="Record a payment first before entering results" style="opacity:.5;cursor:not-allowed">Enter result 🔒</button>' +
-            '<a class="btn ghost sm" href="#/billing" title="Go to billing to record payment">Pay first →</a>')
+          bits.push('<button class="btn sm" disabled title="Record a payment first before entering results" style="opacity:.5;cursor:not-allowed">Enter result 🔒</button>')
+          if (caps.canBill && order.billingStatus === 'unbilled') {
+            bits.push('<button class="btn ghost sm" id="billAndPayBtn">Create invoice & pay →</button>')
+          } else {
+            bits.push('<a class="btn ghost sm" href="#/billing" title="Go to billing to record payment">Pay first →</a>')
+          }
         }
       }
       if (caps.canCollect) bits.push(btn('reject', 'Reject', 'ghost sm'))
@@ -143,8 +148,12 @@ export async function LabOrderView(app, params = {}) {
 
     const items = order.items || []
     const canBill = can(myActiveMembership(), 'billing.invoice')
+    // Header action for cashiers: raise the invoice AND take payment in one
+    // go — the payment gate opens the moment the payment is recorded, without
+    // a detour through the Billing screen. Invoice-only billing (pay later)
+    // remains on the Laboratory list kebab.
     const billBtn = (canBill && order.facility !== 'external' && order.billingStatus === 'unbilled')
-      ? '<button class="btn ghost" id="billBtn">Create invoice</button>' : ''
+      ? '<button class="btn ghost" id="hdrBillPayBtn">Create invoice &amp; pay →</button>' : ''
     const allValidated = items.some((it) => it.status === 'validated') && !items.some((it) => ['ordered', 'sample_collected', 'received', 'result_entered', 'rejected'].includes(it.status))
 
     root.innerHTML =
@@ -199,7 +208,9 @@ export async function LabOrderView(app, params = {}) {
         '<div class="mrow">' +
         (caps.canOrder ? '<button class="btn ghost sm" data-legacy="specimen-collected">Collect specimen</button>' +
           '<button class="btn ghost sm" data-legacy="processing">Start processing</button>' : '') +
-        (caps.canResult ? '<button class="btn ghost sm" id="legacyResultBtn">Enter result</button>' : '') +
+        (caps.canResult ? (orderPaid
+          ? '<button class="btn ghost sm" id="legacyResultBtn">Enter result</button>'
+          : '<button class="btn ghost sm" disabled title="Record a payment first before entering results" style="opacity:.5;cursor:not-allowed">Enter result 🔒</button>') : '') +
         (caps.canVerify ? '<button class="btn ghost sm" data-legacy="verified">Verify</button>' : '') +
         '</div></div>'
         : '') +
@@ -215,16 +226,36 @@ export async function LabOrderView(app, params = {}) {
     root.querySelector('#printReqBtn').onclick = () => printDocument('Lab request', labRequestStructuredHtml(order, { hospitalName: authStore.getState().activeOrgName }))
     const pr = root.querySelector('#printReportBtn')
     if (pr) pr.onclick = () => printDocument('Lab report', labReportHtml(order, { hospitalName: authStore.getState().activeOrgName, labSettings }))
-    const bill = root.querySelector('#billBtn')
-    if (bill) {
-      bill.onclick = async () => {
-        try {
-          const inv = await createInvoiceForLabOrder(order)
-          toast('Invoice ' + inv.id.slice(0, 8) + ' created · ' + naira(inv.total_kobo))
+    // Shared "invoice + pay" flow for the header button and the per-test
+    // "Create invoice & pay →" button. After the invoice exists the payment
+    // modal takes the money; closing it unpaid is safe too — reload() already
+    // dropped the bill buttons, so a second invoice can never be raised.
+    const runBillAndPay = async (btn) => {
+      if (btn) btn.disabled = true
+      try {
+        const inv = await createInvoiceForLabOrder(order)
+        if ((inv.total_kobo || 0) <= 0) {
+          // Zero-value invoice: nothing to collect, and PaymentModal cannot
+          // take a ₦0 payment. stampLabInvoice denormalised the total, so the
+          // payment gate treats an invoiced-at-zero order as cleared.
+          toast('Invoice created — nothing to collect, result entry unlocked')
           reload()
-        } catch (e) { toast(friendlyWriteError(e, 'Billing failed')) }
+          return
+        }
+        toast('Invoice ' + inv.id.slice(0, 8) + ' created · ' + naira(inv.total_kobo))
+        reload()
+        const invoice = await getInvoice(inv.id)
+        if (invoice) openPaymentModal({ invoice, onSuccess: () => reload() })
+        else toast('Invoice created — record payment from the Billing screen')
+      } catch (e) {
+        toast(friendlyWriteError(e, 'Billing failed'))
+        if (btn) btn.disabled = false
       }
     }
+    const hdrBill = root.querySelector('#hdrBillPayBtn')
+    if (hdrBill) hdrBill.onclick = () => runBillAndPay(hdrBill)
+    const billAndPay = root.querySelector('#billAndPayBtn')
+    if (billAndPay) billAndPay.onclick = () => runBillAndPay(billAndPay)
     const relAll = root.querySelector('#releaseAllBtn')
     if (relAll) {
       relAll.onclick = async () => {

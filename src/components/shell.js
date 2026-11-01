@@ -3,7 +3,6 @@ import { authStore } from '../store/authStore.js'
 import { logout, myActiveMembership } from '../services/authService.js'
 import { navigate } from '../router.js'
 import { esc } from '../utils/sanitize.js'
-import { ORG } from '../data/mockData.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { onUpdate, getSyncMode } from '../services/clinicalOutbox.js'
 import { createAllergyTagInput } from './AllergyTagInput.js'
@@ -23,7 +22,16 @@ export const NAV = [
 ]
 
 export function statusBadge(s) {
-  const map = {
+  const statusLabels = {
+    Paid: 'Paid', Dispensed: 'Dispensed', Verified: 'Verified', Synced: 'Synced', Completed: 'Completed', Active: 'Active', 'Checked-in': 'Checked-in', 'checked-in': 'Checked-in',
+    'Part-paid': 'Part-paid', Pending: 'Pending', Ready: 'Ready', Waiting: 'Waiting', Low: 'Low', 'With vitals': 'With vitals',
+    Requested: 'Requested', 'Partially dispensed': 'Partially dispensed', Reversed: 'Reversed', 'no-show': 'No-show',
+    'In consultation': 'In consultation', Processing: 'Processing', Confirmed: 'Confirmed', Admitted: 'Admitted', Accepted: 'Accepted', 'Specimen collected': 'Specimen collected',
+    External: 'External',
+    Unpaid: 'Unpaid', Out: 'Out', Expiring: 'Expiring', Overdue: 'Overdue', cancelled: 'Cancelled',
+    Scheduled: 'Scheduled', Open: 'Open', OK: 'OK', 'NHIA claim': 'NHIA claim', scheduled: 'scheduled',
+  }
+  const cls = {
     Paid: 'ok', Dispensed: 'ok', Verified: 'ok', Synced: 'ok', Completed: 'ok', Active: 'ok', 'Checked-in': 'ok', 'checked-in': 'ok',
     'Part-paid': 'warn', Pending: 'warn', Ready: 'warn', Waiting: 'warn', Low: 'warn', 'With vitals': 'warn',
     Requested: 'warn', 'Partially dispensed': 'warn', Reversed: 'warn', 'no-show': 'warn',
@@ -31,15 +39,19 @@ export function statusBadge(s) {
     External: 'info',
     Unpaid: 'bad', Out: 'bad', Expiring: 'bad', Overdue: 'bad', cancelled: 'bad',
     Scheduled: '', Open: '', OK: 'ok', 'NHIA claim': 'info', scheduled: '',
-  }
-  const cls = map[s] || ''
-  return '<span class="pill ' + cls + '">' + esc(s) + '</span>'
+  }[s] || ''
+  const label = statusLabels[s] || esc(s)
+  return '<span class="pill ' + cls + '" title="' + esc(label) + '">' + esc(s) + '</span>'
 }
 
 export function shell(app, { active, title, subtitle = '', actions = '', body = '' }) {
-  const { user, activeOrgName } = authStore.getState()
+  const { user, activeOrgName, activeOrg } = authStore.getState()
   const email = user?.email || ''
-  const org = activeOrgName || ORG.name
+  // Never fall back to the demo/mock hospital name — a missing org name shows
+  // the org id (or a neutral label), never another hospital's brand. The label
+  // is wired to the auth store below, so when the org doc resolves a moment
+  // after this render the sidebar updates in place.
+  const org = activeOrgName || activeOrg || 'Hospital'
   const online = typeof navigator === 'undefined' || navigator.onLine !== false
   const me = myActiveMembership()
   const role = me?.role ? String(me.role).replace(/_/g, ' ') : 'member'
@@ -53,7 +65,7 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
       '<div class="side-scrim" id="sideScrim" aria-hidden="true"></div>' +
       '<aside class="side" id="side">' +
         '<div class="side-brand"><img src="./logo.png" class="brand-logo" alt="MediLog NG" onerror="this.style.display=\'none\'" />' +
-          '<span><strong>MediLog NG</strong><em>' + esc(org) + '</em></span>' +
+          '<span><strong>MediLog NG</strong><em id="sideOrg">' + esc(org) + '</em></span>' +
           '<button class="iconbtn side-close only-mobile" id="sideClose" aria-label="Close navigation">✕</button></div>' +
         '<nav class="side-nav" aria-label="Main">' +
           NAV.map((n) => '<a href="#' + n.path + '" class="' + (n.path === active ? 'on' : '') + '"' +
@@ -61,7 +73,7 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
             '<span class="ic" aria-hidden="true">' + n.icon + '</span>' + esc(n.label) + '</a>').join('') +
         '</nav>' +
         '<div class="side-foot">' +
-          '<div class="sync"><span class="dot" id="syncDot"></span><span><strong id="syncState">' +
+          '<div class="sync"><span class="dot" id="syncDot"></span><span><strong id="syncState" aria-live="polite">' +
             (online ? 'Online · Firestore' : 'Offline · local cache') +
             '</strong><em id="syncDetail">' + (online ? 'writes sync to the cloud' : 'writes queue until you reconnect') + '</em></span></div>' +
           '<div id="sideHostLan" style="display:none; margin:8px 0; padding:6px 10px; background:rgba(14,107,94,0.18); border:1px solid rgba(14,107,94,0.35); border-radius:8px; cursor:pointer;" title="Click to copy hospital LAN address">' +
@@ -85,8 +97,8 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
         '<main class="page">' + body + '</main>' +
       '</div>' +
     '</div>' +
-    '<div id="toast" class="toast" hidden></div>' +
-    '<div id="modal" class="modal" hidden><div class="modal-card"><div class="modal-head"><h3 id="modalTitle"></h3><button class="iconbtn" data-close aria-label="Close">✕</button></div><div id="modalBody" class="modal-body"></div></div></div>'
+    '<div id="toast" class="toast" role="alert" aria-live="polite" hidden></div>' +
+    '<div id="modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-card"><div class="modal-head"><h3 id="modalTitle"></h3><button class="iconbtn" data-close aria-label="Close">✕</button></div><div id="modalBody" class="modal-body"></div></div></div>'
 
   const side = document.getElementById('side')
   const scrim = document.getElementById('sideScrim')
@@ -157,6 +169,18 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
   }).catch(() => {})
 
   document.getElementById('outBtn').onclick = async () => { await logout(); navigate('/login') }
+
+  // The hospital name resolves from Firestore after sign-in and can arrive
+  // after this shell has already rendered (slow/offline org-doc read). Keep
+  // the sidebar label live so it swaps to the real name the moment it lands,
+  // instead of holding a placeholder for the whole session.
+  const orgLabel = document.getElementById('sideOrg')
+  const unsubOrg = authStore.subscribe((s) => {
+    if (!orgLabel || !orgLabel.isConnected) return
+    const name = s.activeOrgName || s.activeOrg || 'Hospital'
+    if (orgLabel.textContent !== name) orgLabel.textContent = name
+  })
+  onCleanup(unsubOrg)
   document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = closeModal })
   document.getElementById('modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal() })
 

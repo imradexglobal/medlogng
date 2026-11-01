@@ -52,6 +52,8 @@ export const ROLE_CAPS = {
     'appointment.update',
     'beds.manage',
     'documents.upload',
+    'billing.invoice',
+    'prescription.dispense',
   ],
   nurse: [
     'patient.create',
@@ -69,6 +71,8 @@ export const ROLE_CAPS = {
     'appointment.update',
     'beds.manage',
     'documents.upload',
+    'billing.invoice',
+    'billing.payment',
   ],
   pharmacist: [
     'prescription.dispense',
