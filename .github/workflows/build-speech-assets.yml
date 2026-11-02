@@ -93,7 +93,12 @@ jobs:
           if (-not $process.Start()) { throw 'Could not start the real Whisper worker.' }
           try {
             $readyTask = $process.StandardOutput.ReadLineAsync()
-            if (-not $readyTask.Wait([TimeSpan]::FromMinutes(3)) -or $readyTask.Result -ne 'READY') {
+            $readyReceived = $readyTask.Wait([TimeSpan]::FromMinutes(3))
+            if (-not $readyReceived -and -not $process.HasExited) {
+              $process.Kill($true)
+              $process.WaitForExit()
+            }
+            if (-not $readyReceived -or $readyTask.Result -ne 'READY') {
               $stderr = $process.StandardError.ReadToEnd()
               throw ('Worker did not load the model: ' + $stderr)
             }
