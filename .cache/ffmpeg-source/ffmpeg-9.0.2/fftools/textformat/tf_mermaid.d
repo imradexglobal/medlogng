@@ -1,0 +1,10 @@
+fftools/textformat/tf_mermaid.o: fftools/textformat/tf_mermaid.c \
+ fftools/textformat/avtextformat.h libavutil/dict.h libavformat/avio.h \
+ libavutil/attributes.h libavutil/log.h libavutil/attributes.h \
+ libavutil/version.h libavutil/macros.h libavutil/avconfig.h \
+ libavformat/version_major.h libavutil/bprint.h libavutil/avstring.h \
+ libavutil/rational.h libavutil/hash.h fftools/textformat/avtextwriters.h \
+ fftools/textformat/tf_internal.h fftools/textformat/tf_mermaid.h \
+ libavutil/mem.h libavutil/opt.h libavutil/rational.h \
+ libavutil/channel_layout.h libavutil/dict.h libavutil/log.h \
+ libavutil/pixfmt.h libavutil/samplefmt.h
