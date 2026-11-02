@@ -67,20 +67,32 @@
     </div>
 
     <div class="step">
-      <h2><span class="n">2</span> Open the firewall</h2>
+      <h2><span class="n">2</span> Enable secure microphone access (recommended)</h2>
+      <p>Browser microphone access on LAN computers requires HTTPS. The existing HTTP address will remain available. Select a PFX certificate issued by a CA trusted on this Host and the client PCs; its names must cover the address clients will use. Ask IT to reserve the Host IP or provide a stable DNS name covered by the certificate. If a DHCP address changes and is not covered, secure recording stays unavailable until a matching certificate is imported. Deploy only the CA root certificate to client PCs; never copy the PFX there.</p>
+      <input id="tlsPassword" type="password" autocomplete="new-password" placeholder="Certificate password (if required)" style="width:100%;box-sizing:border-box;margin-bottom:8px;padding:9px;border:1px solid #334155;border-radius:8px;background:#0f172a;color:#e2e8f0" />
+      <button id="btnTls">Choose HTTPS certificate (.pfx)…</button>
+      <div id="tlsMsg"></div>
+    </div>
+
+    <div class="step">
+      <h2><span class="n">3</span> Open the firewall</h2>
       <p>Windows will ask for permission once — click <b>Yes</b>. This lets other PCs in the building reach this one. The rule applies to <b>Domain and Private</b> networks only; it never opens a Public network.</p>
       <button id="btnFw">Open firewall…</button>
       <div id="fwMsg"></div>
     </div>
 
     <div class="step">
-      <h2><span class="n">3</span> Finish</h2>
-      <p class="hint">On every other PC: open Chrome, go to the <b>LAN address</b>, sign in with that user's own MediLog account, and bookmark it. No secret needs copying.</p>
+      <h2><span class="n">4</span> Finish</h2>
+      <p class="hint">On every other PC: open Chrome, go to the <b>LAN address</b>, sign in with that user's own MediLog account, and bookmark it. No login secret needs copying. For microphone access, IT must trust the certificate issuer on those PCs.</p>
       <div id="addrWrap" hidden>
-        <div class="addr-label">Other PCs on the same Wi-Fi / LAN</div>
+        <div class="addr-label">Existing app address · HTTP</div>
         <div class="addr" id="lanAddr">Not available yet</div>
-        <div class="addr-label">This PC only</div>
+        <div class="addr-label">Microphone-enabled address · HTTPS</div>
+        <div class="addr" id="httpsLanAddr">Not configured</div>
+        <div class="addr-label">This PC only · HTTP</div>
         <div class="addr" id="localAddr"></div>
+        <div class="addr-label">This PC only · HTTPS</div>
+        <div class="addr" id="httpsLocalAddr">Not configured</div>
       </div>
       <div id="diag" class="diag" hidden></div>
       <div id="finMsg"></div>

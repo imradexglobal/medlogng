@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('medilog', {
   // ---- host-mode wizard (used by wizard.js; inert in the normal app) ----
   hostGetInfo: () => ipcRenderer.invoke('host-get-info'),
   hostImportKey: () => ipcRenderer.invoke('host-import-key'),
+  hostImportTlsCertificate: (passphrase) => ipcRenderer.invoke('host-import-tls-certificate', passphrase),
   hostOpenFirewall: () => ipcRenderer.invoke('host-open-firewall'),
   hostFinishSetup: () => ipcRenderer.invoke('host-finish-setup'),
   hostShowDataFolder: () => ipcRenderer.invoke('host-show-data-folder'),

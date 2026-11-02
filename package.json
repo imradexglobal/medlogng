@@ -11,6 +11,8 @@
     "test:e2e": "playwright test e2e/onboarding.spec.js",
     "test": "node scripts/smoke.mjs && npm run test:services",
     "test:hub": "node scripts/test/hub.smoke.mjs",
+    "test:speech": "node scripts/test/speech.worker.test.mjs && node scripts/test/speech.jobs.test.mjs && node scripts/test/speech.assets.test.mjs",
+    "test:speech:listeners": "node scripts/test/speech.listeners.test.mjs",
     "hub": "node hub/server.js",
     "dev": "vite --port 5174",
     "build": "vite build",
@@ -21,9 +23,11 @@
     "electron:host": "npm run build && node scripts/start-host.mjs",
     "electron:test": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --publish never",
-    "dist:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish never",
+    "speech:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-whisper-worker.ps1",
+    "speech:verify": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-speech-assets.ps1",
+    "dist:host": "npm run speech:verify && npm run build && electron-builder --win --config electron-builder.host.yml --publish never",
     "publish:desktop": "npm run build && electron-builder --win --publish always",
-    "publish:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish always"
+    "publish:host": "npm run speech:verify && npm run build && electron-builder --win --config electron-builder.host.yml --publish always"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.1",

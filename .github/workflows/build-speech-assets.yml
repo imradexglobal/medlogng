@@ -1,0 +1,128 @@
+name: Build offline speech assets
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-speech-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x64-assets:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Check out the approved source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js for repository build scripts
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20.18.0
+
+      - name: Install official MSYS2 UCRT64 build tools
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          cache: false
+          path-type: minimal
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-nasm
+            gnupg
+
+      - name: Confirm Windows build tools
+        shell: pwsh
+        run: |
+          node --version
+          git --version
+          cmake --version
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw 'Visual Studio Build Tools were not found on the Windows 2022 runner.' }
+          & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC x64 tools were not found on the Windows 2022 runner.' }
+
+      - name: Build, sign-check and stage official FFmpeg source
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: ./scripts/build-ffmpeg.ps1
+
+      - name: Build pinned Whisper worker and verify all assets
+        shell: pwsh
+        run: |
+          npm run speech:build
+          if ($LASTEXITCODE -ne 0) { throw 'Whisper worker build failed.' }
+          npm run speech:verify
+          if ($LASTEXITCODE -ne 0) { throw 'Speech asset verification failed.' }
+
+      - name: Smoke-test real worker startup and model load
+        shell: pwsh
+        run: |
+          $worker = Join-Path $PWD 'vendor/speech/medilog-whisper-worker.exe'
+          $model = Join-Path $PWD 'vendor/speech/ggml-tiny.en-q5_1.bin'
+          $audio = Join-Path $PWD 'vendor/speech'
+          $output = @('QUIT') | & $worker --model $model --audio-dir $audio --threads 1 2>&1
+          if ($LASTEXITCODE -ne 0 -or $output -notcontains 'READY') {
+            throw ('Worker did not load the model successfully: ' + ($output -join "`n"))
+          }
+          Write-Host 'Real worker started and emitted READY after model initialization.'
+
+      - name: Smoke-test the built FFmpeg executable
+        shell: pwsh
+        run: |
+          $ffmpeg = Join-Path $PWD 'vendor/speech/ffmpeg.exe'
+          $input = Join-Path $env:RUNNER_TEMP 'speech-input.wav'
+          $output = Join-Path $env:RUNNER_TEMP 'speech-output.wav'
+          $pcm = [byte[]]::new(3200)
+          $wav = [byte[]]::new(44 + $pcm.Length)
+          [Text.Encoding]::ASCII.GetBytes('RIFF').CopyTo($wav, 0)
+          [BitConverter]::GetBytes([uint32]($wav.Length - 8)).CopyTo($wav, 4)
+          [Text.Encoding]::ASCII.GetBytes('WAVE').CopyTo($wav, 8)
+          [Text.Encoding]::ASCII.GetBytes('fmt ').CopyTo($wav, 12)
+          [BitConverter]::GetBytes([uint32]16).CopyTo($wav, 16)
+          [BitConverter]::GetBytes([uint16]1).CopyTo($wav, 20)
+          [BitConverter]::GetBytes([uint16]1).CopyTo($wav, 22)
+          [BitConverter]::GetBytes([uint32]16000).CopyTo($wav, 24)
+          [BitConverter]::GetBytes([uint32]32000).CopyTo($wav, 28)
+          [BitConverter]::GetBytes([uint16]2).CopyTo($wav, 32)
+          [BitConverter]::GetBytes([uint16]16).CopyTo($wav, 34)
+          [Text.Encoding]::ASCII.GetBytes('data').CopyTo($wav, 36)
+          [BitConverter]::GetBytes([uint32]$pcm.Length).CopyTo($wav, 40)
+          [Array]::Copy($pcm, 0, $wav, 44, $pcm.Length)
+          [IO.File]::WriteAllBytes($input, $wav)
+          & $ffmpeg -nostdin -hide_banner -loglevel error -y -i $input -map 0:a:0 -vn -ac 1 -ar 16000 -c:a pcm_s16le $output
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output) -or (Get-Item $output).Length -lt 44) {
+            throw 'The packaged FFmpeg executable failed a WAV conversion smoke test.'
+          }
+
+      - name: Run mocked worker, queue and asset regression tests
+        shell: pwsh
+        run: |
+          npm run test:speech
+          if ($LASTEXITCODE -ne 0) { throw 'Speech mock/queue/asset regression tests failed.' }
+
+      - name: Upload verified runtime assets and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: medilog-offline-speech-assets-windows-x64
+          if-no-files-found: error
+          path: |
+            vendor/speech/medilog-whisper-worker.exe
+            vendor/speech/ggml-tiny.en-q5_1.bin
+            vendor/speech/ffmpeg.exe
+            vendor/speech/speech-assets.json
+            vendor/speech/ffmpeg-build.json
+            vendor/speech/ffmpeg-source/ffmpeg-9.0.2.tar.xz
+            vendor/speech/ffmpeg-source/ffmpeg-9.0.2.tar.xz.asc
+            vendor/speech/ffmpeg-source/ffmpeg-devel.asc
+            vendor/speech/COPYING.LGPLv2.1
+            vendor/speech/LICENSE-whisper.cpp.txt

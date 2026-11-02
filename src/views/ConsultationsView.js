@@ -32,6 +32,7 @@ import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteEncounter } from '../services/deleteService.js'
 import { planHtmlForEditor, serializePlanHtml } from '../features/encounters/planRichText.js'
+import { attachSpeechInput } from '../components/speechInput.js'
 
 // Encounter statuses are stored lowercase, so the shared statusBadge() (whose
 // keys are capitalised) rendered them as bare uncoloured pills. The label +
@@ -186,6 +187,7 @@ export async function ConsultationsView(app, params = {}) {
   let hasMore = false
   let loading = false
   let selectedEncounter = null
+  const speechCleanups = []
   // Encounter vitals are also mirrored to the patient's vitals collection.
   // Cache those encounter-linked rows so selecting a patient (or a live queue
   // repaint) doesn't issue repeated reads or leave the header blank for staff
@@ -1457,6 +1459,14 @@ function visibleEncounters() {
       if (st) st.textContent = 'Unsaved changes'
     })
   })
+  if (caps.canEdit) {
+    SOAP_FIELDS.forEach(({ key }) => {
+      const field = document.getElementById('enc-soap-' + key)
+      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg }))
+    })
+    const planSpeechField = document.getElementById('planEditor')
+    if (planSpeechField) speechCleanups.push(attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg }))
+  }
   const qSearch = document.getElementById('qSearch')
   if (qSearch) {
     let qDebounce
@@ -1543,6 +1553,7 @@ function visibleEncounters() {
   }
 
   onCleanup(() => {
+    speechCleanups.forEach((cleanup) => cleanup())
     teardownListeners()
     if (tick) clearInterval(tick)
     unsubAuth()

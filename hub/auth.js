@@ -56,7 +56,106 @@ export function identityFromToken(decoded = {}) {
   }
 }
 
-export function createAuthenticator({ auth = null, db = null, log = console, checkSuperAdmins = true } = {}) {
+export function createAuthenticator({ auth = null, db = null, log = console, checkSuperAdmins = true,
+  loadSpeechAuthCache = null, saveSpeechAuthCache = null } = {}) {
+  const speechAuthCache = new Map()
+  let cacheLoaded = false
+  let cacheLoadPromise = null
+  let cacheWrite = Promise.resolve()
+
+  const cacheKey = (uid, orgId) => String(uid) + ':' + String(orgId)
+
+  async function loadCache() {
+    if (cacheLoaded) return
+    if (!cacheLoadPromise) {
+      cacheLoadPromise = (async () => {
+        try {
+          const raw = await loadSpeechAuthCache?.()
+          const rows = typeof raw === 'string' ? JSON.parse(raw) : raw
+          if (Array.isArray(rows)) {
+            for (const row of rows.slice(-5000)) {
+              if (!row?.uid || !row?.orgId || !row?.cachedAt) continue
+              speechAuthCache.set(cacheKey(row.uid, row.orgId), row)
+            }
+          }
+        } catch (error) {
+          log.warn('[hub] speech authorization cache could not be loaded:', error?.message || error)
+        }
+        cacheLoaded = true
+      })()
+    }
+    await cacheLoadPromise
+  }
+
+  function persistCache() {
+    if (!saveSpeechAuthCache) return Promise.resolve()
+    const rows = [...speechAuthCache.values()].slice(-5000)
+    cacheWrite = cacheWrite.catch(() => {}).then(() => saveSpeechAuthCache(JSON.stringify(rows)))
+      .catch((error) => log.warn('[hub] speech authorization cache could not be saved:', error?.message || error))
+    return cacheWrite
+  }
+
+  async function rememberSpeechAuthorization(context) {
+    await loadCache()
+    const row = {
+      uid: context.uid,
+      orgId: context.orgId,
+      superAdmin: !!context.superAdmin,
+      cachedAt: Date.now(),
+      membership: context.membership ? {
+        status: context.membership.status,
+        capabilities: Array.isArray(context.membership.capabilities) ? context.membership.capabilities.slice(0, 500) : [],
+        staff_name: String(context.membership.staff_name || '').slice(0, 160),
+      } : null,
+    }
+    speechAuthCache.delete(cacheKey(row.uid, row.orgId))
+    speechAuthCache.set(cacheKey(row.uid, row.orgId), row)
+    while (speechAuthCache.size > 5000) speechAuthCache.delete(speechAuthCache.keys().next().value)
+    await persistCache()
+  }
+
+  function isBackendUnavailable(error) {
+    if (error?.status === 503) return true
+    const code = String(error?.code || '').toLowerCase()
+    if (['unavailable', 'deadline-exceeded', 'resource-exhausted', 'econnreset', 'econnrefused', 'etimedout', 'enotfound', 'eai_again'].includes(code)) return true
+    return /network|unavailable|deadline exceeded|connection reset|connection refused|timed? ?out|dns/i.test(String(error?.message || ''))
+  }
+
+  async function authorizeSpeech(identity, orgId, capability) {
+    try {
+      const context = await authorize(identity, orgId, capability)
+      return { ...context, authorizationSource: 'firestore' }
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 400 || error?.status === 403) {
+        await loadCache()
+        const key = cacheKey(identity?.uid, orgId)
+        if (speechAuthCache.delete(key)) persistCache()
+        throw error
+      }
+      if (!isBackendUnavailable(error)) throw error
+      await loadCache()
+      const row = speechAuthCache.get(cacheKey(identity?.uid, orgId))
+      if (!row) throw error
+      const membership = row.membership
+      if (!row.superAdmin && (!membership || membership.status !== 'active' ||
+          (capability && !membershipHasCapability(membership, capability)))) {
+        throw new HttpError(403, 'Your last verified hospital access does not allow this operation.', 'cached_access_denied')
+      }
+      return {
+        uid: identity.uid,
+        email: identity.email,
+        emailVerified: identity.emailVerified,
+        displayName: identity.displayName || membership?.staff_name || '',
+        orgId,
+        capability: capability || '',
+        membership,
+        superAdmin: !!row.superAdmin,
+        authorizationSource: 'cached-offline',
+        cachedAt: row.cachedAt,
+      }
+    }
+  }
+
   async function verify(req) {
     const token = bearerToken(req)
     if (!token) {
@@ -118,6 +217,12 @@ export function createAuthenticator({ auth = null, db = null, log = console, che
     const superAdmin = await isSuperAdmin(identity.uid)
     const membership = superAdmin ? null : await loadMembership(identity.uid, orgId)
 
+    // Store only the last server-verified membership/capability snapshot.
+    // Normal authorization decisions below still use the live Firestore read.
+    // The speech route may consult this encrypted snapshot only when that
+    // backend read is unavailable.
+    await rememberSpeechAuthorization({ uid: identity.uid, orgId, membership, superAdmin })
+
     if (!superAdmin) {
       if (!membership) {
         throw new HttpError(403, 'Your account is not a member of that hospital.', 'not_a_member')
@@ -142,5 +247,5 @@ export function createAuthenticator({ auth = null, db = null, log = console, che
     }
   }
 
-  return { verify, authorize, loadMembership, isSuperAdmin }
+  return { verify, authorize, authorizeSpeech, loadMembership, isSuperAdmin }
 }

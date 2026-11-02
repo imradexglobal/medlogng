@@ -225,6 +225,25 @@
 .soap-note-letter { display: inline-flex; align-items: center; justify-content: center; color: var(--emr-info); font-weight: 800; cursor: help; }
 .soap-note-letter:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
 .soap-note-field textarea.input { box-sizing: border-box; width: 100%; height: 34px; min-height: 34px; margin: 0 !important; overflow-y: hidden; overflow-wrap: anywhere; padding: 6px 8px; line-height: 1.25; resize: none; }
+.soap-note-field .speech-control { grid-column: 2; margin-top: -3px; }
+.speech-control { min-width: 0; margin-top: 4px; color: var(--emr-muted); }
+.speech-control-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.speech-record, .speech-cancel, .speech-retry { min-height: 30px; padding: 4px 9px; border: 1px solid #cbd5e1; border-radius: 7px; background: #f8fafc; color: #1e3a5f; font: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
+.speech-record { display: inline-flex; align-items: center; gap: 5px; }
+.speech-record:hover, .speech-cancel:hover { background: #eff6ff; border-color: #93c5fd; }
+.speech-record:focus-visible, .speech-cancel:focus-visible, .speech-retry:focus-visible, .speech-review-actions button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.speech-record.is-recording { background: #fff1f2; color: #b91c1c; border-color: #fda4af; }
+.speech-retry { color: #1d4ed8; }
+.speech-record.is-recording > span:first-child { animation: speech-pulse 1.2s ease-in-out infinite; }
+.speech-status { min-width: 0; overflow-wrap: anywhere; font-size: .76rem; }
+.speech-status[data-kind="error"] { color: #b91c1c; }
+.speech-status[data-kind="success"] { color: #166534; }
+.speech-review { display: grid; gap: 6px; margin-top: 6px; padding: 8px; border-radius: 8px; background: #f1f6fb; }
+.speech-review-label { color: #334155; font-size: .76rem; font-weight: 650; }
+.speech-transcript.input { width: 100%; min-height: 64px; box-sizing: border-box; resize: vertical; font-size: .84rem; }
+.speech-review-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
+@keyframes speech-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .speech-record.is-recording > span:first-child { animation: none; } }
 .soap-note-actions { justify-content: flex-end; }
 .enc-admission-card, .enc-admission-none { padding: 9px 11px; border: 1px solid #bbebd2; border-radius: 9px; background: #f0faf4; color: #315c45; font-size: .78rem; }
 .enc-admission-card { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }

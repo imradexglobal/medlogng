@@ -23,8 +23,10 @@
 // host-config.json; loadHostConfig() deletes it so the obsolete secret is not
 // kept on disk.
 
-const { app, Tray, Menu, BrowserWindow, dialog, shell, nativeImage, ipcMain } = require('electron')
+const { app, Tray, Menu, BrowserWindow, dialog, shell, nativeImage, ipcMain, safeStorage } = require('electron')
 const { execFile } = require('node:child_process')
+const net = require('node:net')
+const { createSecureContext } = require('node:tls')
 const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
@@ -61,6 +63,7 @@ function isHostMode() {
 function configPath() { return path.join(app.getPath('userData'), 'host-config.json') }
 function keysDir() { return path.join(app.getPath('userData'), 'keys') }
 function keyFilePath() { return path.join(keysDir(), 'service-account.json') }
+function tlsPfxPath() { return path.join(keysDir(), 'host-tls.pfx') }
 function dataDir() { return path.join(app.getPath('userData'), 'hub-data') }
 
 function loadHostConfig() {
@@ -144,6 +147,77 @@ async function lanUrl(port) {
   return addrs.length ? 'http://' + addrs[0] + ':' + p : ''
 }
 
+let activeHttpsPort = 0
+let activeHttpsLanUrl = ''
+let activeHttpsLocalUrl = ''
+let activeHttpsError = ''
+
+function hostTlsOptions(cfg = loadHostConfig() || {}) {
+  if (!cfg.tls?.enabled) return null
+  if (!fs.existsSync(tlsPfxPath())) throw new Error('HTTPS certificate is missing. Import the Host certificate in setup.')
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable for the HTTPS certificate password.')
+  let passphrase = ''
+  try {
+    if (cfg.tls.passphraseEncrypted) {
+      passphrase = safeStorage.decryptString(Buffer.from(cfg.tls.passphraseEncrypted, 'base64'))
+    }
+  } catch {
+    throw new Error('Could not unlock the HTTPS certificate. Import it again in setup.')
+  }
+  return { pfx: fs.readFileSync(tlsPfxPath()), passphrase }
+}
+
+function importHostTlsCertificate(srcPath, passphrase = '') {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable; the certificate password cannot be protected.')
+  const pfx = fs.readFileSync(srcPath)
+  if (!pfx.length || pfx.length > 20 * 1024 * 1024) throw new Error('The certificate file is empty or larger than 20 MB.')
+  try { createSecureContext({ pfx, passphrase: String(passphrase || '') }) }
+  catch { throw new Error('The PFX certificate could not be opened. Check the file and password.') }
+  fs.mkdirSync(keysDir(), { recursive: true })
+  fs.writeFileSync(tlsPfxPath(), pfx, { mode: 0o600 })
+  const cfg = loadHostConfig() || {}
+  cfg.tls = {
+    enabled: true,
+    passphraseEncrypted: safeStorage.encryptString(String(passphrase || '')).toString('base64'),
+    importedAt: new Date().toISOString(),
+  }
+  saveHostConfig(cfg)
+}
+
+function canBindPort(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer()
+    probe.once('error', () => resolve(false))
+    probe.listen(port, '0.0.0.0', () => probe.close(() => resolve(true)))
+  })
+}
+
+async function ensureHttpsPort(cfg) {
+  if (!cfg.tls?.enabled) return 0
+  const httpPort = Number(cfg.port) || HOST_PORT_DEFAULT
+  const savedPort = Number(cfg.tls.port) || 0
+  if (savedPort) {
+    if (hubHandle?.httpsPort === savedPort) return savedPort
+    if (await canBindPort(savedPort)) return savedPort
+    console.warn('[host] configured HTTPS port ' + savedPort + ' is occupied; searching for a replacement port.')
+  }
+
+  // Pick and persist a free port close to the existing HTTP port. The saved
+  // value may have become occupied since the last Host run, so skip it and
+  // communicate the replacement through the normal setup/status response.
+  const first = Math.max(1024, httpPort + 1)
+  const last = Math.min(65535, first + 100)
+  for (let candidate = first; candidate <= last; candidate++) {
+    if (candidate === httpPort || candidate === savedPort) continue
+    if (await canBindPort(candidate)) {
+      cfg.tls.port = candidate
+      saveHostConfig(cfg)
+      return candidate
+    }
+  }
+  throw new Error('No free HTTPS port was found near the configured HTTP port. HTTP remains available; choose a free port and retry.')
+}
+
 // Honest explanation when no LAN URL can be produced. Shown in the wizard.
 function lanDiagnostics() {
   return [
@@ -181,9 +255,11 @@ function psQuote(value) {
 // The rule is removed and re-created, so changing the port or re-running setup
 // always converges (an "already exists" rule can never fail setup), and the
 // elevation is a single UAC prompt.
-function isFirewallRuleActive() {
+function isFirewallRuleActive(ports = [HOST_PORT_DEFAULT]) {
+  const expected = [...new Set(ports.map(Number).filter((port) => Number.isInteger(port) && port > 0 && port <= 65535))]
+  const expectedPs = '@(' + expected.join(',') + ')'
   return new Promise((resolve) => {
-    const checkScript = "$r = Get-NetFirewallRule -DisplayName 'MediLog NG Host' -ErrorAction SilentlyContinue; if ($r -and $r.Enabled -eq 'True') { exit 0 } else { exit 1 }"
+    const checkScript = "$expected = " + expectedPs + "; $r = Get-NetFirewallRule -DisplayName 'MediLog NG Host' -ErrorAction SilentlyContinue; $actual = @(); if ($r -and $r.Enabled -eq 'True') { $actual = @($r | Get-NetFirewallPortFilter | ForEach-Object { $_.LocalPort -split ',' } | ForEach-Object { [int]$_ }); if (@($expected | Where-Object { $_ -notin $actual }).Count -eq 0) { exit 0 } }; exit 1"
     const enc = Buffer.from(checkScript, 'utf16le').toString('base64')
     execFile(
       'powershell.exe',
@@ -196,18 +272,20 @@ function isFirewallRuleActive() {
   })
 }
 
-async function openFirewall(port) {
-  const p = Number(port) || HOST_PORT_DEFAULT
-
-  const alreadyActive = await isFirewallRuleActive()
+async function openFirewall(ports) {
+  const normalizedPorts = [...new Set((Array.isArray(ports) ? ports : [ports]).map(Number)
+    .filter((port) => Number.isInteger(port) && port > 0 && port <= 65535))]
+  if (!normalizedPorts.length) normalizedPorts.push(HOST_PORT_DEFAULT)
+  const alreadyActive = await isFirewallRuleActive(normalizedPorts)
   if (alreadyActive) {
-    return { ok: true, port: p, alreadyActive: true }
+    return { ok: true, port: normalizedPorts[0], ports: normalizedPorts, alreadyActive: true }
   }
 
+  const portsPs = '@(' + normalizedPorts.map((port) => "'" + port + "'").join(',') + ')'
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "Get-NetFirewallRule -DisplayName 'MediLog NG Host' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue",
-    "New-NetFirewallRule -DisplayName 'MediLog NG Host' -Direction Inbound -Protocol TCP -LocalPort " + p + " -Action Allow -Profile Domain,Private | Out-Null"
+    "New-NetFirewallRule -DisplayName 'MediLog NG Host' -Direction Inbound -Protocol TCP -LocalPort " + portsPs + " -Action Allow -Profile Domain,Private | Out-Null"
   ].join('; ')
 
   const encoded = Buffer.from(script, 'utf16le').toString('base64')
@@ -226,14 +304,15 @@ async function openFirewall(port) {
       ['-NoProfile', '-NonInteractive', '-EncodedCommand', runnerEnc],
       { windowsHide: true, timeout: 90000 },
       async (err) => {
-        const activeNow = await isFirewallRuleActive()
+        const activeNow = await isFirewallRuleActive(normalizedPorts)
         if (activeNow || !err) {
-          resolve({ ok: true, port: p })
+          resolve({ ok: true, port: normalizedPorts[0], ports: normalizedPorts })
           return
         }
         resolve({
           ok: false,
-          port: p,
+          port: normalizedPorts[0],
+          ports: normalizedPorts,
           message: 'Windows permission prompt was declined or administrator rights are required.',
         })
       },
@@ -244,6 +323,73 @@ async function openFirewall(port) {
 // ---- hub lifecycle ---------------------------------------------------------
 
 let hubHandle = null
+let speechWorkerRuntime = null
+
+function speechAssets() {
+  const base = app.isPackaged
+    ? path.join(process.resourcesPath, 'speech')
+    : path.join(projectRoot(), 'vendor', 'speech')
+  return {
+    executable: path.join(base, 'medilog-whisper-worker.exe'),
+    model: path.join(base, 'ggml-tiny.en-q5_1.bin'),
+  }
+}
+
+async function startSpeechRuntime() {
+  const cfg = loadHostConfig() || {}
+  if (cfg.speech?.enabled === false) return null
+  if (!activeHttpsPort) {
+    console.info('[speech] waiting for HTTPS certificate; browser microphone access requires a secure Host origin.')
+    return null
+  }
+  if (os.freemem() < 900 * 1024 * 1024) {
+    console.warn('[speech] startup deferred because available memory is below the 900 MB safety threshold.')
+    return null
+  }
+  if (speechWorkerRuntime?.status().ready) return speechWorkerRuntime.status()
+
+  const assets = speechAssets()
+  if (!fs.existsSync(assets.executable) || !fs.existsSync(assets.model)) {
+    console.warn('[speech] enabled but engine/model files are not installed; Host will continue without speech service.')
+    return null
+  }
+  const audioDir = path.join(dataDir(), 'speech', 'audio')
+  fs.mkdirSync(audioDir, { recursive: true })
+  const moduleUrl = pathToFileURL(path.join(projectRoot(), 'hub', 'speech', 'worker.js')).href
+  const { createSpeechWorker } = await import(moduleUrl)
+  const threads = Math.max(1, Math.min(2, Number(cfg.speech?.threads) || 1))
+  const runtime = createSpeechWorker({ ...assets, audioDir, threads })
+  speechWorkerRuntime = runtime
+  try {
+    const state = await runtime.start()
+    console.info('[speech] CPU worker ready; model loaded once.')
+    return state
+  } catch (error) {
+    console.error('[speech] could not start; Host remains available:', error?.message || error)
+    // Keep the supervisor alive: it retries the worker independently, while
+    // the Hub can retain authenticated jobs durably until the engine recovers.
+    return runtime.status()
+  }
+}
+
+async function stopSpeechRuntime() {
+  const runtime = speechWorkerRuntime
+  speechWorkerRuntime = null
+  if (runtime) {
+    try { await runtime.stop() } catch (error) {
+      console.warn('[speech] worker shutdown issue:', error?.message || error)
+    }
+  }
+}
+
+async function restartSpeechRuntime() {
+  await stopSpeechRuntime()
+  return startSpeechRuntime()
+}
+
+function speechStatus() {
+  return speechWorkerRuntime ? speechWorkerRuntime.status() : { enabled: false, ready: false }
+}
 
 async function startHubRuntime() {
   if (hubHandle) return hubHandle
@@ -254,6 +400,20 @@ async function startHubRuntime() {
   const port = Number(cfg.port) || HOST_PORT_DEFAULT
   const host = String(cfg.host || '0.0.0.0')
   const root = projectRoot()
+  let tls = null
+  try { tls = hostTlsOptions(cfg) } catch (error) {
+    console.warn('[host] HTTPS is not available; keeping the existing HTTP service:', error?.message || error)
+  }
+  activeHttpsError = ''
+  if (tls) {
+    try { activeHttpsPort = await ensureHttpsPort(cfg) }
+    catch (error) {
+      activeHttpsError = error?.message || 'HTTPS port could not be allocated.'
+      console.warn('[host] HTTPS is not available; keeping the existing HTTP service:', activeHttpsError)
+      tls = null
+      activeHttpsPort = 0
+    }
+  } else activeHttpsPort = 0
 
   if (app.isPackaged) {
     const unpackedModules = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
@@ -265,6 +425,10 @@ async function startHubRuntime() {
 
   const { startHub } = await import(pathToFileURL(path.join(root, 'hub', 'server.js')).href)
 
+  // Start the local engine first so the HTTPS hub can expose speech routes
+  // only when the authenticated worker is actually ready.
+  await startSpeechRuntime()
+
   // startHub rejects with an operator-friendly message for EADDRINUSE / EACCES
   // / EADDRNOTAVAIL (see hub/netinfo.js describeListenError), so the wizard can
   // show the real cause instead of "listen EADDRINUSE :::8787".
@@ -275,12 +439,48 @@ async function startHubRuntime() {
     queueFile: path.join(dataDir(), 'queue.json'),
     projectId: cfg.projectId || 'medlogng',
     staticDir: path.join(root, 'dist'),
+    tls,
+    httpsPort: activeHttpsPort,
+    speechWorker: speechWorkerRuntime,
+    speechDir: path.join(dataDir(), 'speech'),
+    ffmpeg: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'vendor', 'speech'), 'ffmpeg.exe'),
+    protectSpeechResult: (text) => safeStorage.encryptString(String(text)).toString('base64'),
+    unprotectSpeechResult: (text) => safeStorage.decryptString(Buffer.from(text, 'base64')),
+    loadSpeechAuthCache: async () => {
+      const file = path.join(dataDir(), 'speech', 'authorization-cache.bin')
+      try {
+        const encrypted = await fs.promises.readFile(file, 'utf8')
+        return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
+      } catch (error) {
+        if (error?.code === 'ENOENT') return '[]'
+        throw error
+      }
+    },
+    saveSpeechAuthCache: async (json) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
+      const dir = path.join(dataDir(), 'speech')
+      const file = path.join(dir, 'authorization-cache.bin')
+      const tmp = file + '.tmp'
+      await fs.promises.mkdir(dir, { recursive: true })
+      await fs.promises.writeFile(tmp, safeStorage.encryptString(json).toString('base64'), { mode: 0o600 })
+      await fs.promises.rename(tmp, file)
+    },
   })
+  activeHttpsPort = hubHandle.httpsPort || 0
+  activeHttpsLanUrl = hubHandle.httpsLanUrl || ''
+  activeHttpsLocalUrl = hubHandle.httpsLocalUrl || ''
+  activeHttpsError = hubHandle.httpsError || activeHttpsError
   return hubHandle
 }
 
 async function stopHubRuntime() {
+  if (hubHandle?.speechJobs) { try { await hubHandle.speechJobs.close() } catch {} }
+  await stopSpeechRuntime()
   if (hubHandle) { try { await hubHandle.close() } catch { /* closing anyway */ } hubHandle = null }
+  activeHttpsPort = 0
+  activeHttpsLanUrl = ''
+  activeHttpsLocalUrl = ''
+  activeHttpsError = ''
 }
 
 // ---- tray ------------------------------------------------------------------
@@ -449,14 +649,26 @@ function registerHostIpc() {
     const port = Number(cfg?.port) || HOST_PORT_DEFAULT
     const addresses = await lanAddresses()
     const lan = addresses.length ? 'http://' + addresses[0] + ':' + port : ''
-    const firewallOpen = await isFirewallRuleActive()
+    const secureAddresses = Array.isArray(hubHandle?.verifiedHttpsAddresses) ? hubHandle.verifiedHttpsAddresses : []
+    const currentSecureAddress = addresses.find((address) => secureAddresses.includes(address)) || ''
+    activeHttpsLanUrl = currentSecureAddress && activeHttpsPort
+      ? 'https://' + currentSecureAddress + ':' + activeHttpsPort
+      : ''
+    const firewallPorts = [port, cfg?.tls?.enabled ? Number(cfg.tls.port) : 0].filter(Boolean)
+    const firewallOpen = await isFirewallRuleActive(firewallPorts)
     return {
       needsSetup: needsSetup(),
       port,
       localUrl: localUrl(port),
       lanUrl: lan,
+      httpsLanUrl: activeHttpsLanUrl,
+      httpsLocalUrl: activeHttpsLocalUrl,
+      httpsPort: Number(cfg?.tls?.port) || 0,
+      httpsError: hubHandle?.httpsError || activeHttpsError || (hubHandle && activeHttpsPort && !activeHttpsLanUrl
+        ? 'The Host LAN address changed or is not covered by the HTTPS certificate. Import a certificate valid for the current reserved IP.' : ''),
       addresses,
       keyImported: fs.existsSync(keyFilePath()),
+      tlsImported: !!cfg?.tls?.enabled && fs.existsSync(tlsPfxPath()),
       firewallOpen,
       running: !!hubHandle,
       // Only present when something needs explaining.
@@ -480,9 +692,30 @@ function registerHostIpc() {
     }
   })
 
-  ipcMain.handle('host-open-firewall', () => {
-    const cfg = loadHostConfig()
-    return openFirewall(Number(cfg?.port) || HOST_PORT_DEFAULT)
+  ipcMain.handle('host-import-tls-certificate', async (_event, passphrase) => {
+    const win = BrowserWindow.getFocusedWindow()
+    const picked = await dialog.showOpenDialog(win || undefined, {
+      title: 'Select the Host HTTPS certificate (.pfx)',
+      filters: [{ name: 'PKCS #12 certificate', extensions: ['pfx', 'p12'] }],
+      properties: ['openFile'],
+    })
+    if (picked.canceled || !picked.filePaths[0]) return { ok: false, cancelled: true }
+    try {
+      importHostTlsCertificate(picked.filePaths[0], passphrase)
+      return { ok: true, file: path.basename(picked.filePaths[0]) }
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Certificate import failed.' }
+    }
+  })
+
+  ipcMain.handle('host-open-firewall', async () => {
+    const cfg = loadHostConfig() || {}
+    cfg.port = Number(cfg.port) || HOST_PORT_DEFAULT
+    if (cfg.tls?.enabled) await ensureHttpsPort(cfg)
+    saveHostConfig(cfg)
+    const ports = [cfg.port, cfg.tls?.enabled ? Number(cfg.tls.port) : 0].filter(Boolean)
+    const result = await openFirewall(ports)
+    return { ...result, httpsPort: Number(cfg.tls?.port) || 0 }
   })
 
   ipcMain.handle('host-finish-setup', async () => {
@@ -494,6 +727,7 @@ function registerHostIpc() {
       cfg.port = Number(cfg.port) || HOST_PORT_DEFAULT
       cfg.host = cfg.host || '0.0.0.0'
       cfg.projectId = cfg.projectId || 'medlogng'
+      if (cfg.tls?.enabled) await ensureHttpsPort(cfg)
       cfg.configuredAt = new Date().toISOString()
       saveHostConfig(cfg)
       const handle = await startHubRuntime()
@@ -501,7 +735,12 @@ function registerHostIpc() {
         ok: true,
         localUrl: handle.localUrl || localUrl(cfg.port),
         lanUrl: handle.lanUrl || '',
+        httpsLocalUrl: handle.httpsLocalUrl || '',
+        httpsLanUrl: handle.httpsLanUrl || '',
+        httpsPort: handle.httpsPort || 0,
+        httpsError: handle.httpsError || activeHttpsError || '',
         addresses: handle.lanAddresses || [],
+        https: !!handle.httpsLanUrl,
         diagnostics: (handle.lanAddresses || []).length ? [] : lanDiagnostics(),
       }
     } catch (e) {
@@ -523,6 +762,11 @@ module.exports = {
   saveHostConfig,
   startHubRuntime,
   stopHubRuntime,
+  importHostTlsCertificate,
+  startSpeechRuntime,
+  stopSpeechRuntime,
+  restartSpeechRuntime,
+  speechStatus,
   createTray,
   destroyTray,
   startStatusPoll,

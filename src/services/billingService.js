@@ -305,6 +305,82 @@ export async function createInvoiceForLabOrder(labOrder, opts = {}) {
   return invoice
 }
 
+// ---- update payment ------------------------------------------------------
+export async function updatePayment(paymentId, input) {
+  const { activeOrg, user } = authStore.getState()
+  if (!activeOrg) throw new Error('No hospital selected.')
+  const caps = myBillingCaps()
+  if (!caps.canPayment) {
+    throw new Error('Your role cannot update payments (missing "billing.payment" capability). Ask an administrator.')
+  }
+
+  const pay = await listInvoicePayments(paymentId)
+  if (!pay.length) throw new Error('Payment not found.')
+  const p = pay[0]
+
+  const amountKobo = Math.round(Number(input.amount_kobo || input.amount || 0) || 0)
+  if (amountKobo <= 0) throw new Error('Payment amount must be greater than zero.')
+
+  // Get current invoice
+  const invoice = await getInvoice(p.invoice_id)
+  if (!invoice) throw new Error('Invoice not found.')
+
+  const currentPaid = invoice.raw?.paid_kobo || 0
+  const newPaidKobo = currentPaid + amountKobo
+  const totalKobo = invoice.raw?.total_kobo || 0
+  const outstandingKobo = totalKobo - newPaidKobo
+
+  // Determine status
+  let status = 'unpaid'
+  if (outstandingKobo <= 0) {
+    status = 'paid'
+  } else if (outstandingKobo < totalKobo) {
+    status = 'part-paid'
+  }
+
+  await updateDoc(doc(db, INVOICES, p.invoice_id), {
+    paid_kobo: newPaidKobo,
+    status: status,
+    updated_at: serverTimestamp(),
+  })
+
+  // Record the payment transaction (update existing)
+  const paymentIdRef = doc(db, PAYMENTS, paymentId)
+  await setDoc(paymentIdRef, {
+    invoice_id: p.invoice_id,
+    invoice_number: p.invoice_id,
+    lab_order_id: p.lab_order_id || '',
+    patient_id: invoice.patientId || '',
+    patient_name: invoice.patientName || '',
+    amount_kobo: amountKobo,
+    amount_naira: amountKobo / 100,
+    method: input.method || p.method || 'Cash',
+    reference: input.reference || p.reference || '',
+    receipt_number: p.receipt_number,
+    paid_by: input.paid_by || p.paid_by || currentStaffName(),
+    paid_at: serverTimestamp(),
+    organization_id: activeOrg,
+    notes: input.notes || p.notes || '',
+  }, { merge: true })
+
+  try {
+    await logAudit({ action: 'payment.updated', organizationId: activeOrg, patientId: invoice.patientId, details: 'Payment ' + paymentId + ' updated - ₦' + (amountKobo / 100).toLocaleString('en-NG') })
+  } catch (e) {
+    console.warn('[billing] audit append failed:', e?.message)
+  }
+
+  return {
+    invoiceId: p.invoice_id,
+    paymentId: paymentId,
+    receiptNumber: p.receipt_number,
+    reference: input.reference || p.reference || '',
+    method: input.method || p.method || 'Cash',
+    amount: amountKobo / 100,
+    newOutstanding: Math.max(0, outstandingKobo / 100),
+    status: status,
+  }
+}
+
 // ---- record payment ------------------------------------------------------
 export async function recordPayment(input) {
   const { activeOrg, user } = authStore.getState()

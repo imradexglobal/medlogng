@@ -95,11 +95,11 @@ function isLoopbackHost(host) {
 
 // Build the human-readable startup report. Returns an array of lines (no
 // trailing newline) so callers can log.info() them or assert on them in tests.
-export function startupLines({ host = '0.0.0.0', port, version = '', lanAddresses: addresses = [], interfaces } = {}) {
+export function startupLines({ host = '0.0.0.0', port, version = '', lanAddresses: addresses = [], interfaces, protocol = 'http' } = {}) {
   const addrs = Array.isArray(addresses) ? addresses : listLanAddresses(interfaces)
   const lines = []
   lines.push('[hub] listening on ' + host + ':' + port + (version ? '  (' + version + ')' : ''))
-  lines.push('[hub] local URL: http://127.0.0.1:' + port)
+  lines.push('[hub] local URL: ' + protocol + '://127.0.0.1:' + port)
 
   if (isLoopbackHost(host)) {
     lines.push('[hub] LAN URL:   none — bound to ' + host + ' (this PC only).')
@@ -108,14 +108,14 @@ export function startupLines({ host = '0.0.0.0', port, version = '', lanAddresse
   }
 
   if (addrs.length) {
-    lines.push('[hub] LAN URL:   http://' + addrs[0] + ':' + port)
+    lines.push('[hub] LAN URL:   ' + protocol + '://' + addrs[0] + ':' + port)
     if (addrs.length > 1) {
       lines.push('[hub] other local IPv4 addresses: ' + addrs.slice(1).join(', '))
     }
     lines.push('[hub]   Other devices on the same trusted Wi-Fi/LAN should open the LAN URL.')
   } else {
     lines.push('[hub] LAN URL:   not available — no usable IPv4 LAN address was detected.')
-    lines.push('[hub]   The hub is still reachable on this PC at http://127.0.0.1:' + port + '.')
+    lines.push('[hub]   The hub is still reachable on this PC at ' + protocol + '://127.0.0.1:' + port + '.')
     lines.push('[hub]   To diagnose on Windows (no admin needed):')
     lines.push('[hub]     ipconfig                     # look for "IPv4 Address" on the adapter you use')
     lines.push('[hub]     Get-NetConnectionProfile     # confirms the network is Private, not Public')

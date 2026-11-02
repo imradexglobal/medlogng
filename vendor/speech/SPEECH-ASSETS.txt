@@ -1,0 +1,16 @@
+Required Host-only offline speech runtime assets
+
+The Host installer must package all of these verified files:
+- medilog-whisper-worker.exe: built from hub/speech/worker.cpp against whisper.cpp v1.9.5
+- ggml-tiny.en-q5_1.bin: the pinned quantized English Tiny model
+- ffmpeg.exe: static Windows FFmpeg used only to convert browser recording formats
+- speech-assets.json: versions, sizes and SHA-256 hashes for every runtime asset
+- LICENSE-whisper.cpp.txt and COPYING.LGPLv2.1: third-party license notices
+- ffmpeg-9.0.2.tar.xz, its detached signature and ffmpeg-devel.asc: exact
+  verified FFmpeg source and offline provenance
+
+Do not place these assets in a client build. Run `npm run speech:build` to
+download and verify pinned sources, build the LGPL-only FFmpeg converter and
+MSVC CPU worker, verify the model, and generate the manifest. The Host
+installer build must fail if a runtime asset, source proof, license file or
+hash is absent or invalid.

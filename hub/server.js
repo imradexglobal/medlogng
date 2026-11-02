@@ -4,10 +4,10 @@
 //   GET  /health   { ok, version, hub } — operational detail on this PC / with auth
 //   POST /outbox   { ops: [...] } -> authorised, durably queued, acked in ms
 //
-// ONE port does everything. Ward PCs load the app from here AND the app's
-// offline handoffs post back to the same origin — which quietly removes every
-// browser obstacle (mixed content, Private Network Access, CORS) that a page
-// on the public internet would hit when talking to a LAN device.
+// One shared Hub serves the existing HTTP port and, when configured, a second
+// HTTPS port for secure-context features such as browser microphone access.
+// Both listeners use this same handler, durable queue, authentication, relay,
+// and speech job service; HTTP compatibility is retained.
 //
 // The hub never waits for the internet to acknowledge a handoff: POST /outbox
 // only touches the local queue file, and the relay delivers later.
@@ -26,7 +26,11 @@
 // CORS. HUB_TOKEN is obsolete; if it is still in .env the hub warns and
 // ignores it.
 
-import { createServer } from 'node:http'
+import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
+import { isIP } from 'node:net'
+import { X509Certificate } from 'node:crypto'
+import { checkServerIdentity, connect as connectTls } from 'node:tls'
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { join, extname, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -127,13 +131,47 @@ function applyCors(req, res, cfg) {
   if (origin.ok && origin.origin) {
     res.setHeader('Access-Control-Allow-Origin', origin.origin)
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, ' + CLIENT_HEADER)
+    res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, ' + CLIENT_HEADER + ', x-speech-request-id')
     res.setHeader('Access-Control-Max-Age', '600')
     if (String(req.headers['access-control-request-private-network'] || '').toLowerCase() === 'true') {
       res.setHeader('Access-Control-Allow-Private-Network', 'true')
     }
   }
   return origin
+}
+
+function validateHttpsAddress(host, port) {
+  return new Promise((resolveValidation, rejectValidation) => {
+    const socket = connectTls({ host, port, rejectUnauthorized: false,
+      ...(isIP(host) ? {} : { servername: host }) })
+    const timer = setTimeout(() => {
+      socket.destroy()
+      rejectValidation(new Error('Certificate check timed out for ' + host + '.'))
+    }, 5000)
+    socket.once('error', (error) => {
+      clearTimeout(timer)
+      rejectValidation(new Error('Could not check the HTTPS certificate for ' + host + ': ' + (error?.message || error)))
+    })
+    socket.once('secureConnect', () => {
+      try {
+        const peer = socket.getPeerCertificate(true)
+        if (!peer?.raw) throw new Error('The HTTPS listener did not present a certificate.')
+        const cert = new X509Certificate(peer.raw)
+        const now = Date.now()
+        if (now < Date.parse(cert.validFrom) || now > Date.parse(cert.validTo))
+          throw new Error('The HTTPS certificate is outside its valid date range.')
+        const identityError = checkServerIdentity(host, peer)
+        if (identityError) throw new Error('The HTTPS certificate is not valid for ' + host + '.')
+        clearTimeout(timer)
+        socket.end()
+        resolveValidation(true)
+      } catch (error) {
+        clearTimeout(timer)
+        socket.destroy()
+        rejectValidation(error)
+      }
+    })
+  })
 }
 
 // Small in-memory sliding-window limiter. It protects the queue file and the
@@ -249,7 +287,8 @@ function makeStaticHandler(staticDir) {
 
 // ---- request handler -------------------------------------------------------
 
-function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log }) {
+function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
+  speechJobs = null, verifiedHttpsAddresses = new Set() }) {
   async function handleOutbox(req, res) {
     const ip = String(req.socket.remoteAddress || 'unknown')
     const ipLimit = rateLimit('ip:' + ip, 120)
@@ -380,19 +419,24 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
   }
 
   async function handleHealth(req, res, url) {
+    const scheme = req.socket.encrypted ? 'https' : 'http'
+    const port = Number(req.socket.localPort) || Number(cfg.port) || 8787
     const loopback = isLoopbackAddress(req.socket.remoteAddress)
     const params = url.searchParams
     const wantsDetail = params.get('detail') === '1'
     const lanAddrs = listLanAddresses(networkInterfaces())
-    const lanUrl = lanAddrs.length ? `http://${lanAddrs[0]}:${cfg.port || 8787}` : ''
+    const advertisedAddresses = req.socket.encrypted
+      ? lanAddrs.filter((address) => verifiedHttpsAddresses.has(address))
+      : lanAddrs
+    const lanUrl = advertisedAddresses.length ? `${scheme}://${advertisedAddresses[0]}:${port}` : ''
     const minimal = {
       ok: true,
       hub: true,
       version: VERSION,
       time: new Date().toISOString(),
       lanUrl,
-      addresses: lanAddrs,
-      port: Number(cfg.port) || 8787,
+      addresses: advertisedAddresses,
+      port,
     }
     if (!wantsDetail && !loopback) {
       json(res, 200, minimal)
@@ -420,8 +464,110 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
       lastContact: status.lastContact,
       lastProbeError: status.lastError || undefined,
       queue: queue.counts(),
+      speech: speechJobs?.status() || { enabled: false },
       servesApp: !!staticDir,
     })
+  }
+
+  async function authorizeSpeech(req, res, orgId) {
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok) {
+      json(res, 403, { ok: false, error: 'This browser origin is not allowed to use this hub.' })
+      return null
+    }
+    if (String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
+      json(res, 400, { ok: false, error: 'Missing ' + CLIENT_HEADER + ' header.' })
+      return null
+    }
+    const ip = String(req.socket.remoteAddress || 'unknown')
+    const pollRequest = req.method === 'GET'
+    if (!rateLimit('speech-ip:' + ip, pollRequest ? 120 : 30).ok) {
+      json(res, 429, { ok: false, error: 'Too many speech requests from this device. Wait and retry.' })
+      return null
+    }
+    let identity
+    try { identity = await authenticator.verify(req) }
+    catch (error) {
+      json(res, error?.expose ? error.status || 401 : 503,
+        { ok: false, error: error?.expose ? error.message : 'Authentication is temporarily unavailable.' })
+      return null
+    }
+    if (!rateLimit('speech-uid:' + identity.uid, pollRequest ? 120 : 30).ok) {
+      json(res, 429, { ok: false, error: 'Too many speech requests for this account. Wait and retry.' })
+      return null
+    }
+    try {
+      if (typeof authenticator.authorizeSpeech === 'function') await authenticator.authorizeSpeech(identity, orgId, 'encounter.edit')
+      else await authenticator.authorize(identity, orgId, 'encounter.edit')
+    }
+    catch (error) {
+      json(res, error?.expose ? error.status || 403 : 503,
+        { ok: false, error: error?.expose ? error.message : 'Authorisation is temporarily unavailable.' })
+      return null
+    }
+    return identity
+  }
+
+  async function handleSpeechCreate(req, res, url) {
+    if (!req.socket.encrypted) {
+      req.resume()
+      json(res, 403, { ok: false, error: 'Speech transcription requires the Host HTTPS address.' })
+      return
+    }
+    if (!speechJobs) {
+      json(res, 503, { ok: false, error: 'Host speech service is unavailable. Check HTTPS and speech service status.' })
+      return
+    }
+    const orgId = url.searchParams.get('orgId') || ''
+    const requestId = String(req.headers['x-speech-request-id'] || '')
+    const identity = await authorizeSpeech(req, res, orgId)
+    if (!identity) return
+    const type = String(req.headers['content-type'] || '').toLowerCase()
+    if (!(type.startsWith('audio/') || type.startsWith('application/octet-stream'))) {
+      req.resume()
+      json(res, 415, { ok: false, error: 'Send a supported audio recording.' })
+      return
+    }
+    try {
+      const duplicate = await speechJobs.findRequest(identity.uid, orgId, requestId)
+      if (duplicate) {
+        req.resume()
+        json(res, 200, { ok: true, job: duplicate, duplicate: true })
+        return
+      }
+      const job = await speechJobs.createFromRequest(req, {
+        owner: identity.uid, orgId, requestId, contentType: type,
+      })
+      log.info('[speech] accepted job=' + job.id + ' uid=' + identity.uid)
+      json(res, 202, { ok: true, job })
+    } catch (error) {
+      const status = Number(error?.status) || 500
+      if (status !== 413) req.resume()
+      json(res, status, { ok: false, error: status < 500 ? error.message : 'Speech request could not be processed.' },
+        status === 413 ? { connection: 'close' } : {})
+    }
+  }
+
+  async function handleSpeechJob(req, res, url, id, cancel = false) {
+    if (!req.socket.encrypted) {
+      json(res, 403, { ok: false, error: 'Speech transcription requires the Host HTTPS address.' })
+      return
+    }
+    if (!speechJobs) {
+      json(res, 503, { ok: false, error: 'Host speech service is unavailable.' })
+      return
+    }
+    const orgId = url.searchParams.get('orgId') || ''
+    const identity = await authorizeSpeech(req, res, orgId)
+    if (!identity) return
+    const job = cancel
+      ? await speechJobs.cancel(id, identity.uid, orgId)
+      : await speechJobs.get(id, identity.uid, orgId)
+    if (!job) {
+      json(res, 404, { ok: false, error: 'Speech job not found.' })
+      return
+    }
+    json(res, 200, { ok: true, job })
   }
 
   return async function handle(req, res) {
@@ -458,6 +604,20 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
       return
     }
 
+    if (req.method === 'POST' && path === '/speech/jobs') {
+      await handleSpeechCreate(req, res, url)
+      return
+    }
+    const speechJobPath = /^\/speech\/jobs\/([0-9a-f-]{36})(\/cancel)?$/i.exec(path)
+    if (speechJobPath && req.method === 'GET' && !speechJobPath[2]) {
+      await handleSpeechJob(req, res, url, speechJobPath[1])
+      return
+    }
+    if (speechJobPath && req.method === 'POST' && speechJobPath[2]) {
+      await handleSpeechJob(req, res, url, speechJobPath[1], true)
+      return
+    }
+
     if (req.method === 'GET' && serveStatic) {
       serveStatic(req, res, path)
       return
@@ -487,7 +647,7 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
 
 // Build the server (exported so tests can mount it on an ephemeral port and
 // inject a fake authenticator / foundation). Returns a promise of the handle.
-export function startHub(overrides = {}) {
+export async function startHub(overrides = {}) {
   const cfg = { ...loadConfig(), ...overrides }
   const log = overrides.log || console
   if (typeof cfg.allowedOrigins === 'string') cfg.allowedOrigins = parseOrigins(cfg.allowedOrigins)
@@ -518,7 +678,11 @@ export function startHub(overrides = {}) {
   const serveStatic = makeStaticHandler(staticDir)
 
   const authenticator = overrides.authenticator
-    || createAuthenticator({ auth: foundation.auth, db, log })
+    || createAuthenticator({
+      auth: foundation.auth, db, log,
+      loadSpeechAuthCache: overrides.loadSpeechAuthCache,
+      saveSpeechAuthCache: overrides.saveSpeechAuthCache,
+    })
   const auditor = overrides.auditor || createAuditor({ db, log })
   const relay = createRelay({
     db,
@@ -529,10 +693,33 @@ export function startHub(overrides = {}) {
     audit: auditor,
   })
 
+  let speechJobs = null
+  if (overrides.tls && overrides.speechWorker && overrides.speechDir) {
+    try {
+      const { createSpeechJobs } = await import('./speech/jobs.js')
+      speechJobs = createSpeechJobs({
+        directory: overrides.speechDir,
+        worker: overrides.speechWorker,
+        ffmpeg: overrides.ffmpeg && existsSync(overrides.ffmpeg) ? overrides.ffmpeg : '',
+        getFreeMemory: overrides.speechGetFreeMemory,
+        protectResult: overrides.protectSpeechResult,
+        unprotectResult: overrides.unprotectSpeechResult,
+        log,
+      })
+      await speechJobs.initialize()
+    } catch (error) {
+      log.error('[speech] job service could not initialize; Host API remains available:', error?.message || error)
+      try { await speechJobs?.close() } catch {}
+      speechJobs = null
+    }
+  }
+
+  const verifiedHttpsAddresses = new Set()
   const handler = makeHandler({
-    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log,
+    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, speechJobs,
+    verifiedHttpsAddresses,
   })
-  const server = createServer((req, res) => {
+  const onRequest = (req, res) => {
     handler(req, res).catch((e) => {
       // Never leak stack traces, paths, credentials or PHI to the client.
       log.error('[hub] request failed:', e?.message || e)
@@ -541,57 +728,103 @@ export function startHub(overrides = {}) {
         else res.end()
       } catch { /* socket already gone */ }
     })
-  })
+  }
+  const server = createHttpServer(onRequest)
+  const httpsServer = overrides.tls ? createHttpsServer(overrides.tls, onRequest) : null
 
   // Process-wide failure of a socket must not take the hub down.
-  server.on('clientError', (err, socket) => {
-    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
-  })
+  for (const listener of [server, httpsServer].filter(Boolean)) {
+    listener.on('clientError', (_err, socket) => {
+      if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+    })
+  }
 
-  return new Promise((resolveStart, rejectStart) => {
-    const onError = (err) => rejectStart(describeListenError(err, cfg.port))
-
-    server.once('error', onError)
-    server.listen(cfg.port, cfg.host, () => {
-      server.removeListener('error', onError)
-      relay.start()
-
-      const addr = server.address()
-      const actualPort = addr && typeof addr === 'object' ? addr.port : cfg.port
-      const interfaces = overrides.interfaces || networkInterfaces()
-      const lanAddresses = listLanAddresses(interfaces)
-      const boundHost = cfg.host
-
-      for (const line of startupLines({ host: boundHost, port: actualPort, version: VERSION, lanAddresses })) {
-        log.info(line)
-      }
-      log.info('[hub] authentication: Firebase ID token (Authorization: Bearer)')
-      log.info('[hub] do not port-forward this port on the hospital router; it is for the trusted LAN only.')
-
-      resolveStart({
-        cfg: { ...cfg, port: actualPort },
-        port: actualPort,
-        lanAddresses,
-        queue,
-        relay,
-        server,
-        db,
-        auth: foundation.auth,
-        foundation,
-        authenticator,
-        localUrl: 'http://127.0.0.1:' + actualPort,
-        lanUrl: lanAddresses.length ? 'http://' + lanAddresses[0] + ':' + actualPort : '',
-        close: () =>
-          new Promise((r) => {
-            relay.stop()
-            server.close(() => r())
-            // fetch()/undici keeps sockets alive; do not leave a test or a
-            // restart hanging on an idle keep-alive connection.
-            server.closeIdleConnections?.()
-          }),
-      })
+  const listen = (listener, port) => new Promise((resolveListen, rejectListen) => {
+    const onError = (error) => rejectListen(describeListenError(error, port))
+    listener.once('error', onError)
+    listener.listen(port, cfg.host, () => {
+      listener.removeListener('error', onError)
+      listener.on('error', (error) => log.error('[hub] listener error:', error?.message || error))
+      resolveListen(listener.address())
     })
   })
+
+  const httpAddress = await listen(server, cfg.port)
+  const actualPort = httpAddress && typeof httpAddress === 'object' ? httpAddress.port : cfg.port
+  const interfaces = overrides.interfaces || networkInterfaces()
+  const lanAddresses = listLanAddresses(interfaces)
+  let httpsPort = 0
+  let httpsError = ''
+  if (httpsServer) {
+    try {
+      const httpsAddress = await listen(httpsServer, Number(overrides.httpsPort) || 0)
+      httpsPort = httpsAddress && typeof httpsAddress === 'object' ? httpsAddress.port : Number(overrides.httpsPort) || 0
+      const addressesToCheck = [...new Set(['127.0.0.1', ...lanAddresses])]
+      for (const address of addressesToCheck) {
+        try { await validateHttpsAddress(address, httpsPort); verifiedHttpsAddresses.add(address) }
+        catch (error) { log.warn('[hub] HTTPS certificate not valid for ' + address + ': ' + (error?.message || error)) }
+      }
+      if (lanAddresses.length && !lanAddresses.some((address) => verifiedHttpsAddresses.has(address))) {
+        httpsError = 'The HTTPS certificate is not valid for this Host LAN address. Use a reserved IP or stable DNS name covered by the certificate, then import a matching certificate.'
+      }
+    } catch (error) {
+      httpsError = error?.message || 'HTTPS listener could not start.'
+      log.error('[hub] HTTPS listener unavailable; existing HTTP service remains active:', httpsError)
+    }
+  }
+
+  relay.start()
+  const boundHost = cfg.host
+  for (const line of startupLines({ host: boundHost, port: actualPort, version: VERSION, lanAddresses, protocol: 'http' })) log.info(line)
+  if (httpsPort) {
+    const secureLanAddresses = lanAddresses.filter((address) => verifiedHttpsAddresses.has(address))
+    if (verifiedHttpsAddresses.has('127.0.0.1')) log.info('[hub] HTTPS local URL: https://127.0.0.1:' + httpsPort)
+    if (secureLanAddresses.length) log.info('[hub] HTTPS LAN URL: https://' + secureLanAddresses[0] + ':' + httpsPort)
+    if (httpsError) log.warn('[hub] ' + httpsError)
+  }
+  log.info('[hub] authentication: Firebase ID token (Authorization: Bearer)')
+  log.info('[hub] do not port-forward these ports on the hospital router; they are for the trusted LAN only.')
+
+  const localUrl = 'http://127.0.0.1:' + actualPort
+  const lanUrl = lanAddresses.length ? 'http://' + lanAddresses[0] + ':' + actualPort : ''
+  const secureLanAddress = lanAddresses.find((address) => verifiedHttpsAddresses.has(address)) || ''
+  const httpsLanUrl = httpsPort && secureLanAddress ? 'https://' + secureLanAddress + ':' + httpsPort : ''
+  const httpsLocalUrl = httpsPort && verifiedHttpsAddresses.has('127.0.0.1') ? 'https://127.0.0.1:' + httpsPort : ''
+  return {
+    cfg: { ...cfg, port: actualPort, httpsPort },
+    port: actualPort,
+    httpsPort,
+    httpsError,
+    lanAddresses,
+    verifiedHttpsAddresses: [...verifiedHttpsAddresses],
+    queue,
+    speechJobs,
+    relay,
+    server,
+    httpsServer: httpsPort ? httpsServer : null,
+    db,
+    auth: foundation.auth,
+    foundation,
+    authenticator,
+    localUrl,
+    lanUrl,
+    httpsLocalUrl,
+    httpsLanUrl,
+    close: async () => {
+      await speechJobs?.close()
+      relay.stop()
+      const closeListener = async (listener) => {
+        if (!listener?.listening) return
+        const closed = new Promise((resolveClose) => listener.close(() => resolveClose()))
+        // fetch()/undici can retain idle keep-alive sockets across a restart;
+        // a stalled upload must not keep the Host process alive indefinitely.
+        listener.closeIdleConnections?.()
+        listener.closeAllConnections?.()
+        await closed
+      }
+      await Promise.all([closeListener(httpsServer), closeListener(server)])
+    },
+  }
 }
 
 // `node hub/server.js` starts it; an import (tests) does not.

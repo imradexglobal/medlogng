@@ -39,8 +39,24 @@ echo   Destination:   release\
 echo ============================================================
 echo.
 
+:: Speech runtime assets are mandatory for Host installers. This step builds
+:: the pinned CPU worker, verifies the model and FFmpeg, and writes hashes.
+echo [1/4] Preparing and validating offline speech assets...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%cd%\scripts\build-whisper-worker.ps1"
+if %errorlevel% neq 0 (
+    echo [ERROR] Speech assets could not be built or verified. No installer was created.
+    pause
+    exit /b 1
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%cd%\scripts\verify-speech-assets.ps1"
+if %errorlevel% neq 0 (
+    echo [ERROR] Speech asset verification failed. No installer was created.
+    pause
+    exit /b 1
+)
+
 :: Stamp build version and timestamp
-echo [1/3] Stamping build version...
+echo [2/4] Stamping build version...
 call node scripts/stamp-build.mjs
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to stamp build version.
@@ -50,7 +66,7 @@ if %errorlevel% neq 0 (
 
 :: Build Host Installer
 echo.
-echo [2/3] Building Web App and packaging Host Executable...
+echo [3/4] Building Web App and packaging Host Executable...
 echo       Running: npm run dist:host
 echo.
 call npm run dist:host
@@ -66,7 +82,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo ============================================================
-echo [3/3] BUILD COMPLETE AND SUCCESSFUL!
+echo [4/4] BUILD COMPLETE AND SUCCESSFUL!
 echo ============================================================
 echo.
 echo The installer executable is located at:
