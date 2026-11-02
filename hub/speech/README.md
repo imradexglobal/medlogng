@@ -1,147 +1,17 @@
-# Host speech worker
+# Online medical speech transcription
 
-## Offline speech authorization
+MediLogNG now records speech in the browser and sends it to Deepgram only after the clinician chooses **Transcribe recording**. Stopping a recording never starts an upload. If offline, the browser stores it locally with AES-GCM encryption in IndexedDB, bound to the signed-in user, hospital, patient and encounter. If encrypted browser storage is unavailable, the recording is kept in the current page's memory and the clinician is told to keep the page open. A reconnect only checks availability; it never uploads a pending recording automatically.
 
-The existing Firebase sign-in flow remains the entry point. Before enabling
-offline speech on a browser profile, the Host verifies the Firebase identity,
-live hospital membership and `encounter.edit` permission over HTTPS. The
-browser stores a non-exportable P-256 private key in IndexedDB; the Host stores
-the matching public key, clinician/hospital binding and last verified grant in
-Electron `safeStorage` encrypted state. Each upload, status read, cancel,
-offline bootstrap and revoke request is signed and replay checked by the Host.
+Transcription uses Deepgram Nova-3 Medical over HTTPS. The API key remains on the Firebase Functions backend or Windows Host environment. The request sets `mip_opt_out=true`; there is no local Whisper engine or silent offline fallback. The UI displays a transcript for clinician review before insertion into a note.
 
-There is no fixed expiry for the cached permission. It remains usable until an
-explicit sign-out or successful online revalidation. Browser sign-out removes
-the local key immediately and sends signed revoke calls to reachable Host
-sessions. On reconnect/focus, cached sessions are checked against Firebase and
-live Firestore authorization; changed or revoked access invalidates the Host
-grant. During a complete Host network outage, the last verified permission
-continues to apply as approved. The timestamp window on an individual signed
-request prevents replay and does not expire the session.
+The Firebase Hosting site (`https://medlogng.web.app`) calls the authenticated `speechHealth` and `transcribeConsultation` Functions. Windows Host deployments use the Host HTTPS endpoint, or the same Firebase endpoint when deployed/configured for that hospital. Both validate live Firebase identity, active membership, `encounter.edit`, and the authoritative encounter/patient/hospital binding before sending audio to Deepgram. Results and attempts are audit logged; audio is held in memory during provider processing and is not written to Host disk or Firestore.
 
-The Host writes encrypted audit records for session verification/sign-out,
-transcription submission, result access and cancellation. Transcription actions
-include clinician uid, Host timestamp, hospital, device, consultation and job
-or request identifiers. Job ownership remains bound to the verified uid and
-hospital. The browser key is profile-bound rather than hardware-backed; a
-compromised browser profile or same-origin script can use that profile's key.
+## Configuration gates
 
-This is a persistent, single-model CPU worker. The Electron Host will supervise
-it and communicate over stdin/stdout; it does not listen on a network port.
-The Host hands it only validated 16 kHz, mono, 16-bit PCM WAV files from its
-private temporary audio folder. The worker applies a five-minute and 32 MB
-defensive limit, loads English once, and serializes transcription work.
+Cloud Functions require a Secret Manager secret named `DEEPGRAM_API_KEY`, the `DEEPGRAM_ENDPOINT` environment value, and `DEEPGRAM_ALLOW_CLINICAL_AUDIO=true`. Host deployments require these values in the Host process environment. The endpoint must be one of Deepgram's allowlisted HTTPS endpoints: `api.deepgram.com`, `api.in.deepgram.com`, `api.eu.deepgram.com`, or `api.au.deepgram.com`. Do not use a global endpoint unless the hospital's data-protection review explicitly accepts global processing. No credentials are included in browser assets or the Host installer.
 
-## Build inputs
+The current model is `nova-3-medical` with `language=en`. Deepgram lists English variants including `en-IN` but not `en-NG`; no Nigerian-English accuracy has been demonstrated. Use hospital-approved, consented and de-identified samples to compare output against adjudicated references before clinical rollout. Do not treat a transcript as a verified clinical note.
 
-- Windows x64, CMake 3.20 or newer, and a Visual Studio C++ toolchain on the
-  build machine only.
-- The official `ggml-org/whisper.cpp` source at the pinned `v1.9.5` release
-  commit (`d1be6fd`).
-- Visual Studio 2022 x64 C++ tools, CMake 3.20+, and Git.
-- Official FFmpeg source inputs are fetched and signature-verified by
-  `scripts/build-ffmpeg.sh`, then built through `scripts/build-ffmpeg.ps1` in
-  MSYS2 UCRT64. The scripts stage the executable and `ffmpeg-build.json`; do
-  not use an unverified third-party binary.
-- `scripts/build-whisper-worker.ps1` checks the Visual Studio 2022 C++ tools,
-  CMake and Git; performs the pinned source checkout; downloads
-  `tiny.en-q5_1` from the pinned Hugging Face revision `f281eb4`; verifies its
-  SHA-256; builds the CPU worker; and writes `speech-assets.json` with asset
-  hashes.
-  GPU backends, shared runtime libraries, OpenMP, examples, tests, and the
-  upstream HTTP server are disabled for this worker build.
+Deepgram documentation says regional processing requires a regional endpoint and `mip_opt_out=true`; it currently lists India, EU and Australia regions, but no Nigeria region. Confirm the provider's current product terms, clinical-data eligibility, retention settings, price for Nova-3 Medical and legal/data-protection suitability for Nigeria before enabling production processing. See [`ONLINE-STT-DEPLOYMENT.md`](./ONLINE-STT-DEPLOYMENT.md).
 
-The manifest records the Whisper source commit and MIT license, the model
-revision and MIT license, and the FFmpeg source URL/version/signing key,
-source and executable hashes, LGPL license/configuration, and build toolchain.
-The Host installer carries the MIT and LGPL license texts, the exact verified
-FFmpeg source archive, detached signature and release key alongside the
-runtime assets so the source and license notice remain available offline.
-The Host build refuses to proceed unless the FFmpeg source archive, detached
-signature and public key are staged under `vendor/speech/ffmpeg-source`, the
-signature validates against FFmpeg's pinned release key, and
-`vendor/speech/ffmpeg-build.json` records the toolchain and configure options.
-It also checks that the executable's reported version, license and configure
-flags match that record, and rejects GPL/nonfree flags.
-
-For medical-language accuracy work, follow
-[`ACCURACY-EVALUATION.md`](./ACCURACY-EVALUATION.md) and use its blank
-[`accuracy-results-template.csv`](./accuracy-results-template.csv). No
-clinical or Nigerian-accent accuracy claim should be made until consented,
-de-identified samples with adjudicated reference transcripts have been tested.
-Yoruba/code-switching results must remain separate from the English-only model.
-
-For a Windows x64 build machine, install Visual Studio 2022 Build Tools with
-the Desktop C++ workload (MSVC v143 and a Windows SDK), CMake 3.20 or newer,
-and Git. For FFmpeg, install MSYS2 and use its UCRT64 shell. Install
-`base-devel`, `mingw-w64-ucrt-x86_64-toolchain`,
-`mingw-w64-ucrt-x86_64-nasm`, and GnuPG.
-Download `ffmpeg-9.0.2.tar.xz`, its `.asc` signature, and the key
-`ffmpeg-devel.asc` from ffmpeg.org. Stage the three files in
-`vendor/speech/ffmpeg-source`. The FFmpeg source build imports that key into an isolated
-GnuPG keyring, verifies fingerprint
-`FCF986EA15E6E293A5644F10B4322F04D67658D8`, and validates the signature and
-source SHA-256.
-
-Build the standalone converter from that source in the UCRT64 shell with
-`./configure --arch=x86_64 --target-os=mingw32 --disable-autodetect
---disable-shared --enable-static --disable-ffplay --disable-ffprobe
---disable-doc --disable-debug --extra-ldflags=-static`, then run `make -j2`.
-Do not add `--enable-gpl` or `--enable-nonfree`. Stage the resulting
-`ffmpeg.exe` and create `vendor/speech/ffmpeg-build.json` with schema version
-1, source version `9.0.2`, the complete configure argument array, and the exact
-MSYS2 toolchain/package versions from `pacman -Q`. The Host builder verifies
-that record against the executable and records source and binary SHA-256
-values. Rebuild from identical inputs and compare hashes before calling the
-packaging process reproducible.
-
-The receipt fields are `schemaVersion`, `sourceVersion`, optional `sourceSha256`,
-`toolchain`, and `configureArgs`. The builder independently computes the
-source hash and verifies the staged signature; it checks the supplied hash when
-present. Keep the full package-version output in `toolchain` so another build
-can reconstruct the same environment.
-
-Run `npm run speech:build` from the repository root to prepare FFmpeg and the
-Whisper worker. It automatically fetches missing pinned inputs, verifies
-FFmpeg's signature before extraction/build, resumes an existing matching
-FFmpeg source/build tree, and gives a specific missing-tool error. Run
-`scripts/verify-speech-assets.ps1` to validate all three runtime files,
-their recorded sizes and SHA-256 hashes, the pinned model hash, FFmpeg's
-reported version, and the detached source signature under the pinned FFmpeg
-release-key fingerprint. The verifier compares the signed source hash to the
-manifest and fails closed when signature verification is unavailable.
-`build-host.bat` and `npm run dist:host` run verification before packaging.
-
-For measurements on the intended 4 GB Windows Host with 6–10 clients, follow
-[`PERFORMANCE-BENCHMARK.md`](./PERFORMANCE-BENCHMARK.md) and record one row per
-job in [`performance-results-template.csv`](./performance-results-template.csv).
-Development-machine results do not substitute for that target-hardware run.
-
-The build machine needs internet only to fetch the pinned source/model. The
-Host and clients do not download source, models, or tools at runtime. Keep the
-generated asset manifest with the release artifacts for reproducibility.
-
-An on-demand Windows 2022 GitHub Actions workflow is available at
-`.github/workflows/build-speech-assets.yml`. It uses read-only repository
-permissions, pinned action commit SHAs, official source/model pins, verifies
-and starts the real worker/model, and uploads the runtime assets and receipts.
-It uses no signing keys or application secrets. It does not build the installer
-or validate 4 GB Host performance. GitHub runner and MSYS2 package updates are
-recorded in the receipts; do not describe the build as reproducible until
-identical clean builds have been compared.
-
-## Worker protocol
-
-The process loads the model at startup and prints `READY` only after successful
-initialization. Each request line is `<job-id>\t<absolute-wav-path>`. Each
-response is `<job-id>\tOK|ERR\t<base64-utf8-text>`. `QUIT` requests a clean stop.
-The supervisor starts at most one worker and sends one job at a time. It retries
-startup and unexpected exits; a job interrupted by a worker crash stays queued
-on disk for retry. A single inference has a 15-minute timeout and then fails
-with a visible job error so it cannot block later work. Host shutdown stops the
-worker and persists its active job back to the queue before exit.
-
-`jobs.json` stores job ownership, status and the audio path needed to recover a
-queued job. Completed text uses the Host's encrypted-result callbacks. Audio
-files are removed after completion or cancellation and abandoned temporary
-files are cleaned during startup/retention cleanup.
+The offline device-session and offline EMR handoff mechanism remains for its existing application functions. It no longer authorizes or processes audio transcription.

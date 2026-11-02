@@ -1,5 +1,5 @@
-// One Host inference lane shared by local AI generation and Whisper. It keeps
-// CPU/RAM intensive model runs from overlapping on low-memory Windows Hosts.
+// One Host inference lane for local clinical-note generation. Speech recognition
+// is online and does not run through this local CPU/RAM queue.
 export function createInferenceScheduler() {
   let tail = Promise.resolve()
   let active = ''

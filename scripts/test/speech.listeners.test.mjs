@@ -28,17 +28,25 @@ const request = (secure, port, path, { method = 'GET', body = null, headers = {}
 
 let providerCalls = 0
 const audit = []
+const warnings = []
+const steps = []
 const db = {
   doc: () => ({ get: async () => ({ exists: false }) }),
   collection(name) {
-    if (name === 'encounters') return { doc: () => ({ get: async () => ({ exists: true, data: () => ({ organization_id: 'hospital-1', patient_id: 'patient-1' }) }) }) }
-    if (name === 'audit_events') return { add: async (record) => { audit.push(record) } }
+    if (name === 'encounters') return { doc: () => ({ get: async () => { steps.push('encounter'); return { exists: true, data: () => ({ organization_id: 'hospital-1', patient_id: 'patient-1' }) } } }) }
+    if (name === 'audit_events') return {
+      add: async (record) => { steps.push('audit'); audit.push(record) },
+      doc: (id) => ({
+        create: async (record) => { if (audit.some((row) => row.document_id === id)) throw Object.assign(new Error('exists'), { code: 6 }); audit.push({ ...record, document_id: id }) },
+        update: async (record) => { const row = audit.find((entry) => entry.document_id === id); if (row) Object.assign(row, record) },
+      }),
+    }
     throw new Error('Unexpected collection ' + name)
   },
 }
 const authenticator = {
-  async verifyOnline(req) { if (req.headers.authorization !== 'Bearer valid-live-id-token-for-clinician') throw Object.assign(new Error('invalid token'), { status: 401, expose: true }); return { uid: 'clinician-1' } },
-  async authorize(_identity, _orgId, capability) { if (capability !== 'encounter.edit') throw Error('unexpected capability'); return { membership: { status: 'active' } } },
+  async verifyOnline(req) { steps.push('verifyOnline'); if (req.headers.authorization !== 'Bearer valid-live-id-token-for-clinician') throw Object.assign(new Error('invalid token'), { status: 401, expose: true }); return { uid: 'clinician-1' } },
+  async authorize(_identity, _orgId, capability) { steps.push('authorize'); if (capability !== 'encounter.edit') throw Error('unexpected capability'); return { membership: { status: 'active' } } },
 }
 const envBefore = { key: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT, enable: process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO }
 process.env.DEEPGRAM_API_KEY = 'test-only-not-a-real-key'
@@ -47,12 +55,12 @@ process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO = 'true'
 let hub
 try {
   hub = await startHub({ host: '127.0.0.1', port: 0, httpsPort: 0, tls: { pfx: await readFile(pfxPath) }, allowedOrigins: ['https://medlogng.web.app'],
-    queueFile: join(root, 'outbox.json'), foundation: { db, auth: {} }, authenticator, log: { info() {}, warn() {}, error() {} },
+    queueFile: join(root, 'outbox.json'), foundation: { db, auth: {} }, authenticator, log: { info() {}, warn(...args) { warnings.push(args) }, error() {} },
     speechProvider: async ({ audio: bytes, contentType, apiKey, endpoint }) => {
-      providerCalls++; assert.equal(bytes.length, 1024); assert.equal(contentType, 'audio/wav'); assert.match(apiKey, /^test-only/); assert.equal(endpoint, 'https://api.in.deepgram.com')
+      providerCalls++; steps.push('provider'); assert.equal(bytes.length, 1024); assert.equal(contentType, 'audio/wav'); assert.match(apiKey, /^test-only/); assert.equal(endpoint, 'https://api.in.deepgram.com')
       return { text: 'Synthetic online transcription.', model: 'nova-3-medical' }
     },
-    auditSpeech: async (record) => audit.push(record),
+    auditSpeech: async (record) => { steps.push('local-audit'); audit.push(record) },
   })
   const q = '?orgId=hospital-1&patientId=patient-1&encounterId=encounter-1'
   const headers = { 'content-type': 'audio/wav', authorization: 'Bearer valid-live-id-token-for-clinician', 'x-medilog-client': 'medilogng-web',
@@ -61,10 +69,13 @@ try {
   assert.equal(rejectedHttp.status, 403, 'HTTP listener must never accept microphone recordings')
   assert.equal(providerCalls, 0)
   const result = await request(true, hub.httpsPort, '/speech/transcribe' + q, { method: 'POST', body: audio(), headers })
-  assert.equal(result.status, 200)
+  assert.equal(result.status, 200, result.body.toString() + ' providerCalls=' + providerCalls + ' steps=' + steps + ' warnings=' + JSON.stringify(warnings))
   assert.equal(JSON.parse(result.body.toString()).text, 'Synthetic online transcription.')
   assert.equal(providerCalls, 1)
   assert.equal(audit.some((row) => row.actor_user_id === 'clinician-1' && row.patient_id === 'patient-1' && row.record_id === 'encounter-1'), true)
+  const duplicate = await request(true, hub.httpsPort, '/speech/transcribe' + q, { method: 'POST', body: audio(), headers })
+  assert.equal(duplicate.status, 409, 'a replayed request id must not invoke the provider twice')
+  assert.equal(providerCalls, 1)
   const oldQueue = await request(true, hub.httpsPort, '/speech/jobs/00000000-0000-4000-8000-000000000000?orgId=hospital-1', { headers })
   assert.equal(oldQueue.status, 404, 'obsolete local worker job endpoint must be removed')
   const oldSession = await request(true, hub.httpsPort, '/speech/session?orgId=hospital-1', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: Buffer.from('{}') })

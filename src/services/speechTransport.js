@@ -29,7 +29,7 @@ export async function getSpeechBackend({ orgId, user, origin = globalThis.locati
   } catch { /* Firebase-hosted apps use the secured callable HTTP function below. */ }
   clearTimeout(timeout)
   try {
-    const { app } = await import('../firebase.js')
+    const { app } = cloudBaseUrl ? { app: null } : await import('../firebase.js')
     const url = cloudBaseUrl ? new URL('speechHealth', cloudBaseUrl).toString() : await hostedSpeechEndpoint('speechHealth', app)
     const cloudResponse = await fetchImpl(url + '?orgId=' + encodeURIComponent(orgId), {
       method: 'GET', headers, cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(7000),

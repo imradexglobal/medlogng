@@ -42,7 +42,10 @@ const unavailable = await getSpeechBackend({ orgId: 'hospital-1', user, origin: 
   fetchImpl: async () => ({ ...jsonResponse({ ok: true, available: false }), headers: { get: () => 'application/json' } }) })
 assert.equal(unavailable, null)
 const hostingRewrite = await getSpeechBackend({ orgId: 'hospital-1', user, origin: 'https://medlogng.web.app', cloudBaseUrl,
-  fetchImpl: async (_url, options) => { if (options.signal?.aborted) throw Error('unexpected abort'); return { ...jsonResponse({}), headers: { get: () => 'text/html' } } })
+  fetchImpl: async (_url, options) => {
+    if (options.signal?.aborted) throw Error('unexpected abort')
+    return { ...jsonResponse({}), headers: { get: () => 'text/html' } }
+  } })
 assert.equal(hostingRewrite, null, 'Hosting rewrite must not be mistaken for a transcription service')
 
 console.log('Host and Firebase speech backend detection, auth header and manual transcription transport passed')

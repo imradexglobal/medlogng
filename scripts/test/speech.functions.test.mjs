@@ -7,7 +7,13 @@ const store = {
   collection(name) {
     if (name === 'organization_memberships') return { doc: () => ({ get: async () => ({ exists: true, data: () => ({ status: 'active', capabilities: ['encounter.edit'] }) }) }) }
     if (name === 'encounters') return { doc: () => ({ get: async () => ({ exists: true, data: () => ({ organization_id: 'hospital-1', patient_id: 'patient-1' }) }) }) }
-    if (name === 'audit_events') return { add: async (event) => { audit.push(event); return { id: 'audit-' + audit.length } } }
+    if (name === 'audit_events') return {
+      add: async (event) => { audit.push(event); return { id: 'audit-' + audit.length } },
+      doc: (id) => ({
+        create: async (event) => { if (audit.some((row) => row.document_id === id)) throw Object.assign(new Error('exists'), { code: 6 }); audit.push({ ...event, document_id: id }) },
+        update: async (event) => { const row = audit.find((entry) => entry.document_id === id); if (row) Object.assign(row, event) },
+      }),
+    }
     throw new Error('Unexpected collection ' + name)
   },
 }
@@ -40,10 +46,15 @@ await handler(req(), ok)
 assert.equal(ok.code, 200)
 assert.equal(ok.payload.text, 'synthetic generated transcript')
 assert.equal(providerCalls, 1)
-assert.equal(audit.length, 2)
+assert.equal(audit.length, 1)
 assert.equal(audit[0].patient_id, 'patient-1')
 assert.equal(audit[0].actor_user_id, 'clinician-1')
 assert.equal(audit[0].request_id, 'synthetic-request-0001')
+assert.equal(audit[0].status, 'completed')
+const duplicate = response()
+await handler(req(), duplicate)
+assert.equal(duplicate.code, 409)
+assert.equal(providerCalls, 1, 'duplicate request id must not repeat provider processing')
 
 const denied = response()
 await handler(req({ authHeader: '' }), denied)

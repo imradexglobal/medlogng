@@ -2,7 +2,7 @@
 
 ## Windows Host
 
-The consultation screen uses the existing recorder and Whisper transcript review. “Use for clinical draft” copies that reviewed transcript into the AI panel. The Host sends it to `/clinical-drafts` over the configured Host HTTPS listener. The Hub verifies the Firebase identity online, active membership, `encounter.edit`, and the authoritative encounter's hospital and patient before forwarding text to an Ollama-compatible endpoint bound to loopback. Audio is not sent to the AI model. With the current adapter, model processing stays on the Host PC; no cloud AI fallback exists.
+The consultation screen records locally and offers a separate, clinician-triggered Deepgram transcription action. After transcript review, “Use for clinical draft” copies that text into the AI panel. The Host sends text to `/clinical-drafts` over its HTTPS listener. The Hub verifies live Firebase identity, active membership, `encounter.edit`, and the authoritative encounter's hospital and patient before forwarding text to an Ollama-compatible endpoint bound to loopback. Audio is not sent to the clinical-note AI model. The note-generation provider remains separate from Deepgram and no cloud note-generation fallback exists on the Host.
 
 An administrator must install Ollama and a hospital-approved local model on the Host, then set these Host process environment variables before restarting it:
 
@@ -13,7 +13,7 @@ $env:MEDLOG_CLINICAL_AI_MODEL = '<hospital-approved-model-tag>'
 
 Verify the model is available with `ollama list` and that the Hub process can reach `http://127.0.0.1:11434/api/tags`. Do not expose Ollama on the LAN. The default URL is loopback and the adapter rejects non-loopback endpoints. Review model license, update policy, disk/RAM needs, local logging, security and clinical performance before enabling it. No model is bundled with MediLogNG.
 
-The Host authorization check currently requires online identity/membership verification and an authoritative encounter read for AI generation. Offline Whisper transcription remains independent and usable according to the Phase 1 offline speech session. AI generation itself is unavailable while the Host cannot reach Firebase; the UI says so and never silently changes processors.
+Both Host and Firebase speech transcription require online identity/membership authorization and an authoritative encounter read. There is no offline transcription engine or fallback. A recording made without connectivity remains local and is never uploaded automatically when connectivity returns. The locally hosted clinical-note model itself continues to require online authorization; the UI reports when services are unavailable.
 
 ## Firebase Hosting
 

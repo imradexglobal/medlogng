@@ -61,6 +61,7 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
   const aiButton = widget.querySelector('[data-speech-ai]')
   let stream = null, recorder = null, chunks = [], recording = false, destroyed = false
   let pendingId = '', pendingBlob = null, pendingPersistent = false, backend = null, uploadAbort = null, savedPoint = null, startedAt = 0, elapsedTimer = null, healthTimer = null
+  let captureBinding = null, captureUid = ''
 
   const binding = () => ({ orgId: String(getOrgId?.() || ''), patientId: String(getPatientId?.() || ''), encounterId: String(getEncounterId?.() || '') })
   const setStatus = (text, kind = '') => { status.textContent = text; status.dataset.kind = kind }
@@ -83,15 +84,14 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
     if (pendingId && !backend) setStatus(pendingPersistent ? 'Recording saved securely on this device. Online transcription is unavailable; reconnect and choose Transcribe recording.' : 'Recording is kept in this open consultation only. Keep this page open until transcription is available.', 'warning')
     else if (pendingId && backend) setStatus(pendingPersistent ? 'Recording saved securely on this device. Choose Transcribe recording when ready.' : 'Recording is ready in this open consultation. Choose Transcribe recording when ready.', 'success')
   }
-  async function saveRecording(blob) {
+  async function saveRecording(blob, ids = binding(), uid = '') {
     try {
       const { auth } = await import('../firebase.js')
-      const user = auth.currentUser
-      const ids = binding()
-      if (!user || !ids.orgId || !ids.patientId || !ids.encounterId) throw new Error('Open a patient-linked consultation and sign in before recording.')
+      uid = uid || auth.currentUser?.uid || ''
+      if (!uid || !ids.orgId || !ids.patientId || !ids.encounterId) throw new Error('Open a patient-linked consultation and sign in before recording.')
       const { savePendingSpeech } = await import('../services/pendingSpeech.js')
       pendingBlob = blob
-      pendingId = await savePendingSpeech(blob, { uid: user.uid, ...ids })
+      pendingId = await savePendingSpeech(blob, { uid, ...ids })
       pendingPersistent = true
       await refreshBackend()
     } catch (error) {
@@ -102,18 +102,31 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
   }
   async function startRecording() {
     if (!canRecord() || recording) return
-    if (!binding().orgId || !binding().patientId || !binding().encounterId) { setStatus('Open a patient-linked consultation before recording.', 'error'); return }
+    captureBinding = binding()
+    if (!captureBinding.orgId || !captureBinding.patientId || !captureBinding.encounterId) { setStatus('Open a patient-linked consultation before recording.', 'error'); return }
+    try {
+      const { auth } = await import('../firebase.js')
+      captureUid = auth.currentUser?.uid || ''
+      if (!captureUid) throw new Error('Sign in before recording.')
+    } catch (error) { setStatus(error?.message || 'Sign in before recording.', 'error'); return }
     savedPoint = saveInsertionPoint(field); review.hidden = true; transcript.value = ''; setStatus('Requesting microphone…')
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
       const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].find((type) => MediaRecorder.isTypeSupported?.(type))
       recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
       chunks = []; recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data) }
-      recorder.onerror = () => { restoreReadyState(); setStatus('Microphone recording stopped unexpectedly.', 'error') }
+      recorder.onerror = () => {
+        const partial = new Blob(chunks, { type: recorder?.mimeType || mimeType || 'audio/webm' })
+        const ids = captureBinding; const uid = captureUid
+        restoreReadyState()
+        if (partial.size) { setStatus('Microphone recording stopped unexpectedly. Keeping the captured audio locally.', 'warning'); void saveRecording(partial, ids, uid) }
+        else setStatus('Microphone recording stopped unexpectedly.', 'error')
+      }
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: recorder?.mimeType || mimeType || 'audio/webm' })
+        const ids = captureBinding; const uid = captureUid
         restoreReadyState()
-        if (blob.size) void saveRecording(blob)
+        if (blob.size) void saveRecording(blob, ids, uid)
         else setStatus('No audio was recorded. Check the microphone and try again.', 'error')
       }
       recorder.start(1000); recording = true; startedAt = Date.now(); recordButton.disabled = false

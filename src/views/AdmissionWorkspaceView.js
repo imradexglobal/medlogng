@@ -4,6 +4,7 @@
 // Readmission isolation: each stay gets a new admission_session_id (doc id).
 import { shell, formModal, toast, closeModal, wireToast, openModal } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
+import { staffLabel } from '../lib/staffName.js'
 import {
   listSessionPlanItems, createPlanItem, updatePlanItem, updatePlanStatus, removePlanItem,
   buildSessionTimelineFn, nextRoundFn, myAdmissionSessionCaps,

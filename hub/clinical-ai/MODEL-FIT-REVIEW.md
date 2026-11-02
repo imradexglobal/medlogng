@@ -15,14 +15,14 @@ The 8 GB development machine does not represent a 4 GB Host. With less than 1 GB
 
 ## Candidate comparison
 
-Ollama library download sizes are weight-file sizes, not full working-memory requirements. Actual RAM depends on runtime buffers, context/KV cache, generation length, and whether Whisper, Electron and Windows services are resident. CPU-generation throughput must be measured on the hospital Host.
+Ollama library download sizes are weight-file sizes, not full working-memory requirements. Actual RAM depends on runtime buffers, context/KV cache, generation length, Electron and Windows services. CPU-generation throughput must be measured on the hospital Host. Speech recognition now runs online and does not consume Host inference RAM, but it depends on internet/provider availability.
 
 | Candidate | Listed quantized size / context | Structured JSON | Medical documentation and Nigerian English assessment | 4 GB Host view |
 |---|---|---|---|---|
 | Qwen3 0.6B Q4_K_M | 523 MB / 40K | Ollama can constrain output with JSON Schema | General model; no Nigerian-English SOAP accuracy evidence found. Smallest candidate, but no clinical adequacy established. | Most plausible resource experiment, not a safe recommendation without review |
 | Gemma 3 1B Q4_K_M | 806 MB / 32K | Ollama JSON Schema output | General multilingual model; Google describes 140+ languages but does not establish Nigerian-English clinical note quality. | Plausible resource experiment; low parameter count is not evidence of clinical accuracy |
-| Llama 3.2 1B | 1.3 GB / 128K | Ollama JSON Schema output | General summarization model. Meta’s documented supported-language list names English but not Nigerian English, Yoruba or Hausa. | Likely tight with Whisper/runtime on 4 GB |
-| MedGemma 1.5 4B Q4 | 3.3 GB / 128K | Ollama JSON Schema output | Medical text/image comprehension model; this does not establish safe transcript-to-SOAP performance or Nigerian-English accuracy. | Not viable for a 4 GB Host alongside Windows and Whisper |
+| Llama 3.2 1B | 1.3 GB / 128K | Ollama JSON Schema output | General summarization model. Meta’s documented supported-language list names English but not Nigerian English, Yoruba or Hausa. | Likely tight alongside Windows, Electron and other Host services |
+| MedGemma 1.5 4B Q4 | 3.3 GB / 128K | Ollama JSON Schema output | Medical text/image comprehension model; this does not establish safe transcript-to-SOAP performance or Nigerian-English accuracy. | Not viable for a 4 GB Host alongside Windows |
 
 Ollama documents JSON Schema constrained output; the Host adapter now sends a closed schema, and still independently validates exact evidence spans. Schema validity does not prevent a semantically unsupported sentence from citing a real but irrelevant quote. The UI flags that limitation and requires clinician review. References: [Qwen3 tags](https://ollama.com/library/qwen3/tags), [Gemma 3 tags](https://ollama.com/library/gemma3/tags), [Llama 3.2](https://ollama.com/library/llama3.2), [MedGemma 1.5 tags](https://ollama.com/library/medgemma1.5/tags), [Ollama structured outputs](https://ollama.com/blog/structured-outputs), [Gemma 3 model card](https://ai.google.dev/gemma/docs/core/model_card_3).
 
@@ -30,11 +30,11 @@ No cited model provides a verified MediLogNG evaluation for Nigerian English, Ni
 
 ## Resource protection implemented
 
-- The Host serializes Ollama documentation generation and Whisper inference through a shared single inference lane.
+- The Host serializes Ollama documentation generation through a single inference lane.
 - The local AI queue accepts one active request and up to two waiting requests; excess generation requests fail with a clear busy response.
-- Ollama is asked to unload the model after each generation (`keep_alive: 0`) so subsequent Whisper activity does not compete with a resident AI model.
-- Automated queue tests use deterministic mock workers and confirm AI/Whisper calls do not overlap. This is a scheduling test, not a RAM, CPU, latency or real-model measurement.
+- Ollama is asked to unload the model after each generation (`keep_alive: 0`) so it does not remain resident between requests.
+- Automated queue tests use deterministic mock workers and confirm clinical-note AI requests do not overlap. This is a scheduling test, not a RAM, CPU, latency or real-model measurement.
 
 ## Recommendation
 
-Do not enable local AI on 4 GB Hosts until actual 4 GB hardware testing proves the selected model leaves sufficient headroom for Windows, Whisper, Firebase/Hub and 6–10 ward clients. Start evaluation on a dedicated Host with substantially more RAM or leave AI disabled on low-memory Hosts while retaining local Whisper. If a 4 GB deployment is mandatory, run the clinical AI backend on a separately provisioned, hospital-controlled system after privacy and security approval.
+Do not enable local clinical-note AI on 4 GB Hosts until actual 4 GB hardware testing proves the selected model leaves sufficient headroom for Windows, Firebase/Hub and 6–10 ward clients. Speech recognition is online and does not use the local model lane, but Host/client performance still depends on available internet bandwidth and provider limits. If a 4 GB deployment is mandatory, run the clinical AI backend on a separately provisioned, hospital-controlled system after privacy and security approval.

@@ -1,4 +1,5 @@
 import { initializeApp, getApps } from 'firebase-admin/app'
+import { createHash } from 'node:crypto'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https'
 import { defineSecret } from 'firebase-functions/params'
@@ -42,10 +43,22 @@ export function createSpeechHttpHandler({ store, auth, provider, secret = () => 
       if (!encounter || encounter.organization_id !== orgId || encounter.patient_id !== patientId) return res.status(403).json({ ok: false, error: 'Consultation does not belong to this patient and hospital.' })
       const audio = Buffer.from(req.rawBody || [])
       const contentType = String(req.get('content-type') || '')
-      const auditBase = { actor_user_id: identity.uid, organization_id: orgId, patient_id: patientId, record_id: encounterId, request_id: requestId, source: 'firebase-deepgram-stt' }
-      await store.collection('audit_events').add({ ...auditBase, action: 'speech.transcription-submit', occurredAt: timestamp() })
-      const result = await provider({ audio, contentType, apiKey: secret(), endpoint: endpoint() })
-      await store.collection('audit_events').add({ ...auditBase, action: 'speech.transcription-complete', model: result.model, occurredAt: timestamp() })
+      const auditBase = { actor_user_id: identity.uid, actor_organization_id: orgId, organization_id: orgId, patient_id: patientId, record_id: encounterId, request_id: requestId, source: 'firebase-deepgram-stt' }
+      const idempotencyId = 'speech_transcription_' + createHash('sha256').update([identity.uid, orgId, encounterId, requestId].join('\n')).digest('hex')
+      const auditRef = store.collection('audit_events').doc(idempotencyId)
+      const submitRecord = { ...auditBase, action: 'speech.transcription-submit', model: 'nova-3-medical', status: 'started', occurredAt: timestamp() }
+      try { await auditRef.create(submitRecord) }
+      catch (error) {
+        if (error?.code === 6 || error?.code === 'already-exists') return res.status(409).json({ ok: false, error: 'This transcription request was already submitted. Start a new request if a retry is needed.' })
+        throw error
+      }
+      let result
+      try { result = await provider({ audio, contentType, apiKey: secret(), endpoint: endpoint() }) }
+      catch (error) {
+        await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), completedAt: timestamp() }).catch(() => {})
+        throw error
+      }
+      await auditRef.update({ status: 'completed', model: result.model, completedAt: timestamp() })
       return res.status(200).json({ ok: true, text: result.text, model: result.model, requestId })
     } catch (error) {
       const code = error?.code
@@ -169,5 +182,5 @@ const speechHealthHandler = createSpeechHealthHandler({
   secret: () => DEEPGRAM_API_KEY.value(), endpoint: () => process.env.DEEPGRAM_ENDPOINT || '',
   allowClinicalAudio: () => process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true',
 })
-export const transcribeConsultation = onRequest({ region: 'us-central1', timeoutSeconds: 240, memory: '1GiB', maxInstances: 3, secrets: [DEEPGRAM_API_KEY] }, speechHandler)
+export const transcribeConsultation = onRequest({ region: 'us-central1', timeoutSeconds: 240, memory: '1GiB', maxInstances: 5, concurrency: 2, secrets: [DEEPGRAM_API_KEY] }, speechHandler)
 export const speechHealth = onRequest({ region: 'us-central1', timeoutSeconds: 15, memory: '256MiB', maxInstances: 5, secrets: [DEEPGRAM_API_KEY] }, speechHealthHandler)

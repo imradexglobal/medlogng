@@ -295,6 +295,7 @@ function makeStaticHandler(staticDir) {
 
 export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
   speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, clinicalAi = null, verifiedHttpsAddresses = new Set(), speechProvider = transcribeWithDeepgram }) {
+  let activeSpeechRequests = 0
   async function recordClinicalAiAudit(action, uid, orgId, patientId, encounterId, decisions = {}, metadata = null) {
     if (!db) throw new Error('Clinical audit storage is unavailable.')
     await db.collection('audit_events').add({
@@ -365,6 +366,7 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     const encounterId = String(url.searchParams.get('encounterId') || '')
     const requestId = String(req.headers['x-speech-request-id'] || '')
     if (![orgId, patientId, encounterId].every(Boolean) || !/^[A-Za-z0-9_-]{8,100}$/.test(requestId)) { req.resume(); json(res, 400, { ok: false, error: 'Hospital, patient, consultation and request id are required.' }); return }
+    let speechSlot = false
     try {
       const identity = await authenticator.verifyOnline(req)
       await authenticator.authorize(identity, orgId, 'encounter.edit')
@@ -374,6 +376,9 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       if (!encounter || encounter.organization_id !== orgId || encounter.patient_id !== patientId) throw Object.assign(new Error('Consultation does not belong to this patient and hospital.'), { status: 403, expose: true })
       const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
       if (!contentType.startsWith('audio/')) { req.resume(); json(res, 415, { ok: false, error: 'Send a supported audio recording.' }); return }
+      if (activeSpeechRequests >= 10) { req.resume(); json(res, 429, { ok: false, error: 'The Host transcription service is busy. Try again shortly.' }); return }
+      activeSpeechRequests++
+      speechSlot = true
       const chunks = []; let size = 0
       for await (const chunk of req) {
         size += chunk.length
@@ -382,21 +387,29 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       }
       const audio = Buffer.concat(chunks)
       const submittedAt = new Date()
-      await db.collection('audit_events').add({ action: 'speech.transcription-submit', actor_user_id: identity.uid,
+      const requestHash = createHash('sha256').update([identity.uid, orgId, encounterId, requestId].join('\n')).digest('hex')
+      const auditRef = db.collection('audit_events').doc('speech_transcription_' + requestHash)
+      try { await auditRef.create({ action: 'speech.transcription-submit', actor_user_id: identity.uid, actor_organization_id: orgId,
         organization_id: orgId, patient_id: patientId, record_id: encounterId, request_id: requestId,
-        model: 'nova-3-medical', source: 'host-deepgram-stt', occurredAt: submittedAt })
+        model: 'nova-3-medical', status: 'started', source: 'host-deepgram-stt', occurredAt: submittedAt }) }
+      catch (error) {
+        if (error?.code === 6 || error?.code === 'already-exists') { json(res, 409, { ok: false, error: 'This transcription request was already submitted. Start a new request if a retry is needed.' }); return }
+        throw error
+      }
       await auditSpeech({ action: 'speech.transcription-submit', uid: identity.uid, orgId, patientId, encounterId, requestId,
         model: 'nova-3-medical', at: submittedAt.toISOString() })
-      const result = await speechProvider({ audio, contentType, apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT })
+      let result
+      try { result = await speechProvider({ audio, contentType, apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT }) }
+      catch (error) { await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), completedAt: new Date() }).catch(() => {}); throw error }
       const record = { action: 'speech.transcription-complete', uid: identity.uid, orgId, patientId, encounterId, requestId, model: result.model, at: new Date().toISOString() }
-      await db.collection('audit_events').add({ action: record.action, actor_user_id: identity.uid, organization_id: orgId,
-        patient_id: patientId, record_id: encounterId, request_id: requestId, model: result.model, source: 'host-deepgram-stt', occurredAt: new Date() })
+      await auditRef.update({ status: 'completed', model: result.model, completedAt: new Date() })
       await auditSpeech(record)
       json(res, 200, { ok: true, text: result.text, model: result.model, requestId })
     } catch (error) {
       const status = Number(error?.status) || (error?.code === 'invalid-argument' ? 400 : error?.code === 'failed-precondition' ? 503 : 503)
+      log.warn('[speech] transcription failed', String(error?.code || error?.name || 'error').slice(0, 80))
       json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Online transcription could not be completed.' })
-    }
+    } finally { if (speechSlot) activeSpeechRequests-- }
   }
   async function handleClinicalDraftReview(req, res) {
     const ip = String(req.socket.remoteAddress || 'unknown')
@@ -1339,6 +1352,11 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       await handleSpeechTranscribe(req, res, url)
       return
     }
+    if (path === '/speech/jobs' || path.startsWith('/speech/jobs/') || path === '/speech/session' || path.startsWith('/speech/session/')) {
+      req.resume()
+      json(res, 404, { ok: false, error: 'This local transcription endpoint has been retired.' })
+      return
+    }
 
 
     if (req.method === 'GET' && serveStatic) {
@@ -1449,6 +1467,7 @@ export async function startHub(overrides = {}) {
     cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, speechSessions, offlineQueryCache,
     clinicalAi,
     auditSpeech: overrides.auditSpeech,
+    speechProvider: overrides.speechProvider || transcribeWithDeepgram,
     verifiedHttpsAddresses,
   })
   const onRequest = (req, res) => {
