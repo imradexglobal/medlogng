@@ -61,6 +61,7 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
   const appendButton = widget.querySelector('[data-speech-append]')
   const replaceButton = widget.querySelector('[data-speech-replace]')
   const aiButton = widget.querySelector('[data-speech-ai]')
+  aiButton.hidden = typeof onTranscriptReady !== 'function'
   let stream = null, recorder = null, chunks = [], recording = false, destroyed = false
   let pendingId = '', pendingBlob = null, pendingPersistent = false, backend = null, uploadAbort = null, savedPoint = null, startedAt = 0, elapsedTimer = null, healthTimer = null
   let captureBinding = null, captureUid = ''
@@ -180,7 +181,8 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
       pendingRecords = pendingRecords.filter((row) => row.id !== pendingId)
       pendingId = pendingRecords[0]?.id || ''; pendingBlob = null; pendingPersistent = !!pendingId
       renderPendingOptions(); transcribeButton.hidden = !(pendingId && backend); cancelButton.hidden = true
-      setStatus('Transcript ready — review before inserting. (' + result.model + ')' + (pendingId ? ' Another saved recording is ready.' : ''), 'success')
+      const elapsed = Number.isFinite(result.processingMs) ? ' · ' + (result.processingMs / 1000).toFixed(1) + ' sec' : ''
+      setStatus('Transcript ready — review before inserting. (' + result.model + elapsed + ')' + (pendingId ? ' Another saved recording is ready.' : ''), 'success')
     } catch (error) {
       if (error?.name === 'AbortError') setStatus('Transcription cancelled. The encrypted recording remains on this device.', 'warning')
       else setStatus(error?.message || 'Transcription failed. The encrypted recording remains on this device.', 'error')

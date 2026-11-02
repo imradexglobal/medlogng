@@ -400,11 +400,11 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
         model: 'nova-3-medical', at: submittedAt.toISOString() })
       let result
       try { result = await speechProvider({ audio, contentType, apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT }) }
-      catch (error) { await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), completedAt: new Date() }).catch(() => {}); throw error }
+      catch (error) { await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), provider_status: Number(error?.providerStatus) || null, completedAt: new Date() }).catch(() => {}); throw error }
       const record = { action: 'speech.transcription-complete', uid: identity.uid, orgId, patientId, encounterId, requestId, model: result.model, at: new Date().toISOString() }
-      await auditRef.update({ status: 'completed', model: result.model, completedAt: new Date() })
+      await auditRef.update({ status: 'completed', model: result.model, processing_ms: result.processingMs ?? null, completedAt: new Date() })
       await auditSpeech(record)
-      json(res, 200, { ok: true, text: result.text, model: result.model, requestId })
+      json(res, 200, { ok: true, status: 'completed', text: result.text, model: result.model, processingMs: result.processingMs ?? null, requestId })
     } catch (error) {
       const status = Number(error?.status) || (error?.code === 'invalid-argument' ? 400 : error?.code === 'failed-precondition' ? 503 : 503)
       log.warn('[speech] transcription failed', String(error?.code || error?.name || 'error').slice(0, 80))

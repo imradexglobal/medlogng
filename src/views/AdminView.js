@@ -13,7 +13,7 @@ import {
   listOrgDevices, setDeviceStatus, listAudit, AUDIT_ACTIONS, updateMemberName,
   friendlyAdminError,
 } from '../services/adminService.js'
-import { staffDisplayName, staffLabel, staffNameForId } from '../lib/staffName.js'
+import { staffDisplayName, staffLabel, staffNameForId, staffText } from '../lib/staffName.js'
 import { ROLE_OPTIONS, ALL_CAPS, capsForRole, normalizeCaps, isValidEmail } from '../features/admin/roles.js'
 import {
   listPayers, savePayer, setPayerActive, deletePayer, refreshCache,
@@ -730,7 +730,7 @@ export async function AdminView(app) {
       listEl.innerHTML =
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>When</th><th>Action</th><th>By</th><th>Detail</th></tr></thead><tbody>' +
         shown.map((r) => '<tr><td class="mut">' + esc(fmtTs(r.occurredAt)) + '</td><td><strong>' + esc(r.action || '') + '</strong></td>' +
-          '<td class="mut">' + esc(r.actor_name || staffNameForId(r.actor_user_id) || staffDisplayName({ email: r.actor_email })) + '</td><td>' + esc(r.details || '') + '</td></tr>').join('') +
+          '<td class="mut">' + esc(r.actor_name || staffNameForId(r.actor_user_id) || staffDisplayName({ email: r.actor_email })) + '</td><td>' + esc(staffText(r.details || '')) + '</td></tr>').join('') +
         '</tbody></table><div class="loadmore" data-loadmore="1"></div></div>'
       more.mount(listEl.querySelector('.tblwrap'))
     }

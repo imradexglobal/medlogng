@@ -12,6 +12,7 @@ import { generateOrgId, normalizeOrgId } from '../features/orgs/domain.js'
 import { findInviteFor, acceptInvite, logAudit } from './adminService.js'
 import { navigate } from '../router.js'
 import { getDocsTolerant, getDocTolerant, isOffline } from '../lib/offlineRead.js'
+import { staffDisplayName } from '../lib/staffName.js'
 
 export { authErrorMessage, registrationErrorMessage }
 
@@ -278,7 +279,7 @@ export async function getClinicalStaff(orgId) {
     .filter((m) => m.status === 'active')
     .map((m) => ({
       value: m.id,
-      label: String(m.staff_name || m.email || m.user_id || m.id).trim(),
+      label: staffDisplayName(m),
     }))
 }
 

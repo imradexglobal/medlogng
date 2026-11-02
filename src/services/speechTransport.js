@@ -53,6 +53,6 @@ export async function transcribeRecording({ backend, blob, orgId, patientId, enc
     body: blob, cache: 'no-store', redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(240_000)]) : AbortSignal.timeout(240_000),
   })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok || data?.ok !== true || typeof data.text !== 'string') throw new Error(data.error || 'Online transcription failed. The recording remains on this device.')
-  return { text: data.text, model: data.model || 'nova-3-medical' }
+  if (!response.ok || data?.ok !== true || data?.status !== 'completed' || typeof data.text !== 'string') throw new Error(data.error || 'Online transcription failed. The recording remains on this device.')
+  return { text: data.text, model: data.model || 'nova-3-medical', processingMs: Number.isFinite(data.processingMs) ? data.processingMs : null }
 }

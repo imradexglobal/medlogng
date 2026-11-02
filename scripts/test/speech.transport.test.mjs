@@ -30,9 +30,10 @@ const transcription = await transcribeRecording({ backend: cloudBackend, blob: n
   orgId: 'hospital-1', patientId: 'patient-1', encounterId: 'encounter-1', requestId: 'request-synthetic-001',
   fetchImpl: async (url, options) => {
     posted = { url: new URL(url), options }
-    return jsonResponse({ ok: true, text: 'synthetic transcript', model: 'nova-3-medical' })
+    return jsonResponse({ ok: true, status: 'completed', text: 'synthetic transcript', model: 'nova-3-medical', processingMs: 1234 })
   } })
 assert.equal(transcription.text, 'synthetic transcript')
+assert.equal(transcription.processingMs, 1234)
 assert.equal(posted.url.searchParams.get('patientId'), 'patient-1')
 assert.equal(posted.url.searchParams.get('encounterId'), 'encounter-1')
 assert.equal(posted.options.headers['X-Speech-Request-Id'], 'request-synthetic-001')

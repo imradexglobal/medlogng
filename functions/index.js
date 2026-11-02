@@ -55,13 +55,14 @@ export function createSpeechHttpHandler({ store, auth, provider, secret = () => 
       let result
       try { result = await provider({ audio, contentType, apiKey: secret(), endpoint: endpoint() }) }
       catch (error) {
-        await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), completedAt: timestamp() }).catch(() => {})
+        await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), provider_status: Number(error?.providerStatus) || null, completedAt: timestamp() }).catch(() => {})
         throw error
       }
-      await auditRef.update({ status: 'completed', model: result.model, completedAt: timestamp() })
-      return res.status(200).json({ ok: true, text: result.text, model: result.model, requestId })
+      await auditRef.update({ status: 'completed', model: result.model, processing_ms: result.processingMs ?? null, completedAt: timestamp() })
+      return res.status(200).json({ ok: true, status: 'completed', text: result.text, model: result.model, processingMs: result.processingMs ?? null, requestId })
     } catch (error) {
       const code = error?.code
+      if (['auth/id-token-expired', 'auth/id-token-revoked', 'auth/invalid-id-token', 'auth/argument-error'].includes(code)) return res.status(401).json({ ok: false, error: 'Sign in again before transcribing.' })
       if (code === 'invalid-argument') return res.status(400).json({ ok: false, error: error.message })
       if (code === 'failed-precondition') return res.status(503).json({ ok: false, error: error.message })
       log.error?.('[speech] online transcription failed', code || error?.name || 'unknown')

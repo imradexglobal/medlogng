@@ -27,7 +27,7 @@ export function validateSpeechAudio(audio, contentType) {
   return type
 }
 
-export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpoint, fetchImpl = fetch }) {
+export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpoint, fetchImpl = fetch, now = Date.now }) {
   const type = validateSpeechAudio(audio, contentType)
   if (!apiKey || !endpoint) throw Object.assign(new Error('Online speech provider is not configured.'), { code: 'failed-precondition' })
   const origin = providerOrigin(endpoint)
@@ -40,6 +40,7 @@ export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpo
   url.searchParams.set('mip_opt_out', 'true')
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 180_000)
+  const startedAt = now()
   try {
     const response = await fetchImpl(url, {
       method: 'POST',
@@ -48,11 +49,30 @@ export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpo
       redirect: 'error',
       signal: controller.signal,
     })
-    if (!response.ok) throw Object.assign(new Error('Online transcription provider rejected the recording.'), { code: 'unavailable', providerStatus: response.status })
+    if (!response.ok) {
+      const status = Number(response.status) || 0
+      const message = status === 401
+        ? 'Deepgram rejected the server credential. Verify its backend configuration and transcription permissions.'
+        : status === 403
+          ? 'The Deepgram account is not permitted to use the selected medical transcription model.'
+          : status === 413
+            ? 'The recording is too large for online transcription.'
+            : status === 429
+              ? 'Deepgram is rate limiting transcription. Wait briefly and retry.'
+              : status >= 500
+                ? 'Deepgram is temporarily unavailable. Retry later.'
+                : 'Deepgram rejected the audio or transcription options.'
+      const code = status === 400 || status === 413 ? 'invalid-argument' : status === 401 || status === 403 ? 'failed-precondition' : 'unavailable'
+      throw Object.assign(new Error(message), { code, providerStatus: status })
+    }
     const result = await response.json()
     const text = result?.results?.channels?.[0]?.alternatives?.[0]?.transcript
     if (typeof text !== 'string' || !text.trim() || text.length > 100_000) throw Object.assign(new Error('Provider returned no usable transcript.'), { code: 'data-loss' })
-    return { text: text.trim(), model: 'nova-3-medical', providerRequestId: String(result?.metadata?.request_id || '').slice(0, 120) }
+    return {
+      text: text.trim(), model: 'nova-3-medical',
+      providerRequestId: String(result?.metadata?.request_id || '').slice(0, 120),
+      processingMs: Math.max(0, Math.round(now() - startedAt)),
+    }
   } catch (error) {
     if (error?.name === 'AbortError') throw Object.assign(new Error('Online transcription timed out.'), { code: 'deadline-exceeded' })
     throw error
@@ -66,7 +86,9 @@ export async function checkDeepgram({ apiKey, endpoint, fetchImpl = fetch }) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 5000)
   try {
-    const response = await fetchImpl(new URL('/v1/projects', origin), {
+    // This validates an API key without requiring project-administration
+    // permissions that a least-privilege transcription key should not have.
+    const response = await fetchImpl(new URL('/v1/auth/token', origin), {
       headers: { Authorization: 'Token ' + apiKey }, signal: controller.signal, redirect: 'error',
     })
     return response.ok

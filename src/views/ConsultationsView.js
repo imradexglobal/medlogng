@@ -163,6 +163,10 @@ export async function ConsultationsView(app, params = {}) {
   const { activeOrg } = authStore.getState()
   const caps = myEncounterCaps()
   const billingCaps = myBillingCaps()
+  const firebaseHosted = ['medlogng.web.app', 'medlogng.firebaseapp.com'].includes(window.location.hostname.toLowerCase())
+  const clinicalAiProviderLabel = firebaseHosted
+    ? 'Firebase clinical AI provider not configured'
+    : 'Host clinical AI model · clinician review required'
   // Returned to from Billing ("← Back to encounter") or deep-linked.
   const wantEnc = String(params.enc || '')
 
@@ -274,7 +278,7 @@ export async function ConsultationsView(app, params = {}) {
       '<section class="enc-overview-section"><div class="enc-overview-heading"><h4>Encounter diagnoses</h4></div><div id="encDx"></div></section>' +
       '</div>' +
       '<div data-wp="note" hidden>' +
-      (caps.canEdit ? '<section class="card" id="clinicalAiPanel" style="margin:0 0 12px;padding:12px"><div class="card-head"><h3>AI documentation draft</h3><span class="mut">Local Host model · clinician review required</span></div>' +
+      (caps.canEdit ? '<section class="card" id="clinicalAiPanel" style="margin:0 0 12px;padding:12px"><div class="card-head"><h3>AI documentation draft</h3><span class="mut">' + esc(clinicalAiProviderLabel) + '</span></div>' +
         '<p class="mut">Paste or use a reviewed transcript. The AI only proposes a draft; it does not save or make clinical decisions. A matching quote verifies the citation, not the claim: verify every item, especially diagnosis, medication, doses, numbers and negation.</p>' +
         '<textarea class="input" id="clinicalAiTranscript" rows="4" aria-label="Consultation transcript" placeholder="Paste a synthetic or reviewed consultation transcript…"></textarea>' +
         '<div class="toolbar" style="margin:8px 0"><button type="button" class="btn sm" id="generateClinicalDraftB">Generate draft</button><span class="mut" id="clinicalAiStatus" role="status"></span></div>' +
@@ -1554,7 +1558,7 @@ wireKebabs(tbl, async (rowId, action) => {
     if (!caps.canEdit) { if (aiStatus) aiStatus.textContent = 'Current encounter.edit permission is required.'; return }
     if (!transcript) { if (aiStatus) aiStatus.textContent = 'Enter or use a reviewed transcript first.'; return }
     aiGenerate.disabled = true
-    if (aiStatus) aiStatus.textContent = 'Generating a local draft…'
+    if (aiStatus) aiStatus.textContent = 'Generating a clinical draft…'
     try {
       const generated = await generateClinicalDraft({ transcript, organizationId: authStore.getState().activeOrg, patientId: selectedEncounter.patientId, encounterId: selectedEncounter.id })
       const draft = generated.draft
@@ -1620,16 +1624,20 @@ wireKebabs(tbl, async (rowId, action) => {
       if (st) st.textContent = 'Unsaved changes'
     })
   })
+  const passTranscriptToClinicalAi = (text) => {
+    if (!aiTranscript) return
+    aiTranscript.value = text
+    aiTranscript.dispatchEvent(new Event('input', { bubbles: true }))
+    document.getElementById('clinicalAiPanel')?.scrollIntoView({ block: 'nearest' })
+  }
   if (caps.canEdit) {
     SOAP_FIELDS.forEach(({ key }) => {
       const field = document.getElementById('enc-soap-' + key)
-      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: (text) => {
-        if (aiTranscript) { aiTranscript.value = text; document.getElementById('clinicalAiPanel')?.scrollIntoView({ block: 'nearest' }) }
-      } }))
+      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: passTranscriptToClinicalAi }))
     })
     const planSpeechField = document.getElementById('planEditor')
     if (planSpeechField) {
-      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '' })
+      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: passTranscriptToClinicalAi })
       const speechControl = planSpeechField.nextElementSibling
       const speechSlot = document.getElementById('planSpeechSlot')
       if (speechControl && speechSlot) {

@@ -43,7 +43,7 @@ Keep the key out of the browser, source tree, installer, logs and shared user co
 
 ## Operational validation checklist
 
-- Use a test Firebase project and synthetic audio first. Verify `GET speechHealth` says unavailable before enabling the feature, then available only after the key/endpoint are present and authorized.
+- Use a test Firebase project and synthetic audio first. Verify `GET speechHealth` says unavailable before enabling the feature, then available only after the key/endpoint are present and the credential is accepted by Deepgram's `/v1/auth/token` endpoint. This check validates credential authentication without requiring project-administration permissions; it does not prove that the account can use Nova-3 Medical. The first synthetic transcription must verify model entitlement.
 - Verify deployment origin is exactly `https://medlogng.web.app`; no Firebase Hosting index fallback may be treated as an API.
 - Test no membership, inactive membership, missing `encounter.edit`, expired/revoked token, other hospital, wrong patient and wrong encounter. Provider call count must remain zero for each rejected request.
 - Confirm Cloud/Host audit rows include actor UID, hospital, patient, encounter, request id, action, model and timestamp, and contain no audio or transcript.

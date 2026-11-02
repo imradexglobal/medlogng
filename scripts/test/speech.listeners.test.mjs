@@ -58,7 +58,7 @@ try {
     queueFile: join(root, 'outbox.json'), foundation: { db, auth: {} }, authenticator, log: { info() {}, warn(...args) { warnings.push(args) }, error() {} },
     speechProvider: async ({ audio: bytes, contentType, apiKey, endpoint }) => {
       providerCalls++; steps.push('provider'); assert.equal(bytes.length, 1024); assert.equal(contentType, 'audio/wav'); assert.match(apiKey, /^test-only/); assert.equal(endpoint, 'https://api.in.deepgram.com')
-      return { text: 'Synthetic online transcription.', model: 'nova-3-medical' }
+    return { text: 'Synthetic online transcription.', model: 'nova-3-medical', processingMs: 321 }
     },
     auditSpeech: async (record) => { steps.push('local-audit'); audit.push(record) },
   })
@@ -71,6 +71,8 @@ try {
   const result = await request(true, hub.httpsPort, '/speech/transcribe' + q, { method: 'POST', body: audio(), headers })
   assert.equal(result.status, 200, result.body.toString() + ' providerCalls=' + providerCalls + ' steps=' + steps + ' warnings=' + JSON.stringify(warnings))
   assert.equal(JSON.parse(result.body.toString()).text, 'Synthetic online transcription.')
+  assert.equal(JSON.parse(result.body.toString()).status, 'completed')
+  assert.equal(JSON.parse(result.body.toString()).processingMs, 321)
   assert.equal(providerCalls, 1)
   assert.equal(audit.some((row) => row.actor_user_id === 'clinician-1' && row.patient_id === 'patient-1' && row.record_id === 'encounter-1'), true)
   const duplicate = await request(true, hub.httpsPort, '/speech/transcribe' + q, { method: 'POST', body: audio(), headers })

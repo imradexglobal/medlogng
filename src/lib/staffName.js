@@ -30,7 +30,7 @@ export function currentStaffName() {
   const me = activeMembership(activeOrg)
   const name = (me && me.staff_name) || user?.displayName || ''
   if (String(name).trim()) return String(name).trim()
-  return staffDisplayName({ email: user?.email })
+  return user?.email || ''
 }
 
 const byId = new Map() // user_id → staff_name
@@ -49,17 +49,32 @@ export function staffLabel(value) {
   if (value == null) return value
   const s = String(value).trim()
   if (!s) return value
-  const known = byId.get(s) || byEmail.get(s.toLowerCase())
+  const known = byId.get(s) || staffNameForId(s) || byEmail.get(s.toLowerCase())
   if (known) return known
   if (/^[A-Z0-9_-]{20,}$/i.test(s)) return 'Staff member'
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) return emailLabel(s)
   return value
 }
 
+// Audit details can contain a uid inside prose (for example, an older
+// "uid → role" entry), so resolve or hide uid-shaped tokens in the full text.
+export function staffText(value) {
+  if (value == null) return value
+  return String(value).replace(/\b[A-Z0-9_-]{20,40}\b/gi, (token) => staffLabel(token))
+}
+
 // Name for a uid, or '' when unknown — for callers that need to tell "resolved
 // to a name" apart from "fell back to the raw value".
 export function staffNameForId(userId) {
-  return (userId && byId.get(userId)) || ''
+  if (!userId) return ''
+  const cached = byId.get(userId)
+  if (cached) return cached
+  const membership = authStore.getState().memberships?.find((m) => m.user_id === userId && m.staff_name)
+  if (membership?.staff_name) {
+    rememberStaffName({ userId, email: membership.email, name: membership.staff_name })
+    return String(membership.staff_name).trim()
+  }
+  return ''
 }
 
 // Human-readable fallback for UI that has a staff record but no saved name.
@@ -91,11 +106,16 @@ export function ensureStaffDirectory(orgId) {
   if (!orgId) return Promise.resolve()
   if (loadedFor === orgId) return Promise.resolve()
   if (loading && loading.orgId === orgId) return loading.promise
-  const { user } = authStore.getState()
-  if (user?.email) {
-    const me = activeMembership(orgId)
-    if (me?.staff_name) rememberStaffName({ email: user.email, name: me.staff_name })
-  }
+  const { user, memberships } = authStore.getState()
+  // Memberships are already in the auth store for this session. Seed their
+  // names immediately so labels work even if the directory read is denied.
+  memberships?.forEach((m) => {
+    if (m.organization_id === orgId && m.staff_name) {
+      rememberStaffName({ userId: m.user_id, email: m.email, name: m.staff_name })
+    }
+  })
+  const me = activeMembership(orgId)
+  if (user?.uid && me?.staff_name) rememberStaffName({ userId: user.uid, email: user.email, name: me.staff_name })
   const promise = (async () => {
     try {
       const snap = await getDocsTolerant(query(

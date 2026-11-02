@@ -25,7 +25,7 @@ This status supplements `PHASES-2-5-ROADMAP.md`. The roadmap remains the accepta
 
 ## Phase 4 — workflow integration and automation
 
-**Status: PARTIAL.** The existing Host recorder/transcriber feeds a reviewed transcript into the Phase 2 draft panel and existing encounter saves. Recording still verifies the same-origin Hub before microphone capture/upload. Firebase-only speech transcription remains unavailable: no audio is sent to the Hub or cloud processor. The Firebase Functions code is only for text-draft processing and its provider is disabled pending approval.
+**Status: PARTIALLY IMPLEMENTED; live provider validation blocked.** Browser recordings are encrypted locally, require an explicit transcription action, and are sent to either the Windows Host HTTPS endpoint or Firebase Functions. Both server paths enforce live Firebase identity, active membership, `encounter.edit`, encounter/patient ownership, deterministic duplicate protection and audit status; the browser receives a transcript and processing duration for review, SOAP/Plan insertion or transfer to the Phase 2 draft panel. The Firebase Functions and Host tests use injected/mock providers and do not prove a real Deepgram call. A Deepgram credential and exact authorization to use the credential supplied in chat were not established here; no live audio was sent. No Whisper fallback remains. Phase 3 and Phase 5 remain unimplemented beyond the separately documented safety foundations and planning.
 
 ## Phase 5 — optimization and production readiness
 
@@ -49,9 +49,9 @@ These published facts are insufficient to approve processing identifiable clinic
 ## Local verification performed for these foundations
 
 - `npm run test:clinical-drafts` — PASS (synthetic evidence, tampering, binding, explicit review and capability checks).
-- `npm run test:speech` — current PASS (Deepgram adapter input/endpoint/MIP opt-out tests, Host-device session tests, Host/Firebase routing, mock Host HTTPS integration and legacy endpoint retirement). It does not contact Deepgram.
+- `npm run test:speech` — current PASS after the health-check and status changes (Deepgram adapter input/endpoint/MIP opt-out tests, Host-device session tests, Host/Firebase routing, mock Host HTTPS integration and legacy endpoint retirement). It does not contact Deepgram.
 - `npm run test:clinical-ai` — PASS (synthetic mock adapter: draft structure, exact quote spans, citation fabrication rejection, non-loopback denial and unconfigured-model fail-closed behavior). It does not invoke Ollama or an external model.
-- `npm --prefix functions test` — current PASS (clinical-AI policy tests plus speech HTTP handler authentication, live membership, encounter binding, audit, idempotency and fail-closed provider).
+- `npm --prefix functions test` — current PASS after adding revoked-token, inactive-membership, missing-capability and cross-patient/hospital rejection coverage (clinical-AI policy tests plus speech HTTP handler auth, encounter binding, audit, idempotency and fail-closed provider). It does not call Deepgram.
 - Host local clinical-note AI uses a single scheduling lane. Speech recognition is online and is independent of the Host CPU inference queue. No actual model, live provider or target-hardware performance has been measured.
 - `npm run build` — PASS after the consultation UI and backend client changes.
 

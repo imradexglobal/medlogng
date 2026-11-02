@@ -8,7 +8,7 @@ import {
 import { authStore } from '../store/authStore.js'
 import { ROLE_CAPS, can, isValidEmail, MAX_HOSPITAL_ADMINS, capsForRole, normalizeCaps } from '../features/admin/roles.js'
 import { runChunk } from './pagination.js'
-import { currentStaffName, rememberStaffName } from '../lib/staffName.js'
+import { currentStaffName, rememberStaffName, staffDisplayName } from '../lib/staffName.js'
 
 export function myMembership(orgId) {
   const { memberships } = authStore.getState()
@@ -106,24 +106,24 @@ export async function approveMember(m, role, caps) {
     capabilities: finalCaps,
     approved_by: auth.currentUser?.uid || null,
     approved_at: serverTimestamp(),
-  }, { action: 'member.approved', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${r} · caps=${finalCaps.length}` })
+  }, { action: 'member.approved', organizationId: m.organization_id, details: `${staffDisplayName(m)} → ${r} · caps=${finalCaps.length}` })
 }
 
 export async function rejectMember(m) {
   await writeMember(m.id, { status: 'rejected' },
-    { action: 'member.rejected', organizationId: m.organization_id, details: m.staff_name || m.user_id })
+    { action: 'member.rejected', organizationId: m.organization_id, details: staffDisplayName(m) })
 }
 
 export async function suspendMember(m) {
   await writeMember(m.id, { status: 'suspended', capabilities: [] },
-    { action: 'member.suspended', organizationId: m.organization_id, details: m.staff_name || m.user_id })
+    { action: 'member.suspended', organizationId: m.organization_id, details: staffDisplayName(m) })
 }
 
 export async function reactivateMember(m) {
   // Reactivate with existing capabilities; if empty, fall back to role defaults
   const caps = normalizeCaps((m.capabilities && m.capabilities.length) ? m.capabilities : capsForRole(m.role))
   await writeMember(m.id, { status: 'active', capabilities: caps },
-    { action: 'member.reactivated', organizationId: m.organization_id, details: m.staff_name || m.user_id })
+    { action: 'member.reactivated', organizationId: m.organization_id, details: staffDisplayName(m) })
 }
 
 export async function updateMemberRole(m, role) {
@@ -138,7 +138,7 @@ export async function updateMemberRole(m, role) {
   const current = normalizeCaps(m.capabilities || [])
   const finalCaps = current.length ? current : normalizeCaps(capsForRole(r))
   await writeMember(m.id, { role: r, capabilities: finalCaps },
-    { action: 'member.role_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${r} · caps=${finalCaps.length}` })
+    { action: 'member.role_updated', organizationId: m.organization_id, details: `${staffDisplayName(m)} → ${r} · caps=${finalCaps.length}` })
 }
 
 export async function updateMemberCapabilities(m, caps) {
@@ -148,12 +148,12 @@ export async function updateMemberCapabilities(m, caps) {
   const finalCaps = normalizeCaps(caps)
   if (!finalCaps.length) throw new Error('Capabilities required')
   await writeMember(m.id, { capabilities: finalCaps },
-    { action: 'member.capabilities_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} · caps=${finalCaps.length}` })
+    { action: 'member.capabilities_updated', organizationId: m.organization_id, details: `${staffDisplayName(m)} · caps=${finalCaps.length}` })
 }
 
 export async function requirePasswordReset(m, required = true) {
   await writeMember(m.id, { must_change_password: required },
-    { action: 'member.password_reset_required', organizationId: m.organization_id, details: `${m.staff_name || m.user_id} → ${required ? 'must change' : 'cleared'}` })
+    { action: 'member.password_reset_required', organizationId: m.organization_id, details: `${staffDisplayName(m)} → ${required ? 'must change' : 'cleared'}` })
 }
 
 // Rename a staff member. The name is what every clinical record, report and
@@ -165,7 +165,7 @@ export async function updateMemberName(m, name) {
   if (clean.length > 80) throw new Error('Staff name is too long (80 characters max)')
   if (clean === String(m.staff_name || '').trim()) return
   await writeMember(m.id, { staff_name: clean },
-    { action: 'member.name_updated', organizationId: m.organization_id, details: `${m.staff_name || m.user_id || '—'} → ${clean}` })
+    { action: 'member.name_updated', organizationId: m.organization_id, details: `${staffDisplayName(m)} → ${clean}` })
   rememberStaffName({ userId: m.user_id, email: m.email, name: clean })
   // Renaming yourself must be visible in the shell without a reload.
   if (m.user_id === auth.currentUser?.uid) {
@@ -297,7 +297,7 @@ export async function setDeviceStatus(dev, status) {
   await logAudit({
     action: status === 'revoked' ? 'device.revoked' : 'device.reactivated',
     organizationId: dev.organization_id,
-    details: `${dev.device_name || dev.id} · ${staffNameForId(dev.user_id) || dev.user_name || dev.user_email || dev.user_id}`,
+    details: `${dev.device_name || dev.id} · ${staffDisplayName({ user_id: dev.user_id, user_name: dev.user_name, email: dev.user_email })}`,
   })
 }
 
