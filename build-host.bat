@@ -39,24 +39,8 @@ echo   Destination:   release\
 echo ============================================================
 echo.
 
-:: Speech runtime assets are mandatory for Host installers. This step builds
-:: the pinned CPU worker, verifies the model and FFmpeg, and writes hashes.
-echo [1/4] Preparing and validating offline speech assets...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%cd%\scripts\build-whisper-worker.ps1"
-if %errorlevel% neq 0 (
-    echo [ERROR] Speech assets could not be built or verified. No installer was created.
-    pause
-    exit /b 1
-)
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%cd%\scripts\verify-speech-assets.ps1"
-if %errorlevel% neq 0 (
-    echo [ERROR] Speech asset verification failed. No installer was created.
-    pause
-    exit /b 1
-)
-
 :: Stamp build version and timestamp
-echo [2/4] Stamping build version...
+echo [1/3] Stamping build version...
 call node scripts/stamp-build.mjs
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to stamp build version.
@@ -66,7 +50,7 @@ if %errorlevel% neq 0 (
 
 :: Build Host Installer
 echo.
-echo [3/4] Building Web App and packaging Host Executable...
+echo [2/3] Building Web App and packaging Host Executable...
 echo       Running: npm run dist:host
 echo.
 call npm run dist:host
@@ -82,7 +66,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo ============================================================
-echo [4/4] BUILD COMPLETE AND SUCCESSFUL!
+echo [3/3] BUILD COMPLETE AND SUCCESSFUL!
 echo ============================================================
 echo.
 echo The installer executable is located at:
@@ -96,9 +80,9 @@ echo   3. On first launch, follow the 3-step wizard:
 echo        - Choose the Firebase service-account.json key
 echo        - Click 'Open firewall...' (allows port 8787 on Private LAN)
 echo        - Click 'Finish setup'
-echo   4. The Host PC will display its LAN address (e.g. http://192.168.1.50:8787).
-echo   5. All other PCs in the hospital simply open Chrome/Edge and go to:
-echo        http://^<HOST_IP^>:8787
+echo   4. Configure the approved Deepgram regional endpoint and key on the Host PC.
+echo   5. The Host will display the secure HTTPS address used for transcription.
+echo   6. Other PCs open the hospital Host address in Chrome or Edge.
 echo ============================================================
 echo.
 pause

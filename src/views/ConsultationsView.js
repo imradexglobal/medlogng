@@ -1623,13 +1623,13 @@ wireKebabs(tbl, async (rowId, action) => {
   if (caps.canEdit) {
     SOAP_FIELDS.forEach(({ key }) => {
       const field = document.getElementById('enc-soap-' + key)
-      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg, getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: (text) => {
+      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: (text) => {
         if (aiTranscript) { aiTranscript.value = text; document.getElementById('clinicalAiPanel')?.scrollIntoView({ block: 'nearest' }) }
       } }))
     })
     const planSpeechField = document.getElementById('planEditor')
     if (planSpeechField) {
-      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg, getEncounterId: () => selectedEncounter?.id || '' })
+      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '' })
       const speechControl = planSpeechField.nextElementSibling
       const speechSlot = document.getElementById('planSpeechSlot')
       if (speechControl && speechSlot) {

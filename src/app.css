@@ -257,12 +257,12 @@
 .soap-note-field:has(.speech-review:not([hidden])) .speech-control { grid-column: 2 / 4; grid-row: 2; }
 .speech-control { min-width: 0; margin-top: 4px; color: var(--emr-muted); }
 .speech-control-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-.speech-record, .speech-cancel, .speech-retry { min-height: 30px; padding: 4px 9px; border: 1px solid #cbd5e1; border-radius: 7px; background: #f8fafc; color: #1e3a5f; font: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
+.speech-record, .speech-cancel, .speech-transcribe { min-height: 30px; padding: 4px 9px; border: 1px solid #cbd5e1; border-radius: 7px; background: #f8fafc; color: #1e3a5f; font: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
+.speech-transcribe { color: #1d4ed8; }
 .speech-record { display: inline-flex; align-items: center; gap: 5px; }
-.speech-record:hover, .speech-cancel:hover { background: #eff6ff; border-color: #93c5fd; }
-.speech-record:focus-visible, .speech-cancel:focus-visible, .speech-retry:focus-visible, .speech-review-actions button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.speech-record:hover, .speech-cancel:hover, .speech-transcribe:hover { background: #eff6ff; border-color: #93c5fd; }
+.speech-record:focus-visible, .speech-cancel:focus-visible, .speech-transcribe:focus-visible, .speech-review-actions button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .speech-record.is-recording { background: #fff1f2; color: #b91c1c; border-color: #fda4af; }
-.speech-retry { color: #1d4ed8; }
 .speech-record.is-recording > span:first-child { animation: speech-pulse 1.2s ease-in-out infinite; }
 .speech-status { min-width: 0; overflow-wrap: anywhere; font-size: .76rem; }
 .speech-status[data-kind="error"] { color: #b91c1c; }

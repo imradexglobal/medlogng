@@ -3,179 +3,77 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { X509Certificate, generateKeyPairSync, createHash, sign } from 'node:crypto'
+import { X509Certificate } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { startHub } from '../../hub/server.js'
-import { speechProofPayload } from '../../hub/speech/sessions.js'
 
-const root = await mkdtemp(join(process.cwd(), '.tmp-speech-listeners-'))
+const root = await mkdtemp(join(tmpdir(), 'medilog-speech-listeners-'))
 const pfxPath = join(root, 'test-cert.pfx')
 const caPath = join(root, 'test-cert.cer')
 const certScript = join(process.cwd(), 'scripts', 'test', 'create-speech-test-certificate.ps1')
-const powershell = process.env.POWERSHELL_EXECUTABLE || 'pwsh.exe'
-const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', certScript, '-OutputPath', pfxPath, '-CertificatePath', caPath]
-let certResult = spawnSync(powershell, args, { encoding: 'utf8' })
-if (certResult.error?.code === 'ENOENT') {
-  certResult = spawnSync(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), args, { encoding: 'utf8' })
-}
-assert.equal(certResult.status, 0, 'could not create temporary HTTPS test certificate: ' + (certResult.stderr || certResult.stdout))
+let created = spawnSync('pwsh.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', certScript, '-OutputPath', pfxPath, '-CertificatePath', caPath], { encoding: 'utf8' })
+if (created.error?.code === 'ENOENT') created = spawnSync(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', certScript, '-OutputPath', pfxPath, '-CertificatePath', caPath], { encoding: 'utf8' })
+assert.equal(created.status, 0, 'could not create temporary HTTPS certificate: ' + (created.stderr || created.stdout))
 const testCa = new X509Certificate(await readFile(caPath)).toString()
 
-function makeWav() {
-  const pcm = Buffer.alloc(8000)
-  const data = Buffer.alloc(44 + pcm.length)
-  data.write('RIFF'); data.writeUInt32LE(data.length - 8, 4); data.write('WAVE', 8)
-  data.write('fmt ', 12); data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20)
-  data.writeUInt16LE(1, 22); data.writeUInt32LE(16000, 24); data.writeUInt32LE(32000, 28)
-  data.writeUInt16LE(2, 32); data.writeUInt16LE(16, 34); data.write('data', 36)
-  data.writeUInt32LE(pcm.length, 40); pcm.copy(data, 44)
-  return data
-}
-
+function audio() { const b = Buffer.alloc(1024); b.write('RIFF'); b.write('WAVE', 8); return b }
 const request = (secure, port, path, { method = 'GET', body = null, headers = {} } = {}) => new Promise((resolve, reject) => {
   const requester = secure ? httpsRequest : httpRequest
   const req = requester({ host: '127.0.0.1', port, path, method, headers, ...(secure ? { ca: testCa } : {}) }, (res) => {
-    const chunks = []
-    res.on('data', (chunk) => chunks.push(chunk))
-    res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }))
+    const chunks = []; res.on('data', (chunk) => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }))
   })
-  req.once('error', reject)
-  if (body) req.write(body)
-  req.end()
+  req.once('error', reject); if (body) req.write(body); req.end()
 })
 
-const keyPair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
-const publicKey = keyPair.publicKey.export({ format: 'jwk' })
-let deviceId = ''
-function signedHeaders(method, path, body = null, contentType = '', requestId = '', extra = {}) {
-  const timestamp = String(Date.now())
-  const nonce = cryptoNonce()
-  const bodyHash = createHash('sha256').update(body || Buffer.alloc(0)).digest('hex')
-  const payload = speechProofPayload({ method, url: path, requestId, contentType, bodyHash, timestamp, nonce })
-  const signature = sign('sha256', Buffer.from(payload), { key: keyPair.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')
-  return { 'x-medilog-client': 'medilogng-web', 'x-speech-device': deviceId, 'x-speech-timestamp': timestamp,
-    'x-speech-nonce': nonce, 'x-speech-signature': signature, 'x-speech-body-sha256': bodyHash,
-    ...(contentType ? { 'content-type': contentType } : {}), ...(requestId ? { 'x-speech-request-id': requestId } : {}), ...extra }
+let providerCalls = 0
+const audit = []
+const db = {
+  doc: () => ({ get: async () => ({ exists: false }) }),
+  collection(name) {
+    if (name === 'encounters') return { doc: () => ({ get: async () => ({ exists: true, data: () => ({ organization_id: 'hospital-1', patient_id: 'patient-1' }) }) }) }
+    if (name === 'audit_events') return { add: async (record) => { audit.push(record) } }
+    throw new Error('Unexpected collection ' + name)
+  },
 }
-function cryptoNonce() { return randomNonce() }
-function randomNonce() { return Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(18))).toString('base64url') }
-
-const log = { info() {}, warn() {}, error() {} }
+const authenticator = {
+  async verifyOnline(req) { if (req.headers.authorization !== 'Bearer valid-live-id-token-for-clinician') throw Object.assign(new Error('invalid token'), { status: 401, expose: true }); return { uid: 'clinician-1' } },
+  async authorize(_identity, _orgId, capability) { if (capability !== 'encounter.edit') throw Error('unexpected capability'); return { membership: { status: 'active' } } },
+}
+const envBefore = { key: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT, enable: process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO }
+process.env.DEEPGRAM_API_KEY = 'test-only-not-a-real-key'
+process.env.DEEPGRAM_ENDPOINT = 'https://api.in.deepgram.com'
+process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO = 'true'
 let hub
 try {
-  const speechWorker = {
-    status: () => ({ ready: true }),
-    async transcribe({ id }) { return 'transcript-' + id },
-  }
-  let canEdit = true
-  const authenticator = {
-    async verify() { return { uid: 'test-clinician', email: 'test@example.test' } },
-    async verifyOnline() { return { uid: 'test-clinician', email: 'test@example.test' } },
-    async authorizeSpeech(identity, orgId, capability) {
-      if (!canEdit) throw Object.assign(new Error('permission revoked'), { status: 403, expose: true })
-      return { uid: identity.uid, orgId, capability, membership: { status: 'active', capabilities: ['encounter.edit'] }, authorizationSource: 'firestore' }
+  hub = await startHub({ host: '127.0.0.1', port: 0, httpsPort: 0, tls: { pfx: await readFile(pfxPath) }, allowedOrigins: ['https://medlogng.web.app'],
+    queueFile: join(root, 'outbox.json'), foundation: { db, auth: {} }, authenticator, log: { info() {}, warn() {}, error() {} },
+    speechProvider: async ({ audio: bytes, contentType, apiKey, endpoint }) => {
+      providerCalls++; assert.equal(bytes.length, 1024); assert.equal(contentType, 'audio/wav'); assert.match(apiKey, /^test-only/); assert.equal(endpoint, 'https://api.in.deepgram.com')
+      return { text: 'Synthetic online transcription.', model: 'nova-3-medical' }
     },
-    async authorize(identity, orgId) {
-      if (!canEdit) throw Object.assign(new Error('membership revoked'), { status: 403, expose: true })
-      return { uid: identity.uid, orgId, membership: { status: 'active', capabilities: ['encounter.edit'] } }
-    },
-  }
-  let encryptedSessionState = '[]'
-  hub = await startHub({
-    host: '127.0.0.1', port: 0, httpsPort: 0,
-    tls: { pfx: await readFile(pfxPath) },
-    speechWorker,
-    speechDir: join(root, 'speech'),
-    speechGetFreeMemory: () => 2 * 1024 ** 3,
-    queueFile: join(root, 'outbox.json'),
-    foundation: { db: null, auth: null },
-    authenticator,
-    loadSpeechSessions: async () => encryptedSessionState,
-    saveSpeechSessions: async (value) => { encryptedSessionState = value },
-    log,
+    auditSpeech: async (record) => audit.push(record),
   })
-  assert.ok(hub.httpsPort > 0, 'HTTPS listener did not start')
-  assert.ok(hub.speechJobs, 'speech job service was not created')
-  assert.equal(hub.speechJobs.status().ready, true)
-
-  const refusedHttpEnrollment = await request(false, hub.port, '/device/session/register?orgId=test-hospital', {
-    method: 'POST', body: Buffer.from(JSON.stringify({ publicKey })),
-    headers: { authorization: 'Bearer test-id-token-at-least-twenty-chars', 'content-type': 'application/json', 'x-medilog-client': 'medilogng-web' },
-  })
-  assert.equal(refusedHttpEnrollment.status, 403, 'device session enrollment must never send or accept credentials over HTTP')
-
-  const registered = await request(true, hub.httpsPort, '/speech/session?orgId=test-hospital', {
-    method: 'POST', body: Buffer.from(JSON.stringify({ publicKey })),
-    headers: { authorization: 'Bearer test-id-token-at-least-twenty-chars', 'content-type': 'application/json', 'x-medilog-client': 'medilogng-web' },
-  })
-  assert.equal(registered.status, 200, 'live verified clinician may register a local speech session')
-  deviceId = JSON.parse(registered.body.toString('utf8')).session.deviceId
-  const deviceRegistration = await request(true, hub.httpsPort, '/device/session/register?orgId=test-hospital', {
-    method: 'POST', body: Buffer.from(JSON.stringify({ publicKey })),
-    headers: { authorization: 'Bearer test-id-token-at-least-twenty-chars', 'content-type': 'application/json',
-      'x-medilog-client': 'medilogng-web', 'x-speech-device': deviceId },
-  })
-  assert.equal(deviceRegistration.status, 200, 'live handoff device session may register over HTTPS')
-  const offlinePath = '/speech/session/offline?orgId=test-hospital'
-  const offlineBootstrap = await request(true, hub.httpsPort, offlinePath, { method: 'POST', headers: signedHeaders('POST', offlinePath) })
-  assert.equal(offlineBootstrap.status, 200, 'device can restore only its Host-verified offline identity')
-  const deviceOfflinePath = '/device/session/offline?orgId=test-hospital'
-  const deviceOffline = await request(true, hub.httpsPort, deviceOfflinePath, { method: 'POST', headers: signedHeaders('POST', deviceOfflinePath) })
-  assert.equal(deviceOffline.status, 200, 'handoff session restores its Host-verified membership')
-
-  const httpHealth = await request(false, hub.port, '/health')
-  assert.equal(httpHealth.status, 200, 'existing HTTP health connection should remain available')
-
-  const body = makeWav()
-  const uploadPath = '/speech/jobs?orgId=test-hospital&encounterId=encounter-1'
-  const headers = { ...signedHeaders('POST', uploadPath, body, 'audio/wav', 'listener-test-request-01'), 'content-length': String(body.length) }
-  const blockedHttp = await request(false, hub.port, '/speech/jobs?orgId=test-hospital&encounterId=encounter-1', {
-    method: 'POST', body, headers,
-  })
-  assert.equal(blockedHttp.status, 403, 'transcription upload over HTTP must be rejected')
-
-  const acceptedHttpsResponses = await Promise.all([1, 2].map(() => request(true, hub.httpsPort, uploadPath, {
-    method: 'POST', body, headers: { ...signedHeaders('POST', uploadPath, body, 'audio/wav', 'listener-test-request-01'), 'content-length': String(body.length) },
-  })))
-  assert.ok(acceptedHttpsResponses.every((response) => [200, 202].includes(response.status)), 'HTTPS listener should accept a recording and its retry')
-  const acceptedBodies = acceptedHttpsResponses.map((response) => JSON.parse(response.body.toString('utf8')))
-  assert.equal(acceptedBodies[0].job.id, acceptedBodies[1].job.id, 'simultaneous retries with the same request id must share a job')
-  const acceptedBody = acceptedBodies[0]
-  const id = acceptedBody.job.id
-  assert.ok(id)
-
-  const result = await new Promise(async (resolve, reject) => {
-    const until = Date.now() + 5000
-    while (Date.now() < until) {
-      try {
-        const jobPath = '/speech/jobs/' + id + '?orgId=test-hospital'
-        const response = await request(true, hub.httpsPort, jobPath, { headers: signedHeaders('GET', jobPath) })
-        const body = JSON.parse(response.body.toString('utf8'))
-        if (body.job?.status === 'complete') return resolve(body.job)
-      } catch (error) { return reject(error) }
-      await new Promise((wait) => setTimeout(wait, 25))
-    }
-    reject(new Error('HTTPS job did not complete'))
-  })
-  assert.equal(result.text, 'transcript-' + id)
-  const blockedPath = '/speech/jobs/' + id + '?orgId=test-hospital'
-  const blockedHttpResult = await request(false, hub.port, blockedPath, {
-    headers: signedHeaders('GET', blockedPath),
-  })
-  assert.equal(blockedHttpResult.status, 403, 'transcription results must not be readable over HTTP')
-  assert.equal(hub.speechJobs.status().ready, true, 'both listeners should share the same initialized job service')
-
-  canEdit = false
-  const revalidatePath = '/device/session/revalidate?orgId=test-hospital'
-  const deniedRevalidation = await request(true, hub.httpsPort, revalidatePath, { method: 'POST', headers: signedHeaders(
-    'POST', revalidatePath, null, '', '', { authorization: 'Bearer test-id-token-at-least-twenty-chars' }) })
-  assert.equal(deniedRevalidation.status, 403, 'revoked online membership invalidates the local session')
-  const afterRevocation = await request(true, hub.httpsPort, blockedPath, { headers: signedHeaders('GET', blockedPath) })
-  assert.equal(afterRevocation.status, 401, 'subsequent job requests are denied after revocation')
-
-  console.log('HTTP compatibility, HTTPS device registration, offline bootstrap, signed transcription, duplicate protection, revocation and HTTP rejection checks passed.')
+  const q = '?orgId=hospital-1&patientId=patient-1&encounterId=encounter-1'
+  const headers = { 'content-type': 'audio/wav', authorization: 'Bearer valid-live-id-token-for-clinician', 'x-medilog-client': 'medilogng-web',
+    'x-speech-request-id': 'request-synthetic-0001', origin: 'https://medlogng.web.app' }
+  const rejectedHttp = await request(false, hub.port, '/speech/transcribe' + q, { method: 'POST', body: audio(), headers })
+  assert.equal(rejectedHttp.status, 403, 'HTTP listener must never accept microphone recordings')
+  assert.equal(providerCalls, 0)
+  const result = await request(true, hub.httpsPort, '/speech/transcribe' + q, { method: 'POST', body: audio(), headers })
+  assert.equal(result.status, 200)
+  assert.equal(JSON.parse(result.body.toString()).text, 'Synthetic online transcription.')
+  assert.equal(providerCalls, 1)
+  assert.equal(audit.some((row) => row.actor_user_id === 'clinician-1' && row.patient_id === 'patient-1' && row.record_id === 'encounter-1'), true)
+  const oldQueue = await request(true, hub.httpsPort, '/speech/jobs/00000000-0000-4000-8000-000000000000?orgId=hospital-1', { headers })
+  assert.equal(oldQueue.status, 404, 'obsolete local worker job endpoint must be removed')
+  const oldSession = await request(true, hub.httpsPort, '/speech/session?orgId=hospital-1', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: Buffer.from('{}') })
+  assert.equal(oldSession.status, 404, 'offline-only speech session endpoint must be removed')
 } finally {
   if (hub) await hub.close()
+  if (envBefore.key === undefined) delete process.env.DEEPGRAM_API_KEY; else process.env.DEEPGRAM_API_KEY = envBefore.key
+  if (envBefore.endpoint === undefined) delete process.env.DEEPGRAM_ENDPOINT; else process.env.DEEPGRAM_ENDPOINT = envBefore.endpoint
+  if (envBefore.enable === undefined) delete process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO; else process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO = envBefore.enable
   await rm(root, { recursive: true, force: true })
 }
+console.log('Host HTTPS-only online transcription, live auth, encounter binding, audit and legacy endpoint removal passed')

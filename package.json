@@ -1,6 +1,6 @@
 {
   "name": "medilogng",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "main": "electron/main.js",
   "author": "Imradex Global",
@@ -9,14 +9,13 @@
     "smoke": "node scripts/smoke.mjs",
     "test:services": "node scripts/test/pharmacy.service.test.mjs && node scripts/test/requests.test.mjs && node scripts/test/administration.test.mjs && node scripts/test/lab.imaging.test.mjs && node scripts/test/lab.lims.test.mjs && node scripts/test/delete.service.test.mjs && node scripts/test/billing.print.test.mjs && node scripts/test/firestore.rules.test.mjs && node scripts/test/admission.session.test.mjs",
     "test:e2e": "playwright test e2e/onboarding.spec.js",
-    "test": "node scripts/smoke.mjs && npm run test:services && npm run test:clinical-drafts && npm run test:clinical-ai",
+    "test": "node scripts/smoke.mjs && npm run test:services && npm run test:clinical-drafts && npm run test:clinical-ai && npm run test:speech && npm --prefix functions test",
     "test:clinical-drafts": "node scripts/test/clinical-drafts.test.mjs",
     "test:clinical-ai": "node scripts/test/clinical-ai.local.test.mjs",
     "test:clinical-ai:emulator": "node scripts/test/run-clinical-ai-emulator.mjs",
     "test:hub": "node scripts/test/hub.smoke.mjs",
-    "test:speech": "node scripts/test/speech.worker.test.mjs && node scripts/test/speech.jobs.test.mjs && node scripts/test/speech.sessions.test.mjs && node scripts/test/speech.assets.test.mjs && node scripts/test/speech.transport.test.mjs",
+    "test:speech": "node scripts/test/speech.provider.test.mjs && node scripts/test/speech.sessions.test.mjs && node scripts/test/speech.transport.test.mjs && node scripts/test/speech.listeners.test.mjs",
     "test:speech:listeners": "node scripts/test/speech.listeners.test.mjs",
-    "test:speech:real": "node scripts/test/speech.real-worker.mjs",
     "hub": "node hub/server.js",
     "dev": "vite --port 5174",
     "build": "vite build",
@@ -27,11 +26,9 @@
     "electron:host": "npm run build && node scripts/start-host.mjs",
     "electron:test": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --publish never",
-    "speech:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-whisper-worker.ps1",
-    "speech:verify": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-speech-assets.ps1",
-    "dist:host": "npm run speech:verify && npm run build && electron-builder --win --config electron-builder.host.yml --publish never",
+    "dist:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish never",
     "publish:desktop": "npm run build && electron-builder --win --publish always",
-    "publish:host": "npm run speech:verify && npm run build && electron-builder --win --config electron-builder.host.yml --publish always"
+    "publish:host": "npm run build && electron-builder --win --config electron-builder.host.yml --publish always"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.1",

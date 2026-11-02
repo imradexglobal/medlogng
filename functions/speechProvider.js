@@ -1,6 +1,16 @@
 const ALLOWED_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/flac',
 ])
+const DEEPGRAM_HOSTS = new Set(['api.deepgram.com', 'api.in.deepgram.com', 'api.eu.deepgram.com', 'api.au.deepgram.com'])
+
+function providerOrigin(value) {
+  let url
+  try { url = new URL(value) } catch { throw Object.assign(new Error('A valid Deepgram regional endpoint is required.'), { code: 'failed-precondition' }) }
+  if (url.protocol !== 'https:' || !DEEPGRAM_HOSTS.has(url.hostname.toLowerCase()) || url.port || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) {
+    throw Object.assign(new Error('The speech provider endpoint must be an approved HTTPS Deepgram endpoint.'), { code: 'failed-precondition' })
+  }
+  return url.origin
+}
 
 export function validateSpeechAudio(audio, contentType) {
   if (!Buffer.isBuffer(audio) || audio.length < 1024 || audio.length > 25 * 1024 * 1024) {
@@ -20,7 +30,8 @@ export function validateSpeechAudio(audio, contentType) {
 export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpoint, fetchImpl = fetch }) {
   const type = validateSpeechAudio(audio, contentType)
   if (!apiKey || !endpoint) throw Object.assign(new Error('Online speech provider is not configured.'), { code: 'failed-precondition' })
-  const url = new URL('/v1/listen', endpoint)
+  const origin = providerOrigin(endpoint)
+  const url = new URL('/v1/listen', origin)
   url.searchParams.set('model', 'nova-3-medical')
   url.searchParams.set('language', 'en')
   url.searchParams.set('smart_format', 'true')
@@ -34,6 +45,7 @@ export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpo
       method: 'POST',
       headers: { Authorization: 'Token ' + apiKey, 'Content-Type': type },
       body: audio,
+      redirect: 'error',
       signal: controller.signal,
     })
     if (!response.ok) throw Object.assign(new Error('Online transcription provider rejected the recording.'), { code: 'unavailable', providerStatus: response.status })
@@ -49,11 +61,13 @@ export async function transcribeWithDeepgram({ audio, contentType, apiKey, endpo
 
 export async function checkDeepgram({ apiKey, endpoint, fetchImpl = fetch }) {
   if (!apiKey || !endpoint) return false
+  let origin
+  try { origin = providerOrigin(endpoint) } catch { return false }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 5000)
   try {
-    const response = await fetchImpl(new URL('/v1/projects', endpoint), {
-      headers: { Authorization: 'Token ' + apiKey }, signal: controller.signal,
+    const response = await fetchImpl(new URL('/v1/projects', origin), {
+      headers: { Authorization: 'Token ' + apiKey }, signal: controller.signal, redirect: 'error',
     })
     return response.ok
   } catch { return false } finally { clearTimeout(timer) }

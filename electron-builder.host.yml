@@ -21,22 +21,6 @@ directories:
 
 asar: true
 
-# `build-host.bat` builds and verifies these required assets before invoking
-# electron-builder. Missing assets or hash mismatches stop the installer build.
-extraResources:
-  - from: vendor/speech
-    to: speech
-    filter:
-      - medilog-whisper-worker.exe
-      - ggml-tiny.en-q5_1.bin
-      - ffmpeg.exe
-      - speech-assets.json
-      - LICENSE-whisper.cpp.txt
-      - COPYING.LGPLv2.1
-      - ffmpeg-9.0.2.tar.xz
-      - ffmpeg-9.0.2.tar.xz.asc
-      - ffmpeg-devel.asc
-
 # The hub (ESM), the pure rules it imports, the web app, and node_modules must
 # live on real disk inside the install so Node's native ESM module loader and
 # the static file server reach them reliably without failing on ASAR virtual paths.
@@ -45,6 +29,7 @@ asarUnpack:
   - dist/**/*
   - public/**/*
   - src/features/pharmacy/requests.js
+  - functions/speechProvider.js
   - node_modules/**/*
   - package.json
 
@@ -53,6 +38,7 @@ files:
   - public/**/*
   - electron/**/*
   - hub/**/*
+  - functions/speechProvider.js
   # Never package developer or imported Firebase credentials/environment.
   - '!hub/keys/**'
   - '!**/service-account.json'

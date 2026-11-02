@@ -381,6 +381,12 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
         chunks.push(chunk)
       }
       const audio = Buffer.concat(chunks)
+      const submittedAt = new Date()
+      await db.collection('audit_events').add({ action: 'speech.transcription-submit', actor_user_id: identity.uid,
+        organization_id: orgId, patient_id: patientId, record_id: encounterId, request_id: requestId,
+        model: 'nova-3-medical', source: 'host-deepgram-stt', occurredAt: submittedAt })
+      await auditSpeech({ action: 'speech.transcription-submit', uid: identity.uid, orgId, patientId, encounterId, requestId,
+        model: 'nova-3-medical', at: submittedAt.toISOString() })
       const result = await speechProvider({ audio, contentType, apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT })
       const record = { action: 'speech.transcription-complete', uid: identity.uid, orgId, patientId, encounterId, requestId, model: result.model, at: new Date().toISOString() }
       await db.collection('audit_events').add({ action: record.action, actor_user_id: identity.uid, organization_id: orgId,
@@ -649,45 +655,6 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       speech: { enabled: process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true' && !!process.env.DEEPGRAM_API_KEY && !!process.env.DEEPGRAM_ENDPOINT },
       servesApp: !!staticDir,
     })
-  }
-
-  async function authorizeSpeech(req, res, orgId) {
-    const origin = checkOrigin(req, cfg)
-    if (!origin.ok) {
-      json(res, 403, { ok: false, error: 'This browser origin is not allowed to use this hub.' })
-      return null
-    }
-    if (String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
-      json(res, 400, { ok: false, error: 'Missing ' + CLIENT_HEADER + ' header.' })
-      return null
-    }
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    const pollRequest = req.method === 'GET'
-    if (!rateLimit('speech-ip:' + ip, pollRequest ? 120 : 30).ok) {
-      json(res, 429, { ok: false, error: 'Too many speech requests from this device. Wait and retry.' })
-      return null
-    }
-    let identity
-    try { identity = await authenticator.verify(req) }
-    catch (error) {
-      json(res, error?.expose ? error.status || 401 : 503,
-        { ok: false, error: error?.expose ? error.message : 'Authentication is temporarily unavailable.' })
-      return null
-    }
-    if (!rateLimit('speech-uid:' + identity.uid, pollRequest ? 120 : 30).ok) {
-      json(res, 429, { ok: false, error: 'Too many speech requests for this account. Wait and retry.' })
-      return null
-    }
-    try {
-      if (typeof authenticator.authorizeSpeech === 'function') await authenticator.authorizeSpeech(identity, orgId, 'encounter.edit')
-      else await authenticator.authorize(identity, orgId, 'encounter.edit')
-    }
-    catch (error) {
-      json(res, error?.expose ? error.status || 403 : 503,
-        { ok: false, error: error?.expose ? error.message : 'Authorisation is temporarily unavailable.' })
-      return null
-    }
-    return identity
   }
 
   // Online verified enrollment for a local device key. The Host retains only
