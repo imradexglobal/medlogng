@@ -38,6 +38,13 @@ signature validates against FFmpeg's pinned release key, and
 It also checks that the executable's reported version, license and configure
 flags match that record, and rejects GPL/nonfree flags.
 
+For medical-language accuracy work, follow
+[`ACCURACY-EVALUATION.md`](./ACCURACY-EVALUATION.md) and use its blank
+[`accuracy-results-template.csv`](./accuracy-results-template.csv). No
+clinical or Nigerian-accent accuracy claim should be made until consented,
+de-identified samples with adjudicated reference transcripts have been tested.
+Yoruba/code-switching results must remain separate from the English-only model.
+
 For a Windows x64 build machine, install Visual Studio 2022 Build Tools with
 the Desktop C++ workload (MSVC v143 and a Windows SDK), CMake 3.20 or newer,
 and Git. For FFmpeg, install MSYS2 and use its UCRT64 shell. Install
