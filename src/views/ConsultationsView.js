@@ -496,41 +496,19 @@ function visibleEncounters() {
         '<td><strong>' + esc(m.name) + '</strong></td>' +
         '<td>' + dr + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
-        '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
+        '<td>' + kebabCell({ rowId: e.id, items: [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] }) + '</td></tr>'
     }).join('')
     tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
-    tbl.querySelectorAll('tr.clickable').forEach((r) => {
-      r.onclick = () => {
-        noteDirty = false
-        planDirty = false
-        savedPlanRange = null
-        selectedEncounter = encounters.find((e) => e.id === r.dataset.id) || null
-        renderQueue()
-        renderWorkspace()
-        announceStatusChange('Encounter selected: ' + (selectedEncounter ? patientMeta(selectedEncounter).name : 'none'))
-      }
-      r.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          noteDirty = false
-          planDirty = false
-          savedPlanRange = null
-          selectedEncounter = encounters.find((e) => e.id === r.dataset.id) || null
-          renderQueue()
-          renderWorkspace()
-          announceStatusChange('Encounter selected: ' + (selectedEncounter ? patientMeta(selectedEncounter).name : 'none'))
-          // Return focus to the clicked row for continued keyboard navigation
-          r.focus()
+    // Wire kebab menus for queue rows (matching PatientsView pattern)
+    wireKebabs(tbl, async (rowId, action) => {
+      const enc = encounters.find((e) => e.id === rowId)
+      if (!enc) return
+      if (action === 'delete') {
+        if (window.confirm('Delete this encounter?')) {
+          toast('Delete not yet implemented')
         }
-      })
-      // Add menu button to each row (3 dots like other tables)
-      const menuBtn = document.createElement('button')
-      menuBtn.className = 'btn ghost sm'
-      menuBtn.type = 'button'
-      menuBtn.innerHTML = '⋯'
-      menuBtn.title = 'Encounter options'
-      r.querySelectorAll('td')[3].appendChild(menuBtn)
+      }
     })
     ensureVisibleMeta()
   }
