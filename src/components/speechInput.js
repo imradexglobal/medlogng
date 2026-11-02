@@ -33,6 +33,7 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
     '<div class="speech-control-row">' +
       '<button type="button" class="speech-record" aria-label="Record speech" title="Record locally"><svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"></path></svg><span class="speech-record-label">Record</span></button>' +
       '<button type="button" class="speech-transcribe" hidden>Transcribe recording</button>' +
+      '<select class="speech-pending-select" aria-label="Choose a saved recording" hidden></select>' +
       '<span class="speech-status" role="status" aria-live="polite"></span>' +
       '<button type="button" class="speech-cancel" hidden>Cancel</button>' +
     '</div>' +
@@ -51,6 +52,7 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
   const recordButton = widget.querySelector('.speech-record')
   const recordLabel = widget.querySelector('.speech-record-label')
   const transcribeButton = widget.querySelector('.speech-transcribe')
+  const pendingSelect = widget.querySelector('.speech-pending-select')
   const cancelButton = widget.querySelector('.speech-cancel')
   const status = widget.querySelector('.speech-status')
   const review = widget.querySelector('.speech-review')
@@ -62,9 +64,22 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
   let stream = null, recorder = null, chunks = [], recording = false, destroyed = false
   let pendingId = '', pendingBlob = null, pendingPersistent = false, backend = null, uploadAbort = null, savedPoint = null, startedAt = 0, elapsedTimer = null, healthTimer = null
   let captureBinding = null, captureUid = ''
+  let pendingRecords = []
+  const pendingBlobs = new Map()
 
   const binding = () => ({ orgId: String(getOrgId?.() || ''), patientId: String(getPatientId?.() || ''), encounterId: String(getEncounterId?.() || '') })
   const setStatus = (text, kind = '') => { status.textContent = text; status.dataset.kind = kind }
+  function renderPendingOptions() {
+    pendingSelect.replaceChildren()
+    for (const row of pendingRecords) {
+      const option = document.createElement('option')
+      option.value = row.id
+      option.textContent = 'Recording · ' + new Date(row.createdAt).toLocaleString()
+      pendingSelect.append(option)
+    }
+    pendingSelect.hidden = pendingRecords.length < 2
+    if (pendingId && pendingRecords.some((row) => row.id === pendingId)) pendingSelect.value = pendingId
+  }
   const canRecord = () => !disabled && window.location.protocol === 'https:' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.MediaRecorder
   function refreshRecordControl() { recordButton.disabled = !recording && !canRecord(); recordButton.title = canRecord() ? 'Record on this device' : 'Microphone recording requires HTTPS and a supported browser.' }
   function stopTracks() { if (elapsedTimer) clearInterval(elapsedTimer); elapsedTimer = null; if (stream) stream.getTracks().forEach((track) => track.stop()); stream = null }
@@ -92,10 +107,16 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
       const { savePendingSpeech } = await import('../services/pendingSpeech.js')
       pendingBlob = blob
       pendingId = await savePendingSpeech(blob, { uid, ...ids })
+      pendingBlobs.set(pendingId, blob)
       pendingPersistent = true
+      pendingRecords = [{ id: pendingId, createdAt: Date.now() }, ...pendingRecords.filter((row) => row.id !== pendingId)]
+      renderPendingOptions()
       await refreshBackend()
     } catch (error) {
       pendingId = 'memory-only'; pendingPersistent = false
+      pendingBlobs.set(pendingId, blob)
+      pendingRecords = [{ id: pendingId, createdAt: Date.now() }, ...pendingRecords.filter((row) => row.id !== pendingId)]
+      renderPendingOptions()
       setStatus((error?.message || 'Secure local storage is unavailable.') + ' The recording remains in this open consultation; keep the page open.', 'warning')
       await refreshBackend()
     }
@@ -155,8 +176,11 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
       const result = await transcribeRecording({ backend, blob, signal: uploadAbort.signal, ...ids })
       transcript.value = result.text; review.hidden = false; transcript.focus()
       if (pendingPersistent) await deletePendingSpeech(pendingId, auth.currentUser.uid)
-      pendingId = ''; pendingBlob = null; pendingPersistent = false; transcribeButton.hidden = true; cancelButton.hidden = true
-      setStatus('Transcript ready — review before inserting. (' + result.model + ')', 'success')
+      pendingBlobs.delete(pendingId)
+      pendingRecords = pendingRecords.filter((row) => row.id !== pendingId)
+      pendingId = pendingRecords[0]?.id || ''; pendingBlob = null; pendingPersistent = !!pendingId
+      renderPendingOptions(); transcribeButton.hidden = !(pendingId && backend); cancelButton.hidden = true
+      setStatus('Transcript ready — review before inserting. (' + result.model + ')' + (pendingId ? ' Another saved recording is ready.' : ''), 'success')
     } catch (error) {
       if (error?.name === 'AbortError') setStatus('Transcription cancelled. The encrypted recording remains on this device.', 'warning')
       else setStatus(error?.message || 'Transcription failed. The encrypted recording remains on this device.', 'error')
@@ -174,6 +198,11 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
 
   recordButton.onclick = () => recording ? stopRecording() : void startRecording()
   transcribeButton.onclick = () => void transcribe()
+  pendingSelect.onchange = () => {
+    pendingId = pendingSelect.value
+    pendingPersistent = pendingId !== 'memory-only'; pendingBlob = pendingBlobs.get(pendingId) || null
+    void refreshBackend()
+  }
   cancelButton.onclick = () => void cancelCurrent()
   insertButton.onclick = () => { applyText(field, transcript.value, 'insert', savedPoint); review.hidden = true; setStatus('Transcript inserted. Review and save the note when ready.', 'success') }
   appendButton.onclick = () => { applyText(field, transcript.value, 'append', savedPoint); review.hidden = true; setStatus('Transcript appended. Review and save the note when ready.', 'success') }
@@ -189,7 +218,7 @@ export function attachSpeechInput(field, { getOrgId, getPatientId, getEncounterI
       if (user && ids.orgId && ids.patientId && ids.encounterId) {
         const { findPendingSpeech } = await import('../services/pendingSpeech.js')
         const records = await findPendingSpeech({ uid: user.uid, ...ids })
-        if (records.length) { pendingId = records[0].id; pendingPersistent = true; setStatus('A saved recording is available. It will not be uploaded until you choose Transcribe recording.', 'warning') }
+        if (records.length) { pendingRecords = records; pendingId = records[0].id; pendingPersistent = true; renderPendingOptions(); setStatus('A saved recording is available. It will not be uploaded until you choose Transcribe recording.', 'warning') }
       }
     } catch { /* local encrypted storage may be disabled by the browser */ }
     await refreshBackend()

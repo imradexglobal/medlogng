@@ -255,10 +255,13 @@
 .soap-note-field .speech-status { position: absolute; top: calc(100% + 2px); right: 0; z-index: 3; width: max-content; max-width: min(50vw, 240px); padding: 2px 5px; border-radius: 4px; background: #fff; }
 .soap-note-field .speech-review { grid-column: 2 / 4; }
 .soap-note-field:has(.speech-review:not([hidden])) .speech-control { grid-column: 2 / 4; grid-row: 2; }
+.soap-note-field:has(.speech-transcribe:not([hidden])) .speech-control { grid-column: 2 / 4; grid-row: 2; }
+.soap-note-field:has(.speech-transcribe:not([hidden])) .speech-control-row { height: auto; min-height: 34px; justify-content: flex-start; flex-wrap: wrap; gap: 6px; }
 .speech-control { min-width: 0; margin-top: 4px; color: var(--emr-muted); }
 .speech-control-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
 .speech-record, .speech-cancel, .speech-transcribe { min-height: 30px; padding: 4px 9px; border: 1px solid #cbd5e1; border-radius: 7px; background: #f8fafc; color: #1e3a5f; font: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
 .speech-transcribe { color: #1d4ed8; }
+.speech-pending-select { max-width: 220px; min-height: 30px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #1e3a5f; font: inherit; font-size: .76rem; }
 .speech-record { display: inline-flex; align-items: center; gap: 5px; }
 .speech-record:hover, .speech-cancel:hover, .speech-transcribe:hover { background: #eff6ff; border-color: #93c5fd; }
 .speech-record:focus-visible, .speech-cancel:focus-visible, .speech-transcribe:focus-visible, .speech-review-actions button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
@@ -267,6 +270,7 @@
 .speech-status { min-width: 0; overflow-wrap: anywhere; font-size: .76rem; }
 .speech-status[data-kind="error"] { color: #b91c1c; }
 .speech-status[data-kind="success"] { color: #166534; }
+.speech-status[data-kind="warning"] { color: #92400e; }
 .speech-review { display: grid; gap: 6px; margin-top: 6px; padding: 8px; border-radius: 8px; background: #f1f6fb; }
 .speech-review-label { color: #334155; font-size: .76rem; font-weight: 650; }
 .speech-transcript.input { width: 100%; min-height: 64px; box-sizing: border-box; resize: vertical; font-size: .84rem; }
@@ -298,6 +302,7 @@
 .enc-plan-speech-slot .speech-status { position: absolute; top: 31px; left: 0; z-index: 6; width: max-content; max-width: 220px; padding: 2px 5px; border-radius: 4px; background: #fff; box-shadow: 0 1px 4px rgba(15,30,46,.12); }
 .enc-plan-speech-slot .speech-cancel { position: absolute; top: 31px; left: 0; z-index: 7; }
 .enc-plan-speech-slot .speech-review { position: absolute; top: 35px; left: 0; z-index: 6; width: min(420px, calc(100vw - 48px)); box-sizing: border-box; border: 1px solid var(--emr-line); box-shadow: 0 8px 24px rgba(15,30,46,.16); }
+.enc-plan-speech-slot .speech-transcribe, .enc-plan-speech-slot .speech-pending-select { position: absolute; top: 31px; left: 0; z-index: 7; width: max-content; max-width: min(75vw, 240px); }
 .enc-plan-state { max-width: 80px; overflow: hidden; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .enc-plan-expand { font-size: 1.1rem; }
 .enc-plan-save { flex: none; padding: 5px 10px; }
