@@ -1,0 +1,28 @@
+libavcodec/opus/enc.o: libavcodec/opus/enc.c libavcodec/opus/enc.h \
+ libavutil/intmath.h config.h libavutil/attributes.h \
+ libavutil/x86/intmath.h libavcodec/opus/opus.h libavfilter/bufferqueue.h \
+ libavfilter/avfilter.h libavutil/avutil.h libavutil/common.h \
+ libavutil/error.h libavutil/macros.h libavutil/avconfig.h \
+ libavutil/version.h libavutil/intmath.h libavutil/internal.h \
+ libavutil/libm.h libavutil/mathematics.h libavutil/rational.h \
+ libavutil/intfloat.h libavutil/log.h libavutil/pixfmt.h \
+ libavutil/buffer.h libavutil/dict.h libavutil/frame.h libavutil/avutil.h \
+ libavutil/buffer.h libavutil/channel_layout.h libavutil/dict.h \
+ libavutil/samplefmt.h libavutil/log.h libavutil/pixfmt.h \
+ libavutil/rational.h libavfilter/version_major.h libavutil/avassert.h \
+ libavcodec/opus/pvq.h libavutil/mem_internal.h libavcodec/opus/celt.h \
+ libavcodec/avcodec.h libavutil/samplefmt.h libavutil/attributes.h \
+ libavutil/channel_layout.h libavcodec/codec.h libavutil/hwcontext.h \
+ libavutil/frame.h libavcodec/codec_id.h libavcodec/codec_id.h \
+ libavcodec/defs.h libavcodec/packet.h libavutil/version.h \
+ libavcodec/version_major.h libavcodec/version_major.h \
+ libavcodec/opus/dsp.h libavcodec/opus/rc.h libavcodec/get_bits.h \
+ libavutil/common.h libavutil/intreadwrite.h libavutil/bswap.h \
+ libavutil/x86/bswap.h libavutil/x86/intreadwrite.h libavcodec/mathops.h \
+ libavutil/attributes_internal.h libavcodec/x86/mathops.h \
+ libavutil/x86/asm.h libavcodec/vlc.h libavutil/macros.h \
+ libavutil/float_dsp.h libavutil/libm.h libavutil/tx.h \
+ libavcodec/opus/enc_psy.h libavcodec/opus/enc_utils.h \
+ libavcodec/opus/tab.h libavutil/mem.h libavutil/opt.h \
+ libavcodec/audio_frame_queue.h libavcodec/avcodec.h \
+ libavcodec/bytestream.h libavcodec/codec_internal.h libavcodec/encode.h

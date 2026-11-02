@@ -493,7 +493,7 @@ function visibleEncounters() {
         : ''
       const dr = m.clinician ? '<span class="mut" title="Attending: ' + esc(m.clinician) + '">' + esc(m.clinician.slice(0, 12)) + '</span>' : ''
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '" role="button" aria-label="Encounter for ' + esc(m.name) + ', status: ' + encLabel(e.status) + '" tabindex="0">' +
-        '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
+        '<td><strong>' + esc(m.name) + '</strong></td>' +
         '<td>' + dr + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
         '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
@@ -524,12 +524,13 @@ function visibleEncounters() {
           r.focus()
         }
       })
-      // Add delete button to each row
-      const deleteBtn = document.createElement('button')
-      deleteBtn.className = 'btn ghost sm'
-      deleteBtn.textContent = '✕'
-      deleteBtn.title = 'Delete encounter'
-      r.querySelectorAll('td')[3].appendChild(deleteBtn)
+      // Add menu button to each row (3 dots like other tables)
+      const menuBtn = document.createElement('button')
+      menuBtn.className = 'btn ghost sm'
+      menuBtn.type = 'button'
+      menuBtn.innerHTML = '⋯'
+      menuBtn.title = 'Encounter options'
+      r.querySelectorAll('td')[3].appendChild(menuBtn)
     })
     ensureVisibleMeta()
   }
