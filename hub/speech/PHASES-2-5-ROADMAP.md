@@ -1,6 +1,8 @@
-# MedlinNG development roadmap: Phases 2–5
+# MediLogNG development roadmap: Phases 2–5
 
-This roadmap is based on the current Vite/Firebase client, Electron Host/Hub, offline-first services, and existing consultation workflow. Phases 2–5 are planning only in this task. Do not select a cloud speech provider, change consent/retention terms, or implement AI clinical-note generation until the decisions listed below are approved.
+This roadmap is based on the current Vite/Firebase client, Electron Host/Hub, offline-first services, and existing consultation workflow. Implementation is now authorized, but provider, privacy, retention, cost and clinical governance decisions remain approval gates; do not transmit identifiable clinical data or enable a clinical model before they are resolved. The canonical Firebase Hosting URL is `https://medlogng.web.app`.
+
+See [`PHASE-2-5-IMPLEMENTATION-STATUS.md`](./PHASE-2-5-IMPLEMENTATION-STATUS.md) for the dated implementation record, tests, preliminary provider findings and remaining gates. The current foundations do not satisfy end-to-end phase acceptance.
 
 ## Existing application map
 

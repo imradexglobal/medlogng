@@ -141,7 +141,7 @@ export async function readQueryFromHost(db, query) {
 
 export async function readDocumentFromHost(db, ref) {
   const segments = String(ref?.path || '').split('/')
-  if (segments.length !== 2 || !segments[0] || !segments[1]) return null
+  if (![2, 4].includes(segments.length) || !segments[0] || !segments[1] || segments.length === 4 && (segments[2] !== 'blob' || segments[3] !== 'data')) return null
   const baseUrl = await getHubBase()
   if (!baseUrl) return null
   let authStore, auth
@@ -158,7 +158,7 @@ export async function readDocumentFromHost(db, ref) {
   const timer = setTimeout(() => controller.abort(), 5000)
   try {
     const response = await signedHostRequest(baseUrl, '/device/data/document', {
-      orgId, collection: segments[0], id: segments[1],
+      orgId, collection: segments[0], id: segments[1], path: segments.join('/'),
     }, user, orgId, controller.signal)
     if (!response || response.status === 400 || response.status === 404 || response.status === 405 || response.status >= 500) return null
     if (response.status === 403) {

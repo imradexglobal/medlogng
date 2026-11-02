@@ -28,6 +28,27 @@ const REQUESTS = 'medication_requests'
 // name-sorted catalogue of bounded size, so it stays unbounded.
 const LIVE_LIMIT = 100
 
+function isTransientStoreError(error) {
+  const code = String(error?.code || '').toLowerCase()
+  return ['unavailable', 'deadline-exceeded', 'network-request-failed', 'aborted'].includes(code) ||
+    /offline|network|timed? ?out|failed to fetch/i.test(String(error?.message || ''))
+}
+
+async function commitOrHandoff(transaction, handoff, fromOutbox = false) {
+  let timer
+  let timedOut = false
+  transaction.catch((error) => { if (timedOut) console.warn('[pharmacy] transaction settled after offline handoff:', error?.message || error) })
+  try {
+    const result = await Promise.race([transaction, new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(null) }, 2500) })])
+    if (result !== null) return result
+    if (fromOutbox) throw new Error('Waiting for the hospital connection.')
+    return await handoff()
+  } catch (error) {
+    if (fromOutbox || !isTransientStoreError(error)) throw error
+    return await handoff()
+  } finally { clearTimeout(timer) }
+}
+
 // ---- capability check --------------------------------------------------------
 export function myPharmacyCaps() {
   const me = myActiveMembership()
@@ -226,36 +247,29 @@ export async function createDrug(input) {
 
   const did = doc(collection(db, DRUGS)).id
   const now = serverTimestamp()
+  const openingQty = Number(input.stock) || 0
+  const movementId = openingQty > 0 ? 'mov_' + Date.now() + Math.random().toString(36).slice(2) : ''
+  const drugData = {
+    name: input.name || '', drug_code: (input.drug_code || '').trim().toUpperCase(), strength: input.strength || '',
+    pack_size: input.pack_size || '', organization_id: activeOrg,
+    sku: input.sku || generateSku(input.drug_code, input.strength, input.pack_size) || '', unit: input.unit || 'tabs',
+    stock: openingQty, price: input.price || 0, purchase_price: input.purchase_price || 0, batch: input.batch || '',
+    expiry: input.expiry || '', status: openingQty === 0 ? 'Out' : (openingQty < 20 ? 'Low' : 'OK'), supplier: input.supplier || '',
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('stock_create', { drugId: did, movementId, drug: drugData })
+    return { id: did, ...drugData, pendingSync: true }
+  }
 
-  return runTransaction(db, async (tx) => {
+  const transaction = runTransaction(db, async (tx) => {
     const drugRef = doc(db, DRUGS, did)
 
     // If opening stock > 0, create an 'opening' movement in the same transaction
-    const openingQty = Number(input.stock) || 0
     if (openingQty > 0) {
-      tx.set(drugRef, {
-        name: input.name || '',
-        drug_code: (input.drug_code || '').trim().toUpperCase(),
-        strength: input.strength || '',
-        pack_size: input.pack_size || '',
-        organization_id: activeOrg,
-        sku: input.sku || generateSku(input.drug_code, input.strength, input.pack_size) || '',
-        unit: input.unit || 'tabs',
-        stock: openingQty,
-        price: input.price || 0,
-        purchase_price: input.purchase_price || 0,
-        batch: input.batch || '',
-        expiry: input.expiry || '',
-        status: openingQty === 0 ? 'Out' : (openingQty < 20 ? 'Low' : 'OK'),
-        supplier: input.supplier || '',
-        created_by: user?.uid || null,
-        created_by_name: currentStaffName(),
-        created_at: now,
-        updated_at: now,
-      })
+      tx.set(drugRef, { ...drugData, created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now, updated_at: now })
 
       // Create 'opening' movement
-      const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
       const movementRef = doc(db, 'stock_movements', movementId)
       tx.set(movementRef, {
         type: 'opening',
@@ -273,26 +287,7 @@ export async function createDrug(input) {
       })
     } else {
       // No opening stock — create lot doc with stock=0
-      tx.set(drugRef, {
-        name: input.name || '',
-        drug_code: (input.drug_code || '').trim().toUpperCase(),
-        strength: input.strength || '',
-        pack_size: input.pack_size || '',
-        organization_id: activeOrg,
-        sku: input.sku || generateSku(input.drug_code, input.strength, input.pack_size) || '',
-        unit: input.unit || 'tabs',
-        stock: 0,
-        price: input.price || 0,
-        purchase_price: input.purchase_price || 0,
-        batch: input.batch || '',
-        expiry: input.expiry || '',
-        status: 'Out',
-        supplier: input.supplier || '',
-        created_by: user?.uid || null,
-        created_by_name: currentStaffName(),
-        created_at: now,
-        updated_at: now,
-      })
+      tx.set(drugRef, { ...drugData, created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now, updated_at: now })
     }
 
     try {
@@ -321,6 +316,29 @@ export async function createDrug(input) {
       supplier: input.supplier || '',
     }
   })
+  return commitOrHandoff(transaction, async () => {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('stock_create', { drugId: did, movementId, drug: drugData })
+    return { id: did, ...drugData, pendingSync: true }
+  })
+}
+
+export async function applyQueuedStockCreate(args) {
+  const lotRef = doc(db, DRUGS, args.drugId)
+  const movementRef = args.movementId ? doc(db, 'stock_movements', args.movementId) : null
+  return runTransaction(db, async (tx) => {
+    const lotSnap = await tx.get(lotRef)
+    const moveSnap = movementRef ? await tx.get(movementRef) : null
+    if (lotSnap.exists()) return { id: args.drugId, deduped: true }
+    const { activeOrg, user } = authStore.getState()
+    if (args.drug.organization_id !== activeOrg) throw new Error('Drug belongs to another hospital.')
+    const now = serverTimestamp()
+    tx.set(lotRef, { ...args.drug, created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now, updated_at: now })
+    if (movementRef && !moveSnap.exists()) tx.set(movementRef, { type: 'opening', organization_id: activeOrg, drug_id: args.drugId,
+      sku: args.drug.sku || args.drug.drug_code || '', name: args.drug.name || '', qty: Number(args.drug.stock), batch: args.drug.batch || '',
+      expiry: args.drug.expiry || '', reference: 'opening balance', created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now })
+    return { id: args.drugId }
+  })
 }
 
 export async function updateDrug(did, input) {
@@ -329,25 +347,38 @@ export async function updateDrug(did, input) {
 
   const now = serverTimestamp()
   const drugRef = doc(db, DRUGS, did)
+  const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
+  const fields = {
+    name: input.name, drug_code: input.drug_code || '', strength: input.strength || '', pack_size: input.pack_size || '',
+    sku: input.sku || generateSku(input.drug_code, input.strength, input.pack_size) || '', unit: input.unit,
+    stock: Number(input.stock), price: input.price, purchase_price: input.purchase_price, batch: input.batch,
+    expiry: input.expiry, status: input.status, supplier: input.supplier,
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const snap = await getDoc(drugRef)
+    if (!snap.exists() || snap.data()?.organization_id !== activeOrg) throw new Error('Drug is not available in the offline hospital copy.')
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('stock_update', { drugId: did, movementId, fields, previousStock: Number(snap.data()?.stock) || 0 })
+    return { id: did, ...fields, pendingSync: true }
+  }
 
-  return runTransaction(db, async (tx) => {
+  const transaction = runTransaction(db, async (tx) => {
     const snap = await tx.get(drugRef)
     if (!snap.exists()) throw new Error('Drug not found')
     const data = snap.data()
 
     // Create adjust movement with reason — replaces blind stock overwrite
     const adjustQty = Number(input.stock) - (data.stock || 0)
-    const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
     const movementRef = doc(db, 'stock_movements', movementId)
     tx.set(movementRef, {
       type: 'adjust',
       organization_id: data.organization_id,
       drug_id: did,
       sku: data.sku,
-      name: data.name,
-      qty: adjustQty, // signed: positive if increasing, negative if decreasing
-      batch: input.batch || data.batch,
-      expiry: input.expiry || data.expiry,
+      name: fields.name || data.name,
+      qty: adjustQty,
+      batch: fields.batch || data.batch,
+      expiry: fields.expiry || data.expiry,
       reason: input.reason || 'Stock adjustment via UI',
       counted_qty: Number(input.stock) || 0,
       created_by: user?.uid || null, // note: user may not be in scope; adjust per app needs
@@ -357,23 +388,39 @@ export async function updateDrug(did, input) {
 
     // Update drug fields
     tx.update(drugRef, {
-      name: input.name,
-      drug_code: input.drug_code || '',
-      strength: input.strength || '',
-      pack_size: input.pack_size || '',
-      sku: input.sku || generateSku(input.drug_code, input.strength, input.pack_size) || '',
-      unit: input.unit,
-      stock: input.stock,
-      price: input.price,
-      purchase_price: input.purchase_price,
-      batch: input.batch,
-      expiry: input.expiry,
-      status: input.status,
-      supplier: input.supplier,
+      ...fields,
       updated_at: now,
     })
 
     return true
+  })
+  return commitOrHandoff(transaction, async () => {
+    const snap = await getDoc(drugRef)
+    if (!snap.exists() || snap.data()?.organization_id !== activeOrg) throw new Error('Drug is not available in the offline hospital copy.')
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('stock_update', { drugId: did, movementId, fields, previousStock: Number(snap.data()?.stock) || 0 })
+    return { id: did, ...fields, pendingSync: true }
+  })
+}
+
+export async function applyQueuedStockUpdate(args) {
+  const lotRef = doc(db, DRUGS, args.drugId)
+  const movementRef = doc(db, 'stock_movements', args.movementId)
+  return runTransaction(db, async (tx) => {
+    const [lotSnap, moveSnap] = await Promise.all([tx.get(lotRef), tx.get(movementRef)])
+    if (moveSnap.exists()) return { id: args.drugId, deduped: true }
+    if (!lotSnap.exists()) throw new Error('Drug not found.')
+    const prior = lotSnap.data() || {}
+    const { activeOrg, user } = authStore.getState()
+    if (prior.organization_id !== activeOrg) throw new Error('Drug belongs to another hospital.')
+    const fields = args.fields || {}
+    const now = serverTimestamp()
+    tx.update(lotRef, { ...fields, updated_at: now })
+    tx.set(movementRef, { type: 'adjust', organization_id: activeOrg, drug_id: args.drugId, sku: fields.sku || prior.sku || '',
+      name: fields.name || prior.name || '', qty: Number(fields.stock) - (Number(prior.stock) || 0), batch: fields.batch || prior.batch || '',
+      expiry: fields.expiry || prior.expiry || '', reason: 'Stock adjustment via item edit', counted_qty: Number(fields.stock),
+      created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now })
+    return { id: args.drugId, newStock: Number(fields.stock) }
   })
 }
 
@@ -482,11 +529,16 @@ export async function dispense(input) {
   }
 
   const now = serverTimestamp()
+  const dispensationId = input.dispensationId || ('disp_' + Date.now() + Math.random().toString(36).slice(2))
+  const stableItems = (input.items || []).map((it) => ({ ...it, movementId: it.movementId || ('mov_' + Date.now() + Math.random().toString(36).slice(2)) }))
+  const opArgs = { dispensationId, patientId: input.patientId || '', patientName: input.patientName || '',
+    medicationRequestId: input.medicationRequestId || '', items: stableItems }
+  if (!input.fromOutbox && typeof navigator !== 'undefined' && navigator.onLine === false) return queuePharmacyDispense(opArgs, activeOrg)
 
-  return runTransaction(db, async (tx) => {
+  const transaction = runTransaction(db, async (tx) => {
     // input: { items: [{ drugId, requestedQty, lineId? }], patientId, patientName,
     //          medicationRequestId? }
-    const { items, patientId, patientName, medicationRequestId } = input
+    const { items, patientId, patientName, medicationRequestId } = opArgs
     if (!Array.isArray(items) || !items.length) throw new Error('Nothing selected to dispense.')
 
     // Read all affected lot docs in this transaction
@@ -498,6 +550,13 @@ export async function dispense(input) {
     const reqRef = medicationRequestId ? doc(db, 'medication_requests', medicationRequestId) : null
     const reqSnap = reqRef ? await tx.get(reqRef) : null
     if (reqRef && !reqSnap.exists()) throw new Error('This prescription request no longer exists.')
+
+    const dispenseRef = doc(db, DISPENSE, dispensationId)
+    const priorTicket = await tx.get(dispenseRef)
+    if (priorTicket.exists()) {
+      if (priorTicket.data()?.organization_id === activeOrg) return { dispensationId, patientId, patientName, deduped: true }
+      throw new Error('Dispensation id is already in use.')
+    }
 
     // External lines are filled at an outside pharmacy, so an issue aimed at one
     // is refused here — it must never decrement in-house stock or be recorded as
@@ -528,7 +587,6 @@ export async function dispense(input) {
     // Ticket id is minted up front so each 'out' movement can carry it. It was
     // previously written as '' with a "will be set later" comment and never
     // backfilled, which left every movement untraceable to its ticket.
-    const dispensationId = 'disp_' + Date.now() + Math.random().toString(36).slice(2)
 
     // Build out movements and decrement stock
     for (let i = 0; i < lotSnaps.length; i++) {
@@ -539,7 +597,7 @@ export async function dispense(input) {
       const expiry = data.expiry || ''
 
       // Create 'out' movement
-      const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
+      const movementId = items[i].movementId
       const movementRef = doc(db, 'stock_movements', movementId)
       tx.set(movementRef, {
         type: 'out',
@@ -593,7 +651,6 @@ export async function dispense(input) {
       })
     )
 
-    const dispenseRef = doc(db, 'dispensations', dispensationId)
     tx.set(dispenseRef, {
       patient_id: patientId,
       patient_name: patientName,
@@ -653,6 +710,47 @@ export async function dispense(input) {
       })),
     }
   })
+  let timer
+  let timedOut = false
+  transaction.catch((error) => { if (timedOut) console.warn('[pharmacy] dispense settled after offline handoff:', error?.message || error) })
+  try {
+    const result = await Promise.race([transaction, new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(null) }, 2500) })])
+    if (result) return result
+    if (input.fromOutbox) throw new Error('Dispense is waiting for the hospital connection.')
+    return queuePharmacyDispense(opArgs, activeOrg)
+  } catch (error) {
+    const code = String(error?.code || '').toLowerCase()
+    if (!['unavailable', 'deadline-exceeded', 'network-request-failed'].includes(code) && !/offline|network|timed? ?out/i.test(String(error?.message || ''))) throw error
+    if (input.fromOutbox) throw error
+    return queuePharmacyDispense(opArgs, activeOrg)
+  } finally { clearTimeout(timer) }
+}
+
+async function queuePharmacyDispense(args, orgId) {
+  const previews = []
+  const requestSnap = args.medicationRequestId ? await getDoc(doc(db, REQUESTS, args.medicationRequestId)) : null
+  if (args.medicationRequestId && !requestSnap?.exists()) throw new Error('Prescription is not available in the offline hospital copy.')
+  if (requestSnap && requestSnap.data()?.organization_id !== orgId) throw new Error('Prescription belongs to another hospital.')
+  const requestItems = requestSnap?.exists() ? toRequestItems(requestSnap.data()) : []
+  for (const item of args.items) {
+    const snap = await getDoc(doc(db, DRUGS, item.drugId))
+    if (!snap?.exists()) throw new Error('A selected drug is not available in the offline hospital copy.')
+    const lot = snap.data() || {}
+    if (lot.organization_id !== orgId) throw new Error('A selected drug belongs to another hospital.')
+    if ((Number(lot.stock) || 0) < Number(item.requestedQty)) throw new Error('Insufficient cached stock for ' + (lot.name || item.drugId))
+    const lineId = item.lineId || (requestItems.length === 1 ? requestItems[0].line_id : '')
+    const line = lineId ? requestItems.find((row) => row.line_id === lineId) : null
+    if (line?.external) throw new Error('External prescriptions cannot be dispensed from hospital stock.')
+    previews.push({ ...item, lineId, preview: { sku: lot.sku || '', name: lot.name || '', unit: lot.unit || 'tabs', batch: lot.batch || '', expiry: lot.expiry || '' } })
+  }
+  const { enqueue } = await import('./clinicalOutbox.js')
+  await enqueue('pharmacy_dispense', { ...args, items: previews })
+  return { dispensationId: args.dispensationId, patientId: args.patientId, patientName: args.patientName,
+    items: previews.map(({ drugId, requestedQty, lineId }) => ({ drugId, requestedQty, lineId, pendingSync: true })), pendingSync: true }
+}
+
+export async function applyQueuedDispense(args) {
+  return dispense({ ...args, fromOutbox: true })
 }
 
 // ---- reverse a dispense (one medicine line) ---------------------------------
@@ -665,7 +763,7 @@ export async function dispense(input) {
 // they record what physically left the cupboard. The undo is written as a
 // compensating 'in' movement plus an append-only 'reversed' ticket, so the
 // ledger still balances and nothing is rewritten after the fact.
-export async function reverseDispenseIssue({ requestId, lineId }) {
+export async function reverseDispenseIssue({ requestId, lineId, movementId: stableMovementId = '', ticketId: stableTicketId = '', fromOutbox = false }) {
   const { activeOrg, user } = authStore.getState()
   if (!activeOrg) throw new Error('No hospital selected.')
   const caps = myPharmacyCaps()
@@ -717,7 +815,17 @@ export async function reverseDispenseIssue({ requestId, lineId }) {
     if (out) restore = { batch: out.batch || '', expiry: out.expiry || '' }
   }
 
-  return runTransaction(db, async (tx) => {
+  const movementId = stableMovementId || ('mov_' + Date.now() + Math.random().toString(36).slice(2))
+  const ticketId = stableTicketId || ('rev_' + Date.now() + Math.random().toString(36).slice(2))
+  if (!fromOutbox && typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('pharmacy_reverse', { requestId, lineId, movementId, ticketId,
+      preview: { drugId: preLine.drug_id, batch: restore?.batch || '', expiry: restore?.expiry || '', medicine, qty: Number(preLine.dispensed_qty) || 0,
+        patientId: preSnap.data().patient_id || '', patientName: preSnap.data().patient_name || '' } })
+    return { requestId, lineId, pendingSync: true }
+  }
+
+  const transaction = runTransaction(db, async (tx) => {
     const reqRef = doc(db, REQUESTS, requestId)
     const reqSnap = await tx.get(reqRef)
     if (!reqSnap.exists()) throw new Error('This prescription no longer exists.')
@@ -732,13 +840,16 @@ export async function reverseDispenseIssue({ requestId, lineId }) {
 
     const lotSnap = await tx.get(lotRef)
     if (!lotSnap.exists()) throw new Error('The catalogue item for "' + medicine + '" no longer exists — its stock was not returned.')
+    const movementRef = doc(db, 'stock_movements', movementId)
+    const ticketRef = doc(db, DISPENSE, ticketId)
+    const [movementSnap, ticketSnap] = await Promise.all([tx.get(movementRef), tx.get(ticketRef)])
+    if (movementSnap.exists() && ticketSnap.exists()) return { requestId, lineId, deduped: true }
     const lot = lotSnap.data()
     const batch = lot.batch || (restore ? restore.batch : '')
     const expiry = lot.expiry || (restore ? restore.expiry : '')
     const newStock = Number(lot.stock || 0) + qty
 
-    const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
-    tx.set(doc(db, 'stock_movements', movementId), {
+    tx.set(movementRef, {
       type: 'in',
       organization_id: activeOrg,
       drug_id: line.drug_id,
@@ -767,8 +878,7 @@ export async function reverseDispenseIssue({ requestId, lineId }) {
 
     // Dispensations are append-only (firestore.rules: update is false), so the
     // undo is a second ticket on the same request rather than an edit.
-    const ticketId = 'rev_' + Date.now() + Math.random().toString(36).slice(2)
-    tx.set(doc(db, DISPENSE, ticketId), {
+    tx.set(ticketRef, {
       patient_id: data.patient_id || '',
       patient_name: data.patient_name || '',
       items: JSON.stringify([{
@@ -809,6 +919,17 @@ export async function reverseDispenseIssue({ requestId, lineId }) {
 
     return { requestId, lineId, qty, medicine, newStock, items: next, status: statusForProgress(progress) }
   })
+  return commitOrHandoff(transaction, async () => {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('pharmacy_reverse', { requestId, lineId, movementId, ticketId,
+      preview: { drugId: preLine.drug_id, batch: restore?.batch || '', expiry: restore?.expiry || '', medicine,
+        qty: Number(preLine.dispensed_qty) || 0, patientId: preSnap.data().patient_id || '', patientName: preSnap.data().patient_name || '' } })
+    return { requestId, lineId, pendingSync: true }
+  }, fromOutbox)
+}
+
+export async function applyQueuedPharmacyReverse(args) {
+  return reverseDispenseIssue({ ...args, fromOutbox: true })
 }
 
 // ---- medication requests (prescription orders) ------------------------------
@@ -1077,8 +1198,20 @@ export async function correctStock(drugId, countedQty, reason) {
 
   const lotRef = doc(db, DRUGS, drugId)
   const now = serverTimestamp()
+  const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
+  const counted = Number(countedQty)
+  if (!Number.isFinite(counted) || counted < 0) throw new Error('Counted quantity must be a valid non-negative number.')
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const snap = await getDoc(lotRef)
+    if (!snap.exists() || snap.data()?.organization_id !== activeOrg) throw new Error('Drug is not available in the offline hospital copy.')
+    const { enqueue } = await import('./clinicalOutbox.js')
+    const lot = snap.data() || {}
+    await enqueue('stock_correct', { drugId, movementId, countedQty: counted, reason: String(reason || ''),
+      preview: { name: lot.name || '', sku: lot.sku || '', batch: lot.batch || '', expiry: lot.expiry || '' } })
+    return { id: drugId, newStock: counted, pendingSync: true }
+  }
 
-  return runTransaction(db, async (tx) => {
+  const transaction = runTransaction(db, async (tx) => {
     const snap = await tx.get(lotRef)
     if (!snap.exists()) throw new Error('Drug not found')
     const data = snap.data()
@@ -1087,7 +1220,6 @@ export async function correctStock(drugId, countedQty, reason) {
     if (isNaN(newStock)) throw new Error('Counted quantity must be a valid number.')
 
     // Create 'adjust' movement
-    const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
     const movementRef = doc(db, 'stock_movements', movementId)
     tx.set(movementRef, {
       type: 'adjust',
@@ -1118,6 +1250,37 @@ export async function correctStock(drugId, countedQty, reason) {
     }
 
     return { id: drugId, newStock }
+  })
+  return commitOrHandoff(transaction, async () => {
+    const snap = await getDoc(lotRef)
+    if (!snap.exists() || snap.data()?.organization_id !== activeOrg) throw new Error('Drug is not available in the offline hospital copy.')
+    const lot = snap.data() || {}
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('stock_correct', { drugId, movementId, countedQty: counted, reason: String(reason || ''),
+      preview: { name: lot.name || '', sku: lot.sku || '', batch: lot.batch || '', expiry: lot.expiry || '' } })
+    return { id: drugId, newStock: counted, pendingSync: true }
+  })
+}
+
+export async function applyQueuedStockCorrection(args) {
+  const lotRef = doc(db, DRUGS, args.drugId)
+  const movementRef = doc(db, 'stock_movements', args.movementId)
+  return runTransaction(db, async (tx) => {
+    const moveSnap = await tx.get(movementRef)
+    const lotSnap = await tx.get(lotRef)
+    if (moveSnap.exists()) return { id: args.drugId, newStock: Number(lotSnap.data()?.stock) || 0, deduped: true }
+    if (!lotSnap.exists()) throw new Error('Drug not found.')
+    const lot = lotSnap.data() || {}
+    const { activeOrg, user } = authStore.getState()
+    if (lot.organization_id !== activeOrg) throw new Error('Drug belongs to another hospital.')
+    const countedQty = Number(args.countedQty)
+    if (!Number.isFinite(countedQty) || countedQty < 0) throw new Error('Counted quantity is invalid.')
+    const now = serverTimestamp()
+    tx.update(lotRef, { stock: countedQty, status: countedQty === 0 ? 'Out' : (countedQty < 20 ? 'Low' : 'OK'), updated_at: now })
+    tx.set(movementRef, { type: 'adjust', organization_id: activeOrg, drug_id: args.drugId, sku: lot.sku || '', name: lot.name || '',
+      qty: countedQty, counted_qty: countedQty, batch: lot.batch || '', expiry: lot.expiry || '', reason: args.reason || '',
+      created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now })
+    return { id: args.drugId, newStock: countedQty }
   })
 }
 

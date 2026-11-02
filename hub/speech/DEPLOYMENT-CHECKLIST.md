@@ -7,14 +7,29 @@ checks.
 
 ## Before installation
 
+- Canonical Firebase web URL: `https://medlogng.web.app`. The current repository
+  has no cloud speech backend. Firebase-only deployments must not submit audio
+  to `/speech/jobs`; the UI should report cloud transcription as unavailable
+  until a separately authenticated backend is implemented and approved.
 - Record Windows edition, version/build, architecture, total RAM and free disk.
 - Obtain the installer and its matching `speech-assets.json`,
   `ffmpeg-build.json`, build logs and source/toolchain provenance.
 - Verify the installer SHA-256 against the release record.
+- Do not distribute `release/MediLogHost-Setup-1.2.0.exe`: its package contains
+  `hub/keys/service-account.json`. Use only a reviewed, credential-free Host
+  candidate at `release/MediLogHost-Setup-1.2.2.exe` after verifying its SHA-256
+  in `release/phase1/RELEASE-NOTES.md`. The 1.2.2 artifact is unsigned and is
+  not production-ready without Authenticode signing and lifecycle validation.
 - On the build machine, run `scripts/verify-speech-assets.ps1` against the
   staged `vendor/speech` directory before making the installer.
 - Confirm this machine has no Visual Studio, CMake, MSYS2, Git, Node.js, FFmpeg
   or Whisper development tools installed.
+- In Firebase Authentication email templates, confirm the password-reset
+  action URL is configured to the app's deployed web action handler. The app
+  intentionally handles Firebase's `mode=resetPassword` and `oobCode` in its
+  browser login route. `handleCodeInApp` is for installed Android/iOS
+  Universal/App Links and is not used for this browser flow. Verify an actual
+  reset email reaches the app handler and that expired/used codes are rejected.
 
 ## Clean installation and packaging
 
@@ -79,3 +94,117 @@ manifest hashes, input recording identifier (never patient-identifying data),
 expected and recognized text, job status/timings, CPU/RAM measurements, and
 pass/fail notes. Phase 1 remains **IN PROGRESS** until the results are reviewed
 and approved.
+
+## Current local verification record
+
+These results were obtained on the development machine on 2026-11-02. They
+verify local code and emulator behavior only; they do not satisfy the clean
+Windows, hospital Firebase, browser/device or target-hardware steps below.
+
+- `npm test` — **PASSED** (smoke and service suites; Firestore rules test
+  explicitly skips when no emulator is running).
+- `npm run test:speech` — **PASSED** (worker lifecycle mocks, queue/session
+  checks and asset-verifier checks).
+- `npm run test:speech:listeners` — **PASSED** with local loopback access
+  (HTTPS/HTTP behavior, signed device enrollment, offline bootstrap,
+  transcription, replay protection and revalidation denial).
+- `firebase emulators:exec --only firestore --project demo-medlogng "node
+  scripts/test/hub.smoke.mjs"` — **17 passed, 0 failed**.
+- `firebase emulators:exec --only firestore --project medlogng-test "node
+  scripts/test/firestore.rules.test.mjs"` — **12 passed, 0 failed** using the
+  repository's actual Firestore rules. Expected denied writes/read emit
+  `PERMISSION_DENIED` emulator diagnostics.
+- `npm run build` — first attempt was blocked by managed parent-directory
+  access; a retry with the required file access **PASSED** (Vite transformed
+  137 modules; completed in 5.45 seconds). This cleanup changed tests/docs and
+  a dev-only test dependency, not application/Host packaging source; no
+  installer rebuild was performed. The previous installer verification
+  remains recorded in the Phase 1 audit.
+
+The Firebase emulator used the demo project ID and no real project credentials.
+The portable Microsoft JDK was verified against Microsoft's published SHA-256
+and used only for emulator execution. These results are repeatable with
+Java 21, Firebase CLI, the lockfile dependencies and local loopback access.
+
+## Executable deployment validation procedure
+
+These are the remaining hospital-side checks for the 1.2.2 candidate. Record
+the operator, timestamp, machine/build, installer SHA-256, certificate
+thumbprint, Host address and sanitized outcomes. Never put patient identifiers,
+Firebase keys, PFX passwords or private keys in the record.
+
+### HTTPS certificate trust and browser microphone
+
+1. Issue a Host server certificate whose SAN includes the stable DNS name (or
+   IP address) clients will use. Prefer a hospital-managed CA. Export a PFX
+   containing the Host private key and import it using the Host setup wizard.
+2. Install only the issuing CA certificate on each client into the Windows
+   **Trusted Root Certification Authorities** store (or its centrally managed
+   equivalent). Do not distribute the Host PFX/private key to clients.
+   Restart the browser and confirm chain, hostname, validity and revocation
+   checks pass for the exact Host URL.
+3. Open the Host using that DNS name and HTTPS port in a supported browser.
+   Confirm no certificate warning, allow microphone access, record a short
+   consented test utterance, submit it, and verify the resulting job and
+   transcript. Confirm HTTP blocks microphone use and rejects speech routes.
+   Repeat with an untrusted CA and hostname mismatch; both must fail before
+   enrollment or transcription.
+4. Repeat in a second authenticated browser profile and verify each profile
+   sees only its own job. Sign out of the first profile and verify its prior
+   signed requests fail immediately. Save sanitized browser/Host logs.
+
+### Live Firebase Admin setup and permission revalidation
+
+1. Use a dedicated hospital test project and a least-privilege hospital service
+   account approved for the Host's Auth verification and Firestore reads. Do
+   not use a developer's personal key or production patient data. Transfer its
+   JSON key through the hospital's approved secret channel and import it only
+   through Host setup. Confirm the raw key is absent from installer/source.
+2. Sign in as a test clinician with active membership and `encounter.edit`.
+   Enroll a device online and complete one HTTPS transcription. Remove that
+   capability (or deactivate membership) in the test project and force a
+   successful online revalidation. Verify the Host invalidates or updates the
+   cached grant and rejects the next signed request. Restore access and verify
+   a new online enrollment/revalidation works.
+3. Separately disconnect Host internet while preserving LAN. Verify the last
+   online-verified grant continues to work offline and explicit sign-out
+   invalidates it. Record that revocation cannot reach a fully offline Host
+   until connectivity returns.
+
+### Clean install, upgrade, restart and uninstall
+
+1. On a clean supported Windows VM with no developer tools, verify the
+   recorded installer SHA-256, install 1.2.2 per-user, complete setup using
+   test-only credentials/certificates and confirm the displayed version.
+2. Create a synthetic test queue/config marker and record its path/hash. Quit
+   Host using **Tray menu → Quit**, confirm no Host process remains, then run
+   the 1.2.2 installer over 1.2.0. Confirm operational data remains and the
+   installed version is 1.2.2. Repeat once with Host still running to verify a
+   recoverable close/retry prompt. Do not delete data or terminate unrelated
+   processes to get past a lock.
+3. With queued test work present, restart Windows and verify queue ownership
+   remains intact and work resumes once. Uninstall from Windows Apps and
+   confirm application binaries are removed while Host configuration,
+   encrypted credentials, audit and queue data remain. Record the separate
+   approved data-retirement procedure; uninstall intentionally preserves these
+   clinical operational records.
+
+### Multi-client performance
+
+On the actual 4 GB Host, follow `PERFORMANCE-BENCHMARK.md` and its CSV template.
+Run 6 and 10 authenticated clients from separate devices/browsers, with a
+three-run burst and sustained workload. Record per-job queue/upload/conversion/
+inference times, Host/worker peak working set, system commit, available memory
+and CPU. Repeat with ordinary Host/EMR traffic. Test owner isolation,
+disconnect/recovery, worker restart and exactly-once final results. Do not
+label a higher-memory machine as a 4 GB result.
+
+### Signing before production distribution
+
+The current 1.2.2 executable is unsigned (`win.sign: false`). Before production
+distribution, obtain an organization-controlled Authenticode certificate,
+sign the installer and shipped executables under approved key custody, enable
+signature verification, and verify signature, publisher, timestamp and final
+SHA-256 on a clean Windows machine. An unsigned installer may trigger
+SmartScreen warnings and provides no publisher authenticity or tamper evidence;
+a verified payload hash alone does not establish who published it.

@@ -5,9 +5,12 @@
 //      node scripts/test/firestore.rules.test.mjs
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 let passed = 0
 let failed = 0
+const activeEnvironments = new Set()
 
 async function test(name, fn) {
   try { await fn(); passed++; console.log('  ok  ' + name) }
@@ -15,37 +18,58 @@ async function test(name, fn) {
     failed++
     console.error('  FAIL ' + name)
     console.error('       ' + (e?.message || e))
+  } finally {
+    // A failed assertion must not leave Firestore SDK clients holding open
+    // sockets and hanging the test process.
+    for (const cleanup of [...activeEnvironments]) await cleanup()
   }
 }
 
 let rulesLoaded = false
 
 // Attempt to load the rules emulator; skip gracefully if not installed.
-let { RulesTestEnvironment } = {}
+let { initializeTestEnvironment } = {}
 try {
-  ({ RulesTestEnvironment } = await import('@firebase/rules-unit-testing'))
+  ({ initializeTestEnvironment } = await import('@firebase/rules-unit-testing'))
   rulesLoaded = true
 } catch {}
 
 // If emulator isn't available, just report a skip so CI doesn't fail hard.
-if (!rulesLoaded) {
-  console.log('  SKIP (skipped) @firebase/rules-unit-testing not installed — run `npm i -D @firebase/rules-unit-testing`')
+if (!rulesLoaded || !process.env.FIRESTORE_EMULATOR_HOST) {
+  const reason = !rulesLoaded
+    ? 'not installed — run `npm i -D @firebase/rules-unit-testing@^5`'
+    : 'Firestore emulator is not running — run `firebase emulators:exec --only firestore --project medlogng-test "node scripts/test/firestore.rules.test.mjs"`'
+  console.log('  SKIP (skipped) ' + reason)
   process.exitCode = 0
-  return
-}
+} else {
 
 // ---- shared setup -----------------------------------------------------------
 
 const PROJECT_ID = 'medlogng-test'
-const RULES_FILE = '../../firestore.rules'
+const RULES_SOURCE = readFileSync(resolve(process.cwd(), 'firestore.rules'), 'utf8')
 
 async function env(auth) {
-  const e = new RulesTestEnvironment({
+  const e = await initializeTestEnvironment({
     projectId: PROJECT_ID,
-    firestore: { rules: RULES_FILE },
+    firestore: { rules: RULES_SOURCE },
   })
-  if (auth) e.authenticatedContext(auth.uid, { uid: auth.uid })
-  return e
+  let cleaned = false
+  const cleanup = async () => {
+    if (cleaned) return
+    cleaned = true
+    activeEnvironments.delete(cleanup)
+    await e.cleanup()
+  }
+  activeEnvironments.add(cleanup)
+  await e.clearFirestore()
+  const context = auth ? e.authenticatedContext(auth.uid) : e.unauthenticatedContext()
+  return {
+    firestore: () => context.firestore(),
+    seed: async (collectionName, id, data) => e.withSecurityRulesDisabled(async (admin) => {
+      await admin.firestore().collection(collectionName).doc(id).set(data)
+    }),
+    cleanup,
+  }
 }
 
 // ---- stock_lots update ------------------------------------------------------
@@ -55,12 +79,12 @@ await test('stock_lots update: pharmacist may edit stock fields only', async () 
   const db = e.firestore()
 
   // Seed existing lot
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_pharmacist1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_pharmacist1', {
     user_id: 'pharmacist1', organization_id: 'org_1', status: 'active',
     capabilities: ['prescription.dispense'],
   })
-  await db.collection('stock_lots').doc('lot_1').set({
+  await e.seed('stock_lots', 'lot_1', {
     organization_id: 'org_1', name: 'Metformin', stock: 100, batch: 'B1',
     expiry: '2028-01-01', status: 'OK', updated_at: new Date(),
   })
@@ -69,29 +93,29 @@ await test('stock_lots update: pharmacist may edit stock fields only', async () 
   await lot.update({ stock: 95, price: 3000 })
   const snap = await lot.get()
   assert.equal(snap.data().stock, 95)
-  e.cleanup()
+  await e.cleanup()
 })
 
 await test('stock_lots update: cannot change organization_id', async () => {
   const e = await env({ uid: 'pharmacist1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_pharmacist1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_pharmacist1', {
     user_id: 'pharmacist1', organization_id: 'org_1', status: 'active',
     capabilities: ['prescription.dispense'],
   })
-  await db.collection('stock_lots').doc('lot_1').set({
+  await e.seed('stock_lots', 'lot_1', {
     organization_id: 'org_1', name: 'Metformin', stock: 100, batch: 'B1',
     expiry: '2028-01-01', status: 'OK', updated_at: new Date(),
   })
-  await db.collection('organizations').doc('org_2').set({ name: 'Org2', status: 'active' })
+  await e.seed('organizations', 'org_2', { name: 'Org2', status: 'active' })
 
   const lot = db.collection('stock_lots').doc('lot_1')
   await assert.rejects(
     lot.update({ organization_id: 'org_2' }),
     /permission-denied/
   )
-  e.cleanup()
+  await e.cleanup()
 })
 
 // ---- medication_administrations ---------------------------------------------
@@ -99,8 +123,8 @@ await test('stock_lots update: cannot change organization_id', async () => {
 await test('medication_administrations create: nurse may record a dose', async () => {
   const e = await env({ uid: 'nurse1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_nurse1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_nurse1', {
     user_id: 'nurse1', organization_id: 'org_1', status: 'active',
     capabilities: ['medication.administer'],
   })
@@ -111,14 +135,14 @@ await test('medication_administrations create: nurse may record a dose', async (
   })
   const snap = await db.collection('medication_administrations').doc('admin_1').get()
   assert.equal(snap.data().administered_qty, 1)
-  e.cleanup()
+  await e.cleanup()
 })
 
 await test('medication_administrations create: pharmacist without administer cannot create', async () => {
   const e = await env({ uid: 'pharmacist1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_pharmacist1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_pharmacist1', {
     user_id: 'pharmacist1', organization_id: 'org_1', status: 'active',
     capabilities: ['prescription.dispense'],
   })
@@ -130,18 +154,18 @@ await test('medication_administrations create: pharmacist without administer can
     }),
     /permission-denied/
   )
-  e.cleanup()
+  await e.cleanup()
 })
 
 await test('medication_administrations update/delete are append-only (denied)', async () => {
   const e = await env({ uid: 'nurse1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_nurse1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_nurse1', {
     user_id: 'nurse1', organization_id: 'org_1', status: 'active',
     capabilities: ['medication.administer'],
   })
-  await db.collection('medication_administrations').doc('admin_1').set({
+  await e.seed('medication_administrations', 'admin_1', {
     organization_id: 'org_1', patient_id: 'p1', drug_id: 'd1',
     administered_qty: 1, given_at: new Date(), route: 'oral',
   })
@@ -149,7 +173,7 @@ await test('medication_administrations update/delete are append-only (denied)', 
   const ref = db.collection('medication_administrations').doc('admin_1')
   await assert.rejects(ref.update({ administered_qty: 2 }), /permission-denied/)
   await assert.rejects(ref.delete(), /permission-denied/)
-  e.cleanup()
+  await e.cleanup()
 })
 
 // ---- clinical_notes create --------------------------------------------------
@@ -157,8 +181,8 @@ await test('medication_administrations update/delete are append-only (denied)', 
 await test('clinical_notes create: encounter.create holder may create', async () => {
   const e = await env({ uid: 'doctor1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_doctor1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_doctor1', {
     user_id: 'doctor1', organization_id: 'org_1', status: 'active',
     capabilities: ['encounter.create'],
   })
@@ -169,7 +193,7 @@ await test('clinical_notes create: encounter.create holder may create', async ()
   })
   const snap = await db.collection('clinical_notes').doc('note_1').get()
   assert.equal(snap.data().note_text, 'Patient stable.')
-  e.cleanup()
+  await e.cleanup()
 })
 
 // ---- nurse read on scripts --------------------------------------------------
@@ -177,18 +201,18 @@ await test('clinical_notes create: encounter.create holder may create', async ()
 await test('medication_requests read: nurse with medication.administer may read', async () => {
   const e = await env({ uid: 'nurse1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_nurse1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_nurse1', {
     user_id: 'nurse1', organization_id: 'org_1', status: 'active',
     capabilities: ['medication.administer'],
   })
-  await db.collection('medication_requests').doc('rx_1').set({
+  await e.seed('medication_requests', 'rx_1', {
     organization_id: 'org_1', patient_id: 'p1', status: 'Requested', items: [],
   })
 
   const snap = await db.collection('medication_requests').doc('rx_1').get()
   assert.ok(snap.exists)
-  e.cleanup()
+  await e.cleanup()
 })
 
 // ---- patient update pin -----------------------------------------------------
@@ -196,12 +220,12 @@ await test('medication_requests read: nurse with medication.administer may read'
 await test('patient update: requires patient.demographics.update', async () => {
   const e = await env({ uid: 'doctor1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_doctor1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_doctor1', {
     user_id: 'doctor1', organization_id: 'org_1', status: 'active',
     capabilities: ['patient.create'], // NOT patient.demographics.update
   })
-  await db.collection('patients').doc('p1').set({
+  await e.seed('patients', 'p1', {
     organization_id: 'org_1', surname: 'Doe', status: 'active',
   })
 
@@ -210,19 +234,19 @@ await test('patient update: requires patient.demographics.update', async () => {
     ref.update({ surname: 'Smith' }),
     /permission-denied/
   )
-  e.cleanup()
+  await e.cleanup()
 })
 
 await test('patient update: org pin prevents cross-org change', async () => {
   const e = await env({ uid: 'doctor1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org1', status: 'active' })
-  await db.collection('organizations').doc('org_2').set({ name: 'Org2', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_doctor1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org1', status: 'active' })
+  await e.seed('organizations', 'org_2', { name: 'Org2', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_doctor1', {
     user_id: 'doctor1', organization_id: 'org_1', status: 'active',
     capabilities: ['patient.demographics.update'],
   })
-  await db.collection('patients').doc('p1').set({
+  await e.seed('patients', 'p1', {
     organization_id: 'org_1', surname: 'Doe', status: 'active',
   })
 
@@ -231,7 +255,7 @@ await test('patient update: org pin prevents cross-org change', async () => {
     ref.update({ organization_id: 'org_2', surname: 'Smith' }),
     /permission-denied/
   )
-  e.cleanup()
+  await e.cleanup()
 })
 
 // ---- audit read tighten -----------------------------------------------------
@@ -239,48 +263,51 @@ await test('patient update: org pin prevents cross-org change', async () => {
 await test('audit read: super-admin may read', async () => {
   const e = await env({ uid: 'super' })
   const db = e.firestore()
-  await db.collection('platform_admins').doc('super').set({})
-  await db.collection('audit_events').doc('audit_1').set({
+  await e.seed('platform_admins', 'super', {})
+  await e.seed('audit_events', 'audit_1', {
     actor_user_id: 'super', organization_id: 'org_1', action: 'test',
   })
 
   const snap = await db.collection('audit_events').doc('audit_1').get()
   assert.ok(snap.exists)
-  e.cleanup()
+  await e.cleanup()
 })
 
 await test('audit read: admin.roles.manage holder may read', async () => {
   const e = await env({ uid: 'admin1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_admin1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_admin1', {
     user_id: 'admin1', organization_id: 'org_1', status: 'active',
     capabilities: ['admin.roles.manage'],
   })
-  await db.collection('audit_events').doc('audit_1').set({
+  await e.seed('audit_events', 'audit_1', {
     actor_user_id: 'admin1', organization_id: 'org_1', action: 'test',
   })
 
   const snap = await db.collection('audit_events').doc('audit_1').get()
   assert.ok(snap.exists)
-  e.cleanup()
+  await e.cleanup()
 })
 
 await test('audit read: plain member cannot read audit', async () => {
   const e = await env({ uid: 'nurse1' })
   const db = e.firestore()
-  await db.collection('organizations').doc('org_1').set({ name: 'Org', status: 'active' })
-  await db.collection('organization_memberships').doc('org_1_nurse1').set({
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_nurse1', {
     user_id: 'nurse1', organization_id: 'org_1', status: 'active',
     capabilities: ['medication.administer'],
   })
-  await db.collection('audit_events').doc('audit_1').set({
+  await e.seed('audit_events', 'audit_1', {
     actor_user_id: 'admin1', organization_id: 'org_1', action: 'test',
   })
 
-  const snap = await db.collection('audit_events').doc('audit_1').get()
-  assert.ok(!snap.exists)
-  e.cleanup()
+  await assert.rejects(
+    db.collection('audit_events').doc('audit_1').get(),
+    /permission-denied/,
+    'unauthorized audit reads must be denied, not returned as an empty document',
+  )
+  await e.cleanup()
 })
 
 // ---- summary ----------------------------------------------------------------
@@ -288,3 +315,4 @@ await test('audit read: plain member cannot read audit', async () => {
 console.log('')
 console.log('  Passed: ' + passed + ' / ' + (passed + failed))
 if (failed > 0) process.exitCode = 1
+}

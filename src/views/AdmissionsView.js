@@ -282,14 +282,20 @@ export async function AdmissionsView(app, params = {}) {
               Array.from({ length: w.totalBeds }, (_, i) => {
                 const bedNo = String(i + 1)
                 const patient = (admissions || []).find((a) => a.status === 'active' && String(a.wardName || '').trim().toLowerCase() === String(w.name || '').trim().toLowerCase() && normalizeBed(a.bedNumber) === bedNo)
-                const patientLink = patient ? '<a class="bed-patient" href="#/patients/' + encodeURIComponent(patient.patientId) + '">' + esc(admissionName(patient)) + '</a>' : ''
-                return '<div class="bed ' + (patient ? 'o' : 'v') + '" title="Bed ' + bedNo + (patient ? ' occupied by ' + esc(admissionName(patient)) : ' available') + '"><strong>Bed ' + bedNo + '</strong>' + patientLink + (patient && patient.encounterId ? '<a class="bed-encounter" href="#/consultations?enc=' + encodeURIComponent(patient.encounterId) + '">Encounter</a>' : '') + (!patient && caps.canAdmit ? '<button class="btn ghost sm" data-bed-admit="' + esc(w.id) + '" data-bed-number="' + bedNo + '">Admit</button>' : '') + '</div>'
+                const destination = patient
+                  ? (patient.encounterId ? '/consultations?enc=' + encodeURIComponent(patient.encounterId) : '/patients/' + encodeURIComponent(patient.patientId))
+                  : (caps.canAdmit ? '/admissions/new?ward=' + encodeURIComponent(w.id) + '&bed=' + encodeURIComponent(bedNo) : '')
+                const patientName = patient ? admissionName(patient) : ''
+                const interactive = !!destination
+                return '<div class="bed ' + (patient ? 'o' : 'v') + (interactive ? ' clickable' : '') + '"' +
+                  (interactive ? ' role="link" tabindex="0" data-bed-destination="' + esc(destination) + '"' : '') +
+                  ' title="Bed ' + bedNo + (patient ? ' · ' + esc(patientName) : ' · available') + '"' +
+                  ' aria-label="Bed ' + bedNo + (patient ? ' occupied by ' + esc(patientName) + (patient.encounterId ? ', open encounter' : ', open patient') : (caps.canAdmit ? ', available, admit patient' : ', available')) + '"><strong>Bed ' + bedNo + '</strong></div>'
               }).join('') + '</div>'
           }
           return '<div class="ward"><div class="card-head"><h4>' + esc(w.name) + '</h4>' +
             '<span class="pill ' + tone + '" aria-label="Occupancy ' + w.occupied + ' of ' + (w.totalBeds || '?') + ' beds (' + w.pct + '%)">' +
             w.occupied + ' / ' + (w.totalBeds || '?') + '</span>' +
-            (caps.canAdmit ? '<button class="btn ghost sm" data-admit-ward="' + esc(w.id) + '" aria-label="Admit to ' + esc(w.name) + '">+ Admit</button>' : '') +
             '</div>' +
             '<p class="sub">' + esc(detail) + '</p>' +
             bedMap +
@@ -380,12 +386,13 @@ export async function AdmissionsView(app, params = {}) {
     }
     ensureVisibleMeta()
 
-    // Delegate ward admit buttons (re-bound each render; orphaned nodes are safe).
-    document.getElementById('adm-wards')?.querySelectorAll('[data-admit-ward]').forEach((b) => {
-      b.onclick = () => { navigate('/admissions/new?ward=' + encodeURIComponent(b.getAttribute('data-admit-ward'))) }
-    })
-    document.getElementById('adm-wards')?.querySelectorAll('[data-bed-admit]').forEach((b) => {
-      b.onclick = () => { navigate('/admissions/new?ward=' + encodeURIComponent(b.getAttribute('data-bed-admit')) + '&bed=' + encodeURIComponent(b.getAttribute('data-bed-number'))) }
+    // The bed itself is the action: vacant beds open admission; occupied beds open the encounter.
+    document.getElementById('adm-wards')?.querySelectorAll('[data-bed-destination]').forEach((bed) => {
+      const open = () => navigate(bed.getAttribute('data-bed-destination'))
+      bed.onclick = open
+      bed.onkeydown = (event) => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open() }
+      }
     })
   }
 

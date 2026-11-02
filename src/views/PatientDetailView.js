@@ -1751,8 +1751,8 @@ export async function PatientDetailView(app, params = {}) {
       save.disabled = true
       progress.textContent = 'Uploading…'
       try {
-        await upsertPatientPhoto({ pid, file: picked })
-        toast('Photo uploaded')
+        const saved = await upsertPatientPhoto({ pid, file: picked })
+        toast(saved?.pendingSync ? 'Photo queued to sync when the hospital connection is available' : 'Photo uploaded')
         closeModal()
         photoMeta = await getPatientPhotoMeta(pid)
         const blob = await getPatientPhotoBlob(pid)
@@ -1768,8 +1768,8 @@ export async function PatientDetailView(app, params = {}) {
   async function openPhotoRemove() {
     if (!confirm("Remove this patient's photo?")) return
     try {
-      await removePatientPhoto(pid)
-      toast('Photo removed')
+      const saved = await removePatientPhoto(pid)
+      toast(saved?.pendingSync ? 'Photo removal queued to sync when the hospital connection is available' : 'Photo removed')
       photoUrl = null
       photoMeta = null
       refreshHeaderPhoto()

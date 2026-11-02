@@ -356,7 +356,9 @@ await test('reverseDispenseIssue refuses an external line', async () => {
 })
 
 await test('reverseDispenseIssue is refused without the prescription.dispense capability', async () => {
-  await signIn('doctor')
+  // Doctors currently receive prescription.dispense in ROLE_CAPS; nurses do
+  // not. Exercise the denial with the role that actually lacks the capability.
+  await signIn('nurse')
   seedPartialIssue()
   await assert.rejects(
     () => reverseDispenseIssue({ requestId: 'req_1', lineId: 'l1' }),

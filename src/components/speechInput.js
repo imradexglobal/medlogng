@@ -52,7 +52,7 @@ function applyText(field, value, mode, point) {
   field.focus()
 }
 
-export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = false } = {}) {
+export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = false, onTranscriptReady } = {}) {
   if (!field || !field.parentNode) return () => {}
   const widget = document.createElement('div')
   widget.className = 'speech-control'
@@ -70,7 +70,8 @@ export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = 
       '<div class="speech-review-actions">' +
         '<button type="button" class="btn ghost sm" data-speech-insert>Insert at cursor</button>' +
         '<button type="button" class="btn ghost sm" data-speech-append>Append</button>' +
-        '<button type="button" class="btn sm" data-speech-replace>Replace field</button>' +
+      '<button type="button" class="btn sm" data-speech-replace>Replace field</button>' +
+      '<button type="button" class="btn ghost sm" data-speech-ai>Use for clinical draft</button>' +
       '</div>' +
     '</div>'
   if (field.matches('textarea,input')) field.insertAdjacentElement('afterend', widget)
@@ -86,6 +87,7 @@ export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = 
   const insertButton = widget.querySelector('[data-speech-insert]')
   const appendButton = widget.querySelector('[data-speech-append]')
   const replaceButton = widget.querySelector('[data-speech-replace]')
+  const aiButton = widget.querySelector('[data-speech-ai]')
   let stream = null
   let recorder = null
   let chunks = []
@@ -196,6 +198,10 @@ export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = 
     canceling = false
     retryButton.hidden = true
     try {
+      const { hasLocalSpeechHost } = await import('../services/speechTransport.js')
+      if (!await hasLocalSpeechHost()) {
+        throw new Error('No MediLogNG Host speech service is available here. Cloud transcription is not configured for this deployment.')
+      }
       const activeOrg = String(getOrgId?.() || '')
       if (!activeOrg) throw new Error('Select a hospital before transcribing.')
       const encounterId = String(getEncounterId?.() || '')
@@ -245,6 +251,11 @@ export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = 
     if (disabled || recording || jobId) return
     if (window.location.protocol !== 'https:' || !window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
       setStatus('Microphone recording needs HTTPS and a supported browser.', 'error')
+      return
+    }
+    const { hasLocalSpeechHost } = await import('../services/speechTransport.js')
+    if (!await hasLocalSpeechHost()) {
+      setStatus('No MediLogNG Host speech service is available here. Cloud transcription is not configured for this deployment.', 'error')
       return
     }
     savedPoint = saveInsertionPoint(field)
@@ -341,6 +352,12 @@ export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = 
   insertButton.onclick = () => { applyText(field, transcript.value, 'insert', savedPoint); review.hidden = true; forgetJob(); lastRecording = null; setStatus('Transcript inserted. Review and save the note when ready.', 'success') }
   appendButton.onclick = () => { applyText(field, transcript.value, 'append', savedPoint); review.hidden = true; forgetJob(); lastRecording = null; setStatus('Transcript appended. Review and save the note when ready.', 'success') }
   replaceButton.onclick = () => { applyText(field, transcript.value, 'replace', savedPoint); review.hidden = true; forgetJob(); lastRecording = null; setStatus('Field replaced. Review and save the note when ready.', 'success') }
+  aiButton.onclick = () => {
+    const text = transcript.value.trim()
+    if (!text) { setStatus('Review transcript is empty.', 'error'); return }
+    onTranscriptReady?.(text)
+    setStatus('Transcript sent to the clinical draft review panel.', 'success')
+  }
 
   void (async () => {
     try {

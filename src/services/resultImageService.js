@@ -8,13 +8,14 @@
 // collection, so the blob subcollection — and therefore the binary payload — is
 // never downloaded when rendering an order's attachments.
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, serverTimestamp, Bytes,
+  db, collection, query, where, getDocs, getDoc, doc, serverTimestamp,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { currentStaffName } from '../lib/staffName.js'
+import { encodeBlobBase64, queueOfflineFile } from './offlineFileSync.js'
 
 const RESULT_IMAGES = 'result_images'
 const BLOB_DOC = 'blob'
@@ -164,16 +165,8 @@ export async function addResultImage({ kind, orderId, patientId, file, caption =
     created_by_name: currentStaffName(),
     created_at: serverTimestamp(),
   }
-  const buffer = await blob.arrayBuffer()
-  await setDoc(doc(db, RESULT_IMAGES, id), meta)
-  await setDoc(
-    doc(db, RESULT_IMAGES, id, BLOB_DOC, BLOB_ID),
-    {
-      bytes: Bytes.fromUint8Array(new Uint8Array(buffer)),
-      content_type: meta.content_type,
-      organization_id: activeOrg,
-    },
-  )
+  await queueOfflineFile({ kind: 'result_image', id, metadata: { ...meta, created_at: Date.now() },
+    contentType: meta.content_type, contentBase64: await encodeBlobBase64(blob) })
 
   try {
     await logAudit({
@@ -185,7 +178,7 @@ export async function addResultImage({ kind, orderId, patientId, file, caption =
   } catch (e) {
     console.warn('[resultImages] audit append failed:', e?.message)
   }
-  return { id, ...meta }
+  return { id, pendingSync: true }
 }
 
 // ---- read (metadata only) ---------------------------------------------------

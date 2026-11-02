@@ -201,5 +201,30 @@ test('validateOp validates discharge and transfer handoffs with hospital bed key
   assert.match(invalid.error || '', /bed claim/)
 })
 
+test('validateOp accepts offline pharmacy stock create, update, and count operations', () => {
+  const base = { clientOpKey: 'stock-op-1', orgId: 'test-org' }
+  const drug = { name: 'Test medicine', organization_id: 'test-org', stock: 12, status: 'Low', sku: 'SKU-1', unit: 'tabs' }
+  const created = validateOp({ ...base, kind: 'stock_create', args: { drugId: 'drug-1', movementId: 'move-1', drug } }, 0)
+  assert.ok(created.op, created.error || 'expected stock create op')
+  const updated = validateOp({ ...base, kind: 'stock_update', args: { drugId: 'drug-1', movementId: 'move-2', previousStock: 12,
+    fields: { name: 'Test medicine', stock: 8, status: 'Low' } } }, 0)
+  assert.ok(updated.op, updated.error || 'expected stock update op')
+  const corrected = validateOp({ ...base, kind: 'stock_correct', args: { drugId: 'drug-1', movementId: 'move-3', countedQty: 8, reason: 'Counted shelf' } }, 0)
+  assert.ok(corrected.op, corrected.error || 'expected stock correction op')
+})
+
+test('validateOp accepts scoped offline file uploads and dispense reversals', () => {
+  const base = { clientOpKey: 'file-op-1', orgId: 'test-org' }
+  const upload = validateOp({ ...base, kind: 'file_upload', args: { kind: 'result_image', id: 'image-1',
+    metadata: { kind: 'lab', order_id: 'order-1', patient_id: 'patient-1', organization_id: 'test-org', content_type: 'image/webp', size_bytes: 3 },
+    contentType: 'image/webp', contentBase64: 'YWJj' } }, 0)
+  assert.ok(upload.op, upload.error || 'expected result image upload op')
+  const removal = validateOp({ ...base, kind: 'file_upload', args: { kind: 'patient_photo', id: 'patient-1', remove: true } }, 0)
+  assert.ok(removal.op, removal.error || 'expected patient photo removal op')
+  const reverse = validateOp({ ...base, kind: 'pharmacy_reverse', args: { requestId: 'request-1', lineId: 'line-1',
+    movementId: 'move-4', ticketId: 'ticket-1', preview: { drugId: 'drug-1', qty: 2 } } }, 0)
+  assert.ok(reverse.op, reverse.error || 'expected dispense reversal op')
+})
+
 console.log('\nhub.auth tests: ' + passed.length + ' passed, ' + failed.length + ' failed')
 process.exit(failed.length ? 1 : 0)

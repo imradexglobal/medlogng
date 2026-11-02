@@ -10,7 +10,7 @@ export const ORG_QUERY_READS = new Set([
   'lab_test_catalogue', 'lab_settings', 'imaging_orders', 'result_images', 'organization_memberships',
   'stock_lots', 'medication_requests', 'medication_administrations', 'dispensations', 'stock_movements',
   'bed_claims', 'invoices', 'payments', 'claims', 'coverages', 'plans', 'price_catalogue',
-  'devices', 'staff_invites', 'audit_events',
+  'devices', 'staff_invites', 'audit_events', 'patient_photos',
 ])
 
 const READ_CAPABILITIES = {
@@ -129,6 +129,9 @@ export function serializeFirestoreData(value, depth = 0) {
   if (value && typeof value.toMillis === 'function' && typeof value.toDate === 'function') {
     const date = value.toDate()
     return { __firestoreType: 'timestamp', seconds: Math.floor(date.getTime() / 1000), nanoseconds: (date.getTime() % 1000) * 1e6 }
+  }
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return { __firestoreType: 'bytes', value: Buffer.from(value).toString('base64') }
   }
   if (Array.isArray(value)) return value.map((item) => serializeFirestoreData(item, depth + 1))
   if (value && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)) {

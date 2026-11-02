@@ -103,13 +103,20 @@ export function normalizeAdmissions(list) {
 
 export const normalizeWardId = (value) => String(value || '').trim().toLocaleLowerCase()
 
-// Treat common labels such as `1`, `Bed 1` and `bed-01` as one physical bed.
+// Treat all bed labels as one physical bed, normalizing to consistent `Bed N` format.
+// Input: `1`, `Bed 1`, `bed-01`, `bed 01`, `BED_1` → output: `Bed 1`
 export function normalizeBedId(value) {
-  const text = String(value ?? '').trim().toLocaleLowerCase()
+  const text = String(value ?? '').trim()
   if (!text) return ''
   const match = text.match(/^(?:bed\s*)?(\d+)$/i)
-  if (match) return String(Number(match[1]))
-  return text.replace(/\s+/g, ' ')
+  if (match) return `Bed ${Number(match[1])}`
+  // If already has "Bed " prefix, normalize the number part
+  const bedMatch = text.match(/^bed\s*(\d+)$/i)
+  if (bedMatch) return `Bed ${Number(bedMatch[1])}`
+  // Clean up and re-add Bed prefix for unknown formats
+  const clean = text.replace(/\s+/g, ' ').replace(/bed/gi, '').trim()
+  if (clean) return `Bed ${clean}`
+  return ''
 }
 
 const sameText = (a, b) => normalizeWardId(a) === normalizeWardId(b)

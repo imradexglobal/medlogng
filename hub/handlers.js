@@ -26,7 +26,7 @@
 import { FieldValue } from 'firebase-admin/firestore'
 import { initFoundation } from './foundation.js'
 import {
-  toLine, mergeRequestLine, normalizeRequest, isOpenRequest, REQUEST_STATUS, toRequestItems, applyIssue, statusForProgress,
+  toLine, mergeRequestLine, normalizeRequest, isOpenRequest, REQUEST_STATUS, toRequestItems, applyIssue, statusForProgress, requestProgress,
 } from '../src/features/pharmacy/requests.js'
 import {
   exceedsOrder, applyAdministration, buildDoseEvent, lineRemainingToGive, lineGiven,
@@ -699,6 +699,146 @@ export async function handlePharmacyDispense(db, op) {
   })
 }
 
+export async function handleStockCreate(db, op) {
+  const { drugId, movementId, drug } = op.args || {}
+  const orgId = op.orgId || ''
+  if (!orgId || !drugId || !drug || orgOf(drug) !== orgId) throw new PermanentError('stock_create op is incomplete')
+  const lotRef = db.collection('stock_lots').doc(drugId)
+  const movementRef = movementId ? db.collection('stock_movements').doc(movementId) : null
+  return db.runTransaction(async (tx) => {
+    const lotSnap = await tx.get(lotRef)
+    const movementSnap = movementRef ? await tx.get(movementRef) : null
+    if (lotSnap.exists) {
+      if (orgOf(lotSnap.data()) === orgId && Number(lotSnap.data()?.stock) === Number(drug.stock)) return { id: drugId, deduped: true }
+      throw new PermanentError('stock lot id already belongs to another item')
+    }
+    if (movementSnap?.exists) throw new PermanentError('opening movement id is already in use')
+    tx.create(lotRef, { ...drug, created_at: FieldValue.serverTimestamp(), updated_at: FieldValue.serverTimestamp() })
+    if (movementRef) tx.create(movementRef, { type: 'opening', organization_id: orgId, drug_id: drugId,
+      sku: drug.sku || drug.drug_code || '', name: drug.name || '', qty: Number(drug.stock), batch: drug.batch || '', expiry: drug.expiry || '',
+      reference: 'opening balance', created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '',
+      created_at: FieldValue.serverTimestamp() })
+    return { id: drugId, movementId: movementId || '' }
+  })
+}
+
+export async function handleStockCorrect(db, op) {
+  const { drugId, movementId, countedQty, reason } = op.args || {}
+  const orgId = op.orgId || ''
+  if (!orgId || !drugId || !movementId || !Number.isFinite(countedQty) || countedQty < 0) throw new PermanentError('stock_correct op is incomplete')
+  const lotRef = db.collection('stock_lots').doc(drugId)
+  const moveRef = db.collection('stock_movements').doc(movementId)
+  return db.runTransaction(async (tx) => {
+    const [lotSnap, moveSnap] = await Promise.all([tx.get(lotRef), tx.get(moveRef)])
+    if (moveSnap.exists) return { id: drugId, movementId, deduped: true }
+    if (!lotSnap.exists || orgOf(lotSnap.data()) !== orgId) throw new PermanentError('stock lot does not belong to this hospital')
+    const lot = lotSnap.data() || {}
+    tx.update(lotRef, { stock: countedQty, status: countedQty === 0 ? 'Out' : (countedQty < 20 ? 'Low' : 'OK'), updated_at: FieldValue.serverTimestamp() })
+    tx.create(moveRef, { type: 'adjust', organization_id: orgId, drug_id: drugId, sku: lot.sku || '', name: lot.name || '',
+      qty: countedQty, counted_qty: countedQty, batch: lot.batch || '', expiry: lot.expiry || '', reason: reason || '',
+      created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '', created_at: FieldValue.serverTimestamp() })
+    return { id: drugId, newStock: countedQty }
+  })
+}
+
+export async function handleStockUpdate(db, op) {
+  const { drugId, movementId, fields } = op.args || {}
+  const orgId = op.orgId || ''
+  if (!orgId || !drugId || !movementId || !Number.isFinite(fields?.stock)) throw new PermanentError('stock_update op is incomplete')
+  const lotRef = db.collection('stock_lots').doc(drugId)
+  const moveRef = db.collection('stock_movements').doc(movementId)
+  return db.runTransaction(async (tx) => {
+    const [lotSnap, moveSnap] = await Promise.all([tx.get(lotRef), tx.get(moveRef)])
+    if (moveSnap.exists) return { id: drugId, deduped: true }
+    if (!lotSnap.exists || orgOf(lotSnap.data()) !== orgId) throw new PermanentError('stock lot does not belong to this hospital')
+    const prior = lotSnap.data() || {}
+    const actor = op.actor || {}
+    const now = FieldValue.serverTimestamp()
+    tx.update(lotRef, { ...fields, updated_at: now })
+    tx.create(moveRef, { type: 'adjust', organization_id: orgId, drug_id: drugId, sku: fields.sku || prior.sku || '',
+      name: fields.name || prior.name || '', qty: Number(fields.stock) - (Number(prior.stock) || 0), batch: fields.batch ?? prior.batch ?? '',
+      expiry: fields.expiry ?? prior.expiry ?? '', reason: 'Stock adjustment via item edit', counted_qty: Number(fields.stock),
+      created_by: actor.uid || null, created_by_name: actor.name || actor.email || '', created_at: now })
+    return { id: drugId, newStock: Number(fields.stock) }
+  })
+}
+
+export async function handlePharmacyReverse(db, op) {
+  const { requestId, lineId, movementId, ticketId, preview = {} } = op.args || {}
+  const orgId = op.orgId || ''
+  if (!orgId || !requestId || !lineId || !movementId || !ticketId) throw new PermanentError('pharmacy_reverse op is incomplete')
+  const requestRef = db.collection(REQUESTS).doc(requestId)
+  const lotRef = db.collection('stock_lots').doc(preview.drugId)
+  const moveRef = db.collection('stock_movements').doc(movementId)
+  const ticketRef = db.collection('dispensations').doc(ticketId)
+  return db.runTransaction(async (tx) => {
+    const [requestSnap, lotSnap, moveSnap, ticketSnap] = await Promise.all([tx.get(requestRef), tx.get(lotRef), tx.get(moveRef), tx.get(ticketRef)])
+    if (ticketSnap.exists && moveSnap.exists) return { ticketId, deduped: true }
+    if (!requestSnap.exists || orgOf(requestSnap.data()) !== orgId) throw new PermanentError('prescription belongs to a different hospital')
+    if (!lotSnap.exists || orgOf(lotSnap.data()) !== orgId) throw new PermanentError('stock lot belongs to a different hospital')
+    const request = requestSnap.data() || {}
+    const lines = toRequestItems(request)
+    const line = lines.find((item) => item.line_id === lineId)
+    if (!line || line.external || line.drug_id !== preview.drugId) throw new PermanentError('prescription line cannot be reversed')
+    const qty = Number(line.dispensed_qty) || 0
+    if (qty <= 0) throw new PermanentError('prescription line has no issued quantity')
+    const lot = lotSnap.data() || {}
+    const batch = lot.batch || preview.batch || ''
+    const expiry = lot.expiry || preview.expiry || ''
+    const next = lines.map((item) => item.line_id === lineId ? { ...item, dispensed_qty: 0 } : item)
+    const progress = requestProgress(next)
+    const restoredStock = (Number(lot.stock) || 0) + qty
+    tx.update(lotRef, { stock: restoredStock, batch, expiry, status: restoredStock === 0 ? 'Out' : (restoredStock < 20 ? 'Low' : 'OK'), updated_at: FieldValue.serverTimestamp() })
+    tx.create(moveRef, { type: 'in', organization_id: orgId, drug_id: line.drug_id, sku: lot.sku || '', name: lot.name || line.medicine || '',
+      qty, batch, expiry, reason: 'Dispense reversed', patient_id: request.patient_id || '', medication_request_id: requestId, line_id: lineId,
+      created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '', created_at: FieldValue.serverTimestamp() })
+    tx.create(ticketRef, { patient_id: request.patient_id || '', patient_name: request.patient_name || '',
+      items: JSON.stringify([{ drug_id: line.drug_id, sku: lot.sku || '', name: lot.name || line.medicine || '', batch, qty, unit: lot.unit || 'tabs' }]),
+      by: op.actor?.name || op.actor?.email || '', status: 'reversed', reason: 'Dispense reversed for "' + (line.medicine || 'medicine') + '"',
+      organization_id: orgId, medication_request_id: requestId, line_id: lineId, created_at: FieldValue.serverTimestamp(), updated_at: FieldValue.serverTimestamp() })
+    tx.update(requestRef, { items: next, status: statusForProgress(progress), reason: 'Dispense reversed', dispensed_at: null, updated_at: FieldValue.serverTimestamp() })
+    return { ticketId, newStock: (Number(lot.stock) || 0) + qty }
+  })
+}
+
+export async function handleFileUpload(db, op) {
+  const { kind, id, metadata, contentType, contentBase64, remove } = op.args || {}
+  const orgId = op.orgId || ''
+  if (!orgId || !kind || !id) throw new PermanentError('file_upload op is incomplete')
+  const collectionName = kind === 'patient_photo' ? 'patient_photos' : 'result_images'
+  const parentRef = db.collection(collectionName).doc(id)
+  const blobRef = parentRef.collection('blob').doc('data')
+  const linkedRef = !remove && kind === 'patient_photo' && metadata?.patient_id
+    ? db.collection('patients').doc(metadata.patient_id)
+    : !remove && kind === 'result_image'
+      ? db.collection(metadata?.kind === 'imaging' ? 'imaging_orders' : 'lab_orders').doc(metadata?.order_id || '')
+      : null
+  return db.runTransaction(async (tx) => {
+    const parent = await tx.get(parentRef)
+    const linked = linkedRef ? await tx.get(linkedRef) : null
+    if (remove) {
+      if (parent.exists && orgOf(parent.data()) !== orgId) throw new PermanentError('file belongs to a different hospital')
+      if (parent.exists) tx.delete(parentRef)
+      tx.delete(blobRef)
+      return { id, removed: true }
+    }
+    if (!metadata || orgOf(metadata) !== orgId || !contentBase64) throw new PermanentError('file metadata does not match this hospital')
+    if (parent.exists && orgOf(parent.data()) !== orgId) throw new PermanentError('file id already belongs to a different hospital')
+    if (!linked?.exists || orgOf(linked.data()) !== orgId) throw new PermanentError('linked patient or order does not belong to this hospital')
+    if (parent.exists && kind === 'result_image') {
+      if (orgOf(parent.data()) === orgId) return { id, deduped: true }
+      throw new PermanentError('result image id belongs to a different hospital')
+    }
+    const bytes = Buffer.from(contentBase64, 'base64')
+    const blobData = { bytes, content_type: contentType, organization_id: orgId }
+    if (kind === 'result_image') tx.create(parentRef, { ...metadata, created_at: FieldValue.serverTimestamp() })
+    else tx.set(parentRef, { ...metadata, updated_at: FieldValue.serverTimestamp() })
+    if (kind === 'result_image') tx.create(blobRef, blobData)
+    else tx.set(blobRef, blobData)
+    return { id }
+  })
+}
+
 export const HANDLERS = {
   rx_mirror: handleRxMirror,
   lab_snapshot: handleLabSnapshot,
@@ -709,6 +849,11 @@ export const HANDLERS = {
   medication_administer: handleMedicationAdminister,
   stock_receive: handleStockReceive,
   pharmacy_dispense: handlePharmacyDispense,
+  stock_create: handleStockCreate,
+  stock_correct: handleStockCorrect,
+  stock_update: handleStockUpdate,
+  pharmacy_reverse: handlePharmacyReverse,
+  file_upload: handleFileUpload,
   document_mutation: handleDocumentMutation,
 }
 

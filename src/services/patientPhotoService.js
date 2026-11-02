@@ -8,13 +8,14 @@
 // rendering the patient header — only the small metadata doc is read, and the
 // binary is fetched on demand when the photo is opened.
 import {
-  db, collection, query, where, getDocs, getDoc, doc, setDoc, deleteDoc, writeBatch, serverTimestamp, Bytes,
+  db, collection, query, where, getDocs, getDoc, doc, serverTimestamp,
 } from '../firebase.js'
 import { authStore } from '../store/authStore.js'
 import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { currentStaffName } from '../lib/staffName.js'
+import { encodeBlobBase64, queueOfflineFile } from './offlineFileSync.js'
 
 const PATIENT_PHOTOS = 'patient_photos'
 const BLOB_DOC = 'blob'
@@ -58,19 +59,8 @@ export async function upsertPatientPhoto({ pid, file }) {
     updated_by_name: currentStaffName(),
     updated_at: serverTimestamp(),
   }
-  const buffer = await blob.arrayBuffer()
-
-  const batch = writeBatch(db)
-  batch.set(metaRef, meta)
-  batch.set(
-    doc(db, PATIENT_PHOTOS, pid, BLOB_DOC, BLOB_ID),
-    {
-      bytes: Bytes.fromUint8Array(new Uint8Array(buffer)),
-      content_type: meta.content_type,
-      organization_id: activeOrg,
-    },
-  )
-  await batch.commit()
+  await queueOfflineFile({ kind: 'patient_photo', id: pid, metadata: { ...meta, updated_at: Date.now() },
+    contentType: meta.content_type, contentBase64: await encodeBlobBase64(blob) })
 
   try {
     await logAudit({
@@ -82,7 +72,7 @@ export async function upsertPatientPhoto({ pid, file }) {
   } catch (e) {
     console.warn('[patientPhoto] audit append failed:', e?.message)
   }
-  return { pid, ...meta }
+  return { pid, pendingSync: true }
 }
 
 // ---- read (metadata only) ---------------------------------------------------
@@ -112,10 +102,7 @@ export async function removePatientPhoto(pid) {
   if (!activeOrg) throw new Error('No hospital selected.')
   if (!pid) throw new Error('A patient id is required.')
 
-  const batch = writeBatch(db)
-  batch.delete(doc(db, PATIENT_PHOTOS, pid, BLOB_DOC, BLOB_ID))
-  batch.delete(doc(db, PATIENT_PHOTOS, pid))
-  await batch.commit()
+  await queueOfflineFile({ kind: 'patient_photo', id: pid, remove: true })
 
   try {
     await logAudit({
@@ -127,4 +114,5 @@ export async function removePatientPhoto(pid) {
   } catch (e) {
     console.warn('[patientPhoto] audit append failed:', e?.message)
   }
+  return { pid, pendingSync: true }
 }

@@ -75,14 +75,17 @@ export async function AdmissionWorkspaceView(app, params = {}) {
   }
 
   // Load all session-scoped collections
-  let [planItems, labs, imaging, meds, invoices, doses] = await Promise.all([
-    listSessionPlanItems(sid),
-    listSessionLabs(sid),
-    listSessionImaging(sid),
-    listSessionMedicationRequests(sid),
-    listSessionInvoices(sid),
-    listSessionAdministrations(sid),
-  ])
+  const sectionLabels = ['clinical plan', 'laboratory', 'imaging', 'medication requests', 'billing', 'medication administration']
+  let unavailableSections = []
+  async function loadSessionData() {
+    const results = await Promise.allSettled([
+      listSessionPlanItems(sid), listSessionLabs(sid), listSessionImaging(sid),
+      listSessionMedicationRequests(sid), listSessionInvoices(sid), listSessionAdministrations(sid),
+    ])
+    unavailableSections = results.flatMap((result, index) => result.status === 'rejected' ? [sectionLabels[index]] : [])
+    return results.map((result) => result.status === 'fulfilled' ? result.value : [])
+  }
+  let [planItems, labs, imaging, meds, invoices, doses] = await loadSessionData()
 
   // Pharmacy catalogue, loaded lazily the first time the prescription form opens.
   let drugs = null
@@ -116,14 +119,7 @@ export async function AdmissionWorkspaceView(app, params = {}) {
 
   // Re-load session data after a write, then re-render.
   async function reload() {
-    ;[planItems, labs, imaging, meds, invoices, doses] = await Promise.all([
-      listSessionPlanItems(sid),
-      listSessionLabs(sid),
-      listSessionImaging(sid),
-      listSessionMedicationRequests(sid),
-      listSessionInvoices(sid),
-      listSessionAdministrations(sid),
-    ])
+    ;[planItems, labs, imaging, meds, invoices, doses] = await loadSessionData()
     render()
   }
 
@@ -386,6 +382,9 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       subtitle: (admission.patientName || 'Patient') + ' · ' + (admission.wardName || '—') + ' · ' + (admission.bedNumber || '—'),
       actions,
       body:
+        (unavailableSections.length
+          ? '<div class="card"><p class="sub"><strong>Some workspace sections could not be loaded.</strong> Your role may not have access to: ' + esc(unavailableSections.join(', ')) + '.</p></div>'
+          : '') +
         overviewHTML +
         planCard +
         labsCard +

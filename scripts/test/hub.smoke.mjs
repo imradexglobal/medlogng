@@ -63,7 +63,8 @@ const encId = 'test-hub-enc-' + Date.now().toString(36)
 const patientId = 'test-hub-patient-1'
 
 const { startHub } = await import('../../hub/server.js')
-const { initFirestore, HANDLERS, validateOp } = await import('../../hub/handlers.js')
+const { initFirestore, HANDLERS } = await import('../../hub/handlers.js')
+const { validateOp } = await import('../../hub/ops.js')
 
 // Start the hub. No HUB_TOKEN is passed — the hub will log a warning that
 // the shared secret is obsolete, but it will still serve /health and /.
@@ -91,37 +92,38 @@ const post = (body, bearerToken = null) =>
     req.end(JSON.stringify(body))
   })
 
-// --- Schema validation tests (no auth required) ---
+// Schema validation is tested directly because /outbox authenticates before
+// it inspects the request body. The HTTP boundary separately verifies that
+// unauthenticated requests receive 401.
 
 await t('rejects ops missing clientOpKey', async () => {
-  const r = await post({ ops: [{ kind: 'rx_mirror', orgId, args: {} }] })
-  assert.equal(r.status, 400, 'expected 400 for missing clientOpKey')
+  assert.ok(validateOp({ kind: 'rx_mirror', orgId, args: {} }, 0).error)
 })
 
 await t('rejects ops with malformed clientOpKey', async () => {
-  const r = await post({ ops: [{ clientOpKey: 'bad!@#', kind: 'rx_mirror', orgId, args: {} }] })
-  assert.equal(r.status, 400, 'expected 400 for malformed clientOpKey')
+  assert.ok(validateOp({ clientOpKey: 'bad!@#', kind: 'rx_mirror', orgId, args: {} }, 0).error)
 })
 
 await t('rejects ops with unknown kind', async () => {
-  const r = await post({ ops: [{ clientOpKey: 'k1', kind: 'not_a_kind', orgId, args: {} }] })
-  assert.equal(r.status, 400, 'expected 400 for unknown kind')
+  assert.ok(validateOp({ clientOpKey: 'k1', kind: 'not_a_kind', orgId, args: {} }, 0).error)
 })
 
 await t('rejects ops with malformed orgId', async () => {
-  const r = await post({ ops: [{ clientOpKey: 'k1', kind: 'rx_mirror', orgId: 'bad!org', args: {} }] })
-  assert.equal(r.status, 400, 'expected 400 for malformed orgId')
+  assert.ok(validateOp({ clientOpKey: 'k1', kind: 'rx_mirror', orgId: 'bad!org', args: {} }, 0).error)
 })
 
 await t('rejects ops with empty lines array', async () => {
-  const r = await post({ ops: [{ clientOpKey: 'k1', kind: 'rx_mirror', orgId, args: { patientId, patientName: 'X', lines: [] } }] })
-  assert.equal(r.status, 400, 'expected 400 for empty lines')
+  assert.ok(validateOp({ clientOpKey: 'k1', kind: 'rx_mirror', orgId, args: { patientId, patientName: 'X', lines: [] } }, 0).error)
 })
 
 await t('validates args through kind validator', async () => {
-  const r = await post({ ops: [{ clientOpKey: 'k1', kind: 'rx_mirror', orgId,
-    args: { patientId: 'p1', patientName: 'X', lines: [] } }] })
-  assert.equal(r.status, 400, 'expected 400: lines must be non-empty array')
+  assert.ok(validateOp({ clientOpKey: 'k1', kind: 'rx_mirror', orgId,
+    args: { patientId: 'p1', patientName: 'X', lines: [] } }, 0).error)
+})
+
+await t('outbox rejects unauthenticated HTTP requests before validation', async () => {
+  const r = await post({ ops: [{ clientOpKey: 'k1', kind: 'rx_mirror', orgId, args: {} }] })
+  assert.equal(r.status, 401, 'auth is required before request validation')
 })
 
 // --- Health endpoint (no auth needed for minimal mode) ---
@@ -146,6 +148,7 @@ await t('health detail available to local caller (no auth needed for minimal)', 
 
 const rxOp = {
   clientOpKey: 'v1:rx_mirror:smoke-1',
+  authVersion: 2,
   kind: 'rx_mirror',
   orgId,
   actor: { uid: 'doctor-1', email: 'doc@example.test' },
@@ -181,6 +184,7 @@ await t('seed encounter for smoke test', async () => {
 })
 
 await t('seed patient org link', async () => {
+  await db.collection('patients').doc(patientId).set({ organization_id: orgId, name: 'Hub Smoke Patient' })
   await db.collection('organization_patients').doc(orgId + '_' + patientId).set({
     organization_id: orgId,
     patient_id: patientId,
@@ -195,8 +199,8 @@ await t('rx lands as ONE request with the line + sync key', async () => {
   assert.ok(result.created || result.id, 'expected created or id from handler')
   if (result.id) {
     const snap = await db.collection('medication_requests').doc(result.id).get()
-    assert.equal(snap.size, 1, 'expected exactly one request doc')
-    const doc = snap.docs[0].data()
+    assert.equal(snap.exists, true, 'expected the request document')
+    const doc = snap.data()
     assert.equal(doc.items.length, 1, 'expected one line')
     assert.equal(doc.items[0].medicine, 'Metformin')
     assert.equal(doc.items[0].quantity, 30)
@@ -219,11 +223,11 @@ await t('HANDLER replay is a no-op (no doubled quantities)', async () => {
   // First write
   const res1 = await HANDLERS.rx_mirror(db, rxOp)
   // Second write with same key should be deduped
-  const res2 = await HANDLERS.rx_mirror(db, { ...rxOp, clientOpKey: res1.clientOpKey })
+  const res2 = await HANDLERS.rx_mirror(db, { ...rxOp, clientOpKey: rxOp.clientOpKey })
   assert.equal(res2.deduped, true, 'handler replay dedup works')
   // Quantity must stay 30
   const snap = await db.collection('medication_requests').doc(res1.id).get()
-  assert.equal(snap.docs[0].data().items[0].quantity, 30, 'quantity must stay 30')
+  assert.equal(snap.data().items[0].quantity, 30, 'quantity must stay 30')
 })
 
 await t('second prescription joins the SAME open script', async () => {
@@ -237,8 +241,8 @@ await t('second prescription joins the SAME open script', async () => {
   assert.ok(result.id || result.created, 'expected result from handler')
   if (result.id) {
     const snap = await db.collection('medication_requests').doc(result.id).get()
-    assert.equal(snap.size, 1, 'still ONE request doc')
-    assert.equal(snap.docs[0].data().items.length, 2, 'two lines in it')
+    assert.equal(snap.exists, true, 'the open request still exists')
+    assert.equal(snap.data().items.length, 2, 'two lines in it')
   }
 })
 
@@ -270,6 +274,7 @@ await t('health reports queue counts after ops', async () => {
 try {
   const snap = await db.collection('medication_requests').where('patient_id', '==', patientId).get()
   for (const d of snap.docs) await d.ref.delete()
+  await db.collection('patients').doc(patientId).delete().catch(() => {})
   await db.collection('encounters').doc(encId).delete().catch(() => {})
 } catch { /* emulator already gone */ }
 await hub.close()

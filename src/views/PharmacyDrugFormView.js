@@ -212,7 +212,7 @@ export async function PharmacyDrugFormView(app, params = {}) {
         }
 
         if (isEdit) {
-          await updateDrug(drug.id, {
+          const saved = await updateDrug(drug.id, {
             name: vals.name,
             drug_code: vals.drug_code.trim().toUpperCase(),
             strength: vals.strength,
@@ -227,9 +227,9 @@ export async function PharmacyDrugFormView(app, params = {}) {
             status: (Number(vals.stock) || 0) === 0 ? 'Out' : ((Number(vals.stock) || 0) < 20 ? 'Low' : 'OK'),
             supplier: vals.supplier || '',
           })
-          toast('Saved ' + vals.name)
+          toast(saved?.pendingSync ? vals.name + ' saved and queued to sync' : 'Saved ' + vals.name)
         } else {
-          await createDrug({
+          const saved = await createDrug({
             name: vals.name,
             drug_code: vals.drug_code.trim().toUpperCase(),
             strength: vals.strength,
@@ -243,7 +243,7 @@ export async function PharmacyDrugFormView(app, params = {}) {
             expiry: vals.expiry || '',
             supplier: vals.supplier || '',
           })
-          toast('Drug added · SKU ' + sku)
+          toast(saved?.pendingSync ? 'Drug added and queued to sync · SKU ' + sku : 'Drug added · SKU ' + sku)
         }
         navigate('/pharmacy')
       } catch (e) {

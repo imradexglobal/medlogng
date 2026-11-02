@@ -121,8 +121,8 @@ async function render(container, opts) {
     const pickLabel = pick ? pick.textContent : ''
     if (pick) pick.textContent = 'Uploading…'
     try {
-      await addResultImage({ kind, orderId, patientId, file, caption })
-      toast('Result document attached')
+      const saved = await addResultImage({ kind, orderId, patientId, file, caption })
+      toast(saved?.pendingSync ? 'Result document queued to sync when the hospital connection is available' : 'Result document attached')
       if (onChange) onChange()
       await render(container, opts)
     } catch (e) {

@@ -109,9 +109,33 @@ const HANDLERS = {
     const { applyQueuedStockReceive } = await import('./pharmacyService.js')
     return applyQueuedStockReceive(args)
   },
+  pharmacy_dispense: async (args) => {
+    const { applyQueuedDispense } = await import('./pharmacyService.js')
+    return applyQueuedDispense(args)
+  },
+  stock_create: async (args) => {
+    const { applyQueuedStockCreate } = await import('./pharmacyService.js')
+    return applyQueuedStockCreate(args)
+  },
+  stock_correct: async (args) => {
+    const { applyQueuedStockCorrection } = await import('./pharmacyService.js')
+    return applyQueuedStockCorrection(args)
+  },
+  stock_update: async (args) => {
+    const { applyQueuedStockUpdate } = await import('./pharmacyService.js')
+    return applyQueuedStockUpdate(args)
+  },
+  pharmacy_reverse: async (args) => {
+    const { applyQueuedPharmacyReverse } = await import('./pharmacyService.js')
+    return applyQueuedPharmacyReverse(args)
+  },
+  file_upload: async (args) => {
+    const { applyQueuedFileUpload } = await import('./offlineFileSync.js')
+    return applyQueuedFileUpload(args)
+  },
 }
 
-const HUB_FIRST_KINDS = new Set(['admission_create', 'admission_discharge', 'admission_transfer', 'billing_payment', 'medication_administer', 'stock_receive', 'document_mutation'])
+const HUB_FIRST_KINDS = new Set(['admission_create', 'admission_discharge', 'admission_transfer', 'billing_payment', 'medication_administer', 'stock_receive', 'pharmacy_dispense', 'stock_create', 'stock_correct', 'stock_update', 'pharmacy_reverse', 'file_upload', 'document_mutation'])
 
 export const OUTBOX_KINDS = Object.keys(HANDLERS)
 
@@ -485,8 +509,15 @@ export async function drain() {
     for (let pass = 0; pass < 10; pass++) {
       const batch = await readByStatus('queued', true) // claim durably first
       if (!batch.length) break
-      const take = batch.slice(0, BATCH_LIMIT)
-      const back = batch.slice(BATCH_LIMIT)
+      const take = []
+      let payloadBytes = 0
+      for (const row of batch.slice(0, BATCH_LIMIT)) {
+        const rowBytes = JSON.stringify({ kind: row.kind, args: row.args }).length + 256
+        if (take.length && payloadBytes + rowBytes > 1400 * 1024) break
+        take.push(row)
+        payloadBytes += rowBytes
+      }
+      const back = batch.slice(take.length)
       const offline = typeof navigator !== 'undefined' && navigator.onLine === false
 
       // These handoffs were created because Firestore did not acknowledge the

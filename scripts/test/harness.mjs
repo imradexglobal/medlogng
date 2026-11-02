@@ -9,6 +9,19 @@ import { pathToFileURL } from 'node:url'
 
 register('./fake-firebase-loader.mjs', import.meta.url)
 
+// Browser services persist auth state in localStorage. Give the Node harness
+// an isolated in-memory implementation so persistence calls do not leak noisy
+// ReferenceErrors or introduce filesystem-backed test state.
+if (!globalThis.localStorage) {
+  const storage = new Map()
+  globalThis.localStorage = {
+    getItem(key) { return storage.has(String(key)) ? storage.get(String(key)) : null },
+    setItem(key, value) { storage.set(String(key), String(value)) },
+    removeItem(key) { storage.delete(String(key)) },
+    clear() { storage.clear() },
+  }
+}
+
 const { authStore } = await import('../../src/store/authStore.js')
 const { resetFake, __fake, auth } = await import('./fake-firebase.js')
 const { ROLE_CAPS } = await import('../../src/features/admin/roles.js')
@@ -57,7 +70,7 @@ export function allDocs(prefix) {
   return out
 }
 
-export { __fake, authStore }
+export { __fake, authStore, resetFake }
 
 // Convenience for asserting a Firestore transaction was not left half-applied.
 export function docCount(prefix) {

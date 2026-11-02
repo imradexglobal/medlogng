@@ -197,6 +197,29 @@ match /patients/{pid} {
   // one (client additionally refuses when clinical history exists).
   allow delete: if canDelete(resource.data.organization_id);
 }
+// Patient photos are metadata plus one compressed blob document. Both parts
+// stay hospital-scoped and use the same demographic permission.
+match /patient_photos/{pid} {
+  allow read: if signedIn();
+  allow create: if hasCap(request.resource.data.organization_id, 'patient.demographics.update')
+    && request.resource.data.patient_id == pid
+    && exists(/databases/$(database)/documents/patients/$(pid))
+    && get(/databases/$(database)/documents/patients/$(pid)).data.organization_id == request.resource.data.organization_id;
+  allow update: if hasCap(resource.data.organization_id, 'patient.demographics.update')
+    && resource.data.organization_id == request.resource.data.organization_id
+    && request.resource.data.patient_id == pid;
+  allow delete: if hasCap(resource.data.organization_id, 'patient.demographics.update');
+  match /blob/{blobId} {
+    allow read: if signedIn() && blobId == 'data';
+    allow create: if hasCap(request.resource.data.organization_id, 'patient.demographics.update')
+      && blobId == 'data'
+      && getAfter(/databases/$(database)/documents/patient_photos/$(pid)).data.organization_id == request.resource.data.organization_id;
+    allow update: if hasCap(resource.data.organization_id, 'patient.demographics.update')
+      && blobId == 'data'
+      && resource.data.organization_id == request.resource.data.organization_id;
+    allow delete: if hasCap(resource.data.organization_id, 'patient.demographics.update') && blobId == 'data';
+  }
+}
 match /patient_identifiers/{id} {
   allow read, write: if false;
 }
@@ -424,11 +447,18 @@ match /imaging_orders/{id} {
 // create (same capability, same org pinning).
 match /result_images/{id} {
   allow read: if signedIn();
-  allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+  allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter')
+    && request.resource.data.kind in ['lab', 'imaging']
+    && (request.resource.data.kind == 'imaging'
+      ? exists(/databases/$(database)/documents/imaging_orders/$(request.resource.data.order_id))
+        && get(/databases/$(database)/documents/imaging_orders/$(request.resource.data.order_id)).data.organization_id == request.resource.data.organization_id
+      : exists(/databases/$(database)/documents/lab_orders/$(request.resource.data.order_id))
+        && get(/databases/$(database)/documents/lab_orders/$(request.resource.data.order_id)).data.organization_id == request.resource.data.organization_id);
   allow update, delete: if false;
-  match /{blob=**} {
+  match /blob/data {
     allow read: if signedIn();
-    allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter');
+    allow create: if hasCap(request.resource.data.organization_id, 'lab.result.enter')
+      && getAfter(/databases/$(database)/documents/result_images/$(id)).data.organization_id == request.resource.data.organization_id;
     allow update, delete: if false;
   }
 }

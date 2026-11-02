@@ -46,10 +46,11 @@ import { createRelay } from './relay.js'
 import { initFoundation, foundationSummary } from './foundation.js'
 import { createAuthenticator } from './auth.js'
 import { createAuditor } from './audit.js'
+import { createLocalClinicalAi } from './clinical-ai/ollama.js'
 import { listLanAddresses, startupLines, describeListenError } from './netinfo.js'
 
 const VERSION = 'hub-2.0.0'
-const MAX_BODY = 1024 * 1024 // 1 MB
+const MAX_BODY = 2 * 1024 * 1024 // 2 MB: enough for a bounded, compressed offline result PDF
 const MAX_OPS = 100
 const CLIENT_HEADER = 'x-medilog-client'
 const CLIENT_VALUE = 'medilogng-web'
@@ -291,7 +292,75 @@ function makeStaticHandler(staticDir) {
 // ---- request handler -------------------------------------------------------
 
 export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
-  speechJobs = null, speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, verifiedHttpsAddresses = new Set() }) {
+  speechJobs = null, speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, clinicalAi = null, verifiedHttpsAddresses = new Set() }) {
+  async function recordClinicalAiAudit(action, uid, orgId, patientId, encounterId) {
+    if (!db) throw new Error('Clinical audit storage is unavailable.')
+    await db.collection('audit_events').add({
+      action: 'clinical_draft.' + action, actor_user_id: uid, organization_id: orgId,
+      actor_organization_id: orgId, source: 'clinical-ai', operation: action,
+      patient_id: patientId, record_id: encounterId, occurredAt: new Date(),
+    })
+  }
+  async function authorizeClinicalDraftRequest(req, orgId, patientId, encounterId) {
+    const identity = typeof authenticator.verifyOnline === 'function'
+      ? await authenticator.verifyOnline(req) : await authenticator.verify(req)
+    await authenticator.authorize(identity, orgId, 'encounter.edit')
+    if (!db) throw Object.assign(new Error('Authoritative encounter access is unavailable.'), { status: 503, expose: true })
+    const snapshot = await db.collection('encounters').doc(encounterId).get()
+    const encounter = snapshot.exists ? snapshot.data() || {} : null
+    if (!encounter || encounter.organization_id !== orgId || encounter.patient_id !== patientId) {
+      throw Object.assign(new Error('Encounter does not belong to this patient and hospital.'), { status: 403, expose: true })
+    }
+    return identity
+  }
+  async function handleClinicalDraft(req, res) {
+    const ip = String(req.socket.remoteAddress || 'unknown')
+    const quota = rateLimit('clinical-ai:' + ip, 10)
+    if (!quota.ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many clinical AI requests. Wait and retry.' }, { 'retry-after': String(quota.retryAfter) }); return }
+    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Clinical AI requests require HTTPS.' }); return }
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
+      req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return
+    }
+    if (!clinicalAi) { req.resume(); json(res, 503, { ok: false, error: 'Local clinical AI is not configured on this Host.' }); return }
+    try {
+      const body = await readJson(req, 150_000)
+      const { orgId, encounterId, patientId, transcript } = body || {}
+      if (![orgId, encounterId, patientId].every((v) => typeof v === 'string' && v.length > 0) ||
+          typeof transcript !== 'string' || !transcript.trim() || transcript.length > 100_000) {
+        json(res, 400, { ok: false, error: 'Organization, patient, encounter and a bounded transcript are required.' }); return
+      }
+      const identity = await authorizeClinicalDraftRequest(req, orgId, patientId, encounterId)
+      const draft = await clinicalAi.generate(transcript)
+      await recordClinicalAiAudit('generated', identity.uid, orgId, patientId, encounterId)
+      json(res, 200, { ok: true, draft, binding: { uid: identity.uid, organizationId: orgId, patientId, encounterId } })
+      log.info('[hub] clinical draft generated', { uid: identity.uid, orgId, encounterId })
+    } catch (error) {
+      const status = Number(error?.status) || (error?.expose ? Number(error.status) || 400 : 503)
+      json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Clinical draft generation failed. Check local AI service status.' })
+    }
+  }
+  async function handleClinicalDraftReview(req, res) {
+    const ip = String(req.socket.remoteAddress || 'unknown')
+    const quota = rateLimit('clinical-ai-review:' + ip, 30)
+    if (!quota.ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many clinical review requests. Wait and retry.' }, { 'retry-after': String(quota.retryAfter) }); return }
+    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Clinical AI review requires HTTPS.' }); return }
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) { req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return }
+    try {
+      const body = await readJson(req, 16 * 1024)
+      const { orgId, patientId, encounterId, action } = body || {}
+      if (![orgId, patientId, encounterId].every((v) => typeof v === 'string' && v) || !['approved', 'rejected'].includes(action)) {
+        json(res, 400, { ok: false, error: 'A consultation binding and approve/reject decision are required.' }); return
+      }
+      const identity = await authorizeClinicalDraftRequest(req, orgId, patientId, encounterId)
+      await recordClinicalAiAudit(action, identity.uid, orgId, patientId, encounterId)
+      json(res, 200, { ok: true })
+    } catch (error) {
+      const status = Number(error?.status) || 503
+      json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Clinical review audit could not be saved.' })
+    }
+  }
   async function handleOutbox(req, res) {
     const ip = String(req.socket.remoteAddress || 'unknown')
     const ipLimit = rateLimit('ip:' + ip, 120)
@@ -871,6 +940,142 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
             if (matches(data)) byId.set(movementId, { id: movementId, data })
           }
         }
+        if (op.kind === 'pharmacy_dispense') {
+          const { dispensationId, patientId, patientName, medicationRequestId, items } = op.args
+          if (spec.collection === 'stock_lots') {
+            const totals = new Map()
+            for (const item of items) totals.set(item.drugId, (totals.get(item.drugId) || 0) + Number(item.requestedQty))
+            for (const [drugId, qty] of totals) {
+              const current = byId.get(drugId)?.data
+              if (current) {
+                const stock = Math.max(0, (Number(current.stock) || 0) - qty)
+                const data = { ...current, stock, batch: stock > 0 ? (current.batch || '') : '', expiry: stock > 0 ? (current.expiry || '') : '',
+                  status: stock === 0 ? 'Out' : (stock < 20 ? 'Low' : 'OK'), updated_at: stamp(op.addedAt) }
+                if (matches(data)) byId.set(drugId, { id: drugId, data })
+                else byId.delete(drugId)
+              }
+            }
+          } else if (spec.collection === 'dispensations') {
+            const data = { patient_id: patientId || '', patient_name: patientName || '',
+              items: JSON.stringify(items.map((item) => ({ drug_id: item.drugId, sku: item.preview?.sku || '', name: item.preview?.name || '',
+                batch: item.preview?.batch || '', qty: item.requestedQty, unit: item.preview?.unit || 'tabs' }))),
+              by: op.actor?.name || op.actor?.email || '', status: 'dispensed', organization_id: orgId,
+              medication_request_id: medicationRequestId || '', created_at: stamp(op.addedAt), updated_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(dispensationId, { id: dispensationId, data })
+          } else if (spec.collection === 'stock_movements') {
+            for (const item of items) {
+              const data = { type: 'out', organization_id: orgId, drug_id: item.drugId, sku: item.preview?.sku || '',
+                name: item.preview?.name || '', qty: item.requestedQty, batch: item.preview?.batch || '', expiry: item.preview?.expiry || '',
+                patient_id: patientId || '', patient_name: patientName || '', dispensation_id: dispensationId,
+                medication_request_id: medicationRequestId || '', created_by: op.actor?.uid || null,
+                created_by_name: op.actor?.name || op.actor?.email || '', created_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(item.movementId, { id: item.movementId, data })
+            }
+          } else if (spec.collection === 'medication_requests' && medicationRequestId) {
+            const current = byId.get(medicationRequestId)?.data
+            if (current) {
+              let requestItems = Array.isArray(current.items) ? current.items.map((item) => ({ ...item })) : []
+              const issued = new Map()
+              for (const item of items) {
+                const lineId = item.lineId || (requestItems.length === 1 ? requestItems[0].line_id : '')
+                if (lineId) issued.set(lineId, (issued.get(lineId) || 0) + Number(item.requestedQty))
+              }
+              requestItems = requestItems.map((item) => issued.has(item.line_id)
+                ? { ...item, dispensed_qty: Math.min(Number(item.quantity) || 0, (Number(item.dispensed_qty) || 0) + issued.get(item.line_id)) }
+                : item)
+              const complete = requestItems.length > 0 && requestItems.every((item) => (Number(item.dispensed_qty) || 0) >= (Number(item.quantity) || 0))
+              const data = { ...current, items: requestItems, status: complete ? 'Dispensed' : 'Partially Dispensed',
+                ...(complete ? { dispensed_at: stamp(op.addedAt) } : {}), updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(medicationRequestId, { id: medicationRequestId, data })
+            }
+          }
+        }
+        if (op.kind === 'stock_create' && spec.collection === 'stock_lots') {
+          const data = { ...op.args.drug, created_at: stamp(op.addedAt), updated_at: stamp(op.addedAt),
+            created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '' }
+          if (matches(data)) byId.set(op.args.drugId, { id: op.args.drugId, data })
+        }
+        if (op.kind === 'stock_create' && op.args.movementId && spec.collection === 'stock_movements') {
+          const drug = op.args.drug
+          const data = { type: 'opening', organization_id: orgId, drug_id: op.args.drugId,
+            sku: drug.sku || drug.drug_code || '', name: drug.name || '', qty: Number(drug.stock), batch: drug.batch || '', expiry: drug.expiry || '',
+            reference: 'opening balance', created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '', created_at: stamp(op.addedAt) }
+          if (matches(data)) byId.set(op.args.movementId, { id: op.args.movementId, data })
+        }
+        if (op.kind === 'stock_correct') {
+          const { drugId, movementId, countedQty, reason } = op.args
+          if (spec.collection === 'stock_lots') {
+            const current = byId.get(drugId)?.data
+            if (current) {
+              const data = { ...current, stock: countedQty, status: countedQty === 0 ? 'Out' : (countedQty < 20 ? 'Low' : 'OK'), updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(drugId, { id: drugId, data })
+              else byId.delete(drugId)
+            }
+          } else if (spec.collection === 'stock_movements') {
+            const lot = byId.get(drugId)?.data || op.args.preview || {}
+            const data = { type: 'adjust', organization_id: orgId, drug_id: drugId, sku: lot.sku || '', name: lot.name || '',
+              qty: countedQty, counted_qty: countedQty, batch: lot.batch || '', expiry: lot.expiry || '', reason: reason || '',
+              created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '', created_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(movementId, { id: movementId, data })
+          }
+        }
+        if (op.kind === 'stock_update') {
+          const { drugId, movementId, fields, previousStock = 0 } = op.args
+          if (spec.collection === 'stock_lots') {
+            const current = byId.get(drugId)?.data
+            if (current) {
+              const data = { ...current, ...fields, updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(drugId, { id: drugId, data })
+              else byId.delete(drugId)
+            }
+          } else if (spec.collection === 'stock_movements') {
+            const data = { type: 'adjust', organization_id: orgId, drug_id: drugId, sku: fields.sku || '', name: fields.name || '',
+              qty: Number(fields.stock) - Number(previousStock), counted_qty: Number(fields.stock), batch: fields.batch || '', expiry: fields.expiry || '',
+              reason: 'Stock adjustment via item edit', created_by: op.actor?.uid || null,
+              created_by_name: op.actor?.name || op.actor?.email || '', created_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(movementId, { id: movementId, data })
+          }
+        }
+        if (op.kind === 'file_upload' && !op.args.remove) {
+          const collectionName = op.args.kind === 'patient_photo' ? 'patient_photos' : 'result_images'
+          if (spec.collection === collectionName) {
+            const data = { ...op.args.metadata, created_by: op.actor?.uid || null,
+              created_by_name: op.actor?.name || op.actor?.email || '',
+              ...(op.args.kind === 'patient_photo' ? { updated_at: stamp(op.addedAt) } : { created_at: stamp(op.addedAt) }) }
+            if (matches(data)) byId.set(op.args.id, { id: op.args.id, data })
+          }
+        }
+        if (op.kind === 'file_upload' && op.args.remove && spec.collection === 'patient_photos') byId.delete(op.args.id)
+        if (op.kind === 'pharmacy_reverse') {
+          const { requestId, lineId, movementId, ticketId, preview = {} } = op.args
+          if (spec.collection === 'stock_lots' && preview.drugId) {
+            const current = byId.get(preview.drugId)?.data
+            if (current) {
+              const stock = (Number(current.stock) || 0) + (Number(preview.qty) || 0)
+              const data = { ...current, stock, batch: current.batch || preview.batch || '', expiry: current.expiry || preview.expiry || '',
+                status: stock === 0 ? 'Out' : (stock < 20 ? 'Low' : 'OK'), updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(preview.drugId, { id: preview.drugId, data })
+            }
+          } else if (spec.collection === 'stock_movements') {
+            const data = { type: 'in', organization_id: orgId, drug_id: preview.drugId || '', sku: '', name: preview.medicine || '',
+              qty: Number(preview.qty) || 0, batch: preview.batch || '', expiry: preview.expiry || '', reason: 'Dispense reversed', patient_id: preview.patientId || '',
+              medication_request_id: requestId, line_id: lineId, created_by: op.actor?.uid || null,
+              created_by_name: op.actor?.name || op.actor?.email || '', created_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(movementId, { id: movementId, data })
+          } else if (spec.collection === 'dispensations') {
+            const data = { patient_id: preview.patientId || '', patient_name: preview.patientName || '', items: JSON.stringify([{ drug_id: preview.drugId, name: preview.medicine || '', qty: Number(preview.qty) || 0 }]),
+              by: op.actor?.name || op.actor?.email || '', status: 'reversed', reason: 'Dispense reversed', organization_id: orgId,
+              medication_request_id: requestId, line_id: lineId, created_at: stamp(op.addedAt), updated_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(ticketId, { id: ticketId, data })
+          } else if (spec.collection === 'medication_requests') {
+            const current = byId.get(requestId)?.data
+            if (current) {
+              const items = Array.isArray(current.items) ? current.items.map((item) => item.line_id === lineId ? { ...item, dispensed_qty: 0 } : { ...item }) : []
+              const data = { ...current, items, status: 'Partially Dispensed', reason: 'Dispense reversed', updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(requestId, { id: requestId, data })
+            }
+          }
+        }
         if (op.kind !== 'document_mutation') continue
         for (const mutation of op.args.mutations || []) {
           if (mutation.collection !== spec.collection) continue
@@ -949,8 +1154,10 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     try { body = await readJson(req, 32 * 1024) }
     catch (error) { json(res, error?.status || 400, { ok: false, error: error?.expose ? error.message : 'Could not read record request.' }); return }
     const { orgId, collection: collectionName, id } = body || {}
+    const documentPath = String(body?.path || (collectionName && id ? collectionName + '/' + id : ''))
     if (!ORG_QUERY_READS.has(String(collectionName || '')) || !/^[A-Za-z0-9_-]{1,128}$/.test(String(id || '')) ||
-        !/^[A-Za-z0-9_-]{1,100}$/.test(String(orgId || ''))) {
+        !/^[A-Za-z0-9_-]{1,100}$/.test(String(orgId || '')) ||
+        ![collectionName + '/' + id, collectionName + '/' + id + '/blob/data'].includes(documentPath)) {
       json(res, 400, { ok: false, error: 'Hospital record reference is invalid.' }); return
     }
 
@@ -999,12 +1206,12 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       if (!allowed) { json(res, 403, { ok: false, error: 'Your hospital role does not allow reading this record.' }); return }
     }
 
-    const cacheKey = { orgId, query: { collection: collectionName, documentId: id } }
+    const cacheKey = { orgId, query: { collection: collectionName, documentId: documentPath } }
     if (membershipLive && db) {
       let timer
       try {
         const snap = await Promise.race([
-          db.collection(collectionName).doc(id).get(),
+          db.doc(documentPath).get(),
           new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Firestore document read timed out.'), { code: 'ETIMEDOUT' })), 3500) }),
         ])
         const exists = snap.exists && (snap.data()?.organization_id === orgId || collectionName === 'patients' && snap.data()?.organization_id === orgId)
@@ -1020,6 +1227,16 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       } finally { clearTimeout(timer) }
     }
     const cached = await offlineQueryCache.get(cacheKey)
+    const fileOp = (queue.pendingForOrg?.(orgId, 'file_upload') || []).find((op) => op.args?.id === id &&
+      (op.args.kind === 'patient_photo' ? 'patient_photos' : 'result_images') === collectionName)
+    if (fileOp) {
+      if (fileOp.args.remove) { json(res, 200, { ok: true, source: 'host-pending', id, exists: false, data: null }); return }
+      const blobDocument = documentPath.endsWith('/blob/data')
+      const data = blobDocument
+        ? { bytes: { __firestoreType: 'bytes', value: fileOp.args.contentBase64 }, content_type: fileOp.args.contentType, organization_id: orgId }
+        : { ...fileOp.args.metadata, ...(collectionName === 'patient_photos' ? { updated_at: stamp(fileOp.addedAt) } : { created_at: stamp(fileOp.addedAt) }) }
+      json(res, 200, { ok: true, source: 'host-pending', id, exists: true, data }); return
+    }
     if (!cached?.docs?.[0]) { json(res, 503, { ok: false, error: 'This record has no saved Host copy yet.' }); return }
     json(res, 200, { ok: true, source: 'host-cache', ...cached.docs[0] })
   }
@@ -1233,6 +1450,15 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       return
     }
 
+    if (req.method === 'POST' && path === '/clinical-drafts') {
+      await handleClinicalDraft(req, res)
+      return
+    }
+    if (req.method === 'POST' && path === '/clinical-drafts/review') {
+      await handleClinicalDraftReview(req, res)
+      return
+    }
+
     if (req.method === 'POST' && path === '/speech/jobs') {
       await handleSpeechCreate(req, res, url)
       return
@@ -1377,6 +1603,7 @@ export async function startHub(overrides = {}) {
   const verifiedHttpsAddresses = new Set()
   const handler = makeHandler({
     cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, speechJobs, speechSessions, offlineQueryCache,
+    clinicalAi: overrides.clinicalAi || createLocalClinicalAi(),
     auditSpeech: overrides.auditSpeech,
     verifiedHttpsAddresses,
   })

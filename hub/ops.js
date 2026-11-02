@@ -29,6 +29,11 @@ const BILLING_PAYMENT_ARGS = new Set(['invoiceId', 'paymentId', 'amountKobo', 'm
 const MEDICATION_ADMINISTER_ARGS = new Set(['requestId', 'doseId', 'lineId', 'qty', 'route', 'site', 'note', 'preview'])
 const STOCK_RECEIVE_ARGS = new Set(['drugId', 'movementId', 'qty', 'batch', 'expiry', 'supplier', 'unitCost', 'invoiceRef', 'preview'])
 const PHARMACY_DISPENSE_ARGS = new Set(['dispensationId', 'patientId', 'patientName', 'medicationRequestId', 'items'])
+const STOCK_CREATE_ARGS = new Set(['drugId', 'movementId', 'drug', 'preview'])
+const STOCK_CORRECT_ARGS = new Set(['drugId', 'movementId', 'countedQty', 'reason', 'preview'])
+const STOCK_UPDATE_ARGS = new Set(['drugId', 'movementId', 'fields', 'previousStock'])
+const STOCK_REVERSE_ARGS = new Set(['requestId', 'lineId', 'movementId', 'ticketId', 'preview'])
+const FILE_UPLOAD_ARGS = new Set(['kind', 'id', 'metadata', 'contentType', 'contentBase64', 'remove'])
 const MUTATION_ARGS = new Set(['mutations'])
 
 const MUTATION_CAPS = {
@@ -59,6 +64,11 @@ export const OP_ALLOWLIST = {
   medication_administer: { capability: 'medication.administer' },
   stock_receive: { capability: 'prescription.dispense' },
   pharmacy_dispense: { capability: 'prescription.dispense' },
+  stock_create: { capability: 'prescription.dispense' },
+  stock_correct: { capability: 'prescription.dispense' },
+  stock_update: { capability: 'prescription.dispense' },
+  pharmacy_reverse: { capability: 'prescription.dispense' },
+  file_upload: { capability: 'dynamic' },
   document_mutation: { capability: 'dynamic' },
 }
 
@@ -67,6 +77,7 @@ export function capabilityFor(kind, args = null) {
     const first = args?.mutations?.[0]
     return capabilitiesForMutationArgs(args)[0] || MUTATION_CAPS[first?.collection]?.[first?.action] || ''
   }
+  if (kind === 'file_upload') return args?.kind === 'patient_photo' ? 'patient.demographics.update' : 'lab.result.enter'
   return OP_ALLOWLIST[kind]?.capability || ''
 }
 
@@ -412,6 +423,87 @@ export function validatePharmacyDispenseArgs(args) {
   return { dispensationId, patientId, patientName, medicationRequestId, items }
 }
 
+export function validateStockCreateArgs(args, orgId) {
+  if (!isPlainObject(args)) throw new Error('args must be an object')
+  rejectUnknown(args, STOCK_CREATE_ARGS, 'args')
+  const drugId = str(args.drugId, 128, 'args.drugId', { required: true })
+  const movementId = str(args.movementId, 128, 'args.movementId')
+  if (!ID_RE.test(drugId) || (movementId && !ID_RE.test(movementId))) throw new Error('stock creation reference is invalid')
+  if (!isPlainObject(args.drug) || args.drug.organization_id !== orgId) throw new Error('stock item must belong to the selected hospital')
+  const drug = sanitizeMutationValue(args.drug, 0, 'drug')
+  if (Object.keys(drug).some((k) => !['name','drug_code','strength','pack_size','organization_id','sku','unit','stock','price','purchase_price','batch','expiry','status','supplier'].includes(k))) throw new Error('stock item contains unsupported fields')
+  if (!drug.name || !Number.isFinite(drug.stock) || drug.stock < 0 || (drug.stock > 0 && !movementId)) throw new Error('stock item details are invalid')
+  return { drugId, movementId, drug }
+}
+
+export function validateStockCorrectArgs(args) {
+  if (!isPlainObject(args)) throw new Error('args must be an object')
+  rejectUnknown(args, STOCK_CORRECT_ARGS, 'args')
+  const drugId = str(args.drugId, 128, 'args.drugId', { required: true })
+  const movementId = str(args.movementId, 128, 'args.movementId', { required: true })
+  const countedQty = num(args.countedQty, 1e12, 'args.countedQty')
+  const reason = str(args.reason, 1000, 'args.reason')
+  const preview = isPlainObject(args.preview) ? sanitizeMutationValue(args.preview, 0, 'stock correction preview') : {}
+  if (Object.keys(preview).some((k) => !['name','sku','batch','expiry'].includes(k))) throw new Error('stock correction preview contains unsupported fields')
+  if (!ID_RE.test(drugId) || !ID_RE.test(movementId) || countedQty === undefined) throw new Error('stock correction details are invalid')
+  return { drugId, movementId, countedQty, reason, preview }
+}
+
+export function validateStockUpdateArgs(args, orgId) {
+  if (!isPlainObject(args)) throw new Error('args must be an object')
+  rejectUnknown(args, STOCK_UPDATE_ARGS, 'args')
+  const drugId = str(args.drugId, 128, 'args.drugId', { required: true })
+  const movementId = str(args.movementId, 128, 'args.movementId', { required: true })
+  const previousStock = num(args.previousStock, 1e12, 'args.previousStock')
+  if (!ID_RE.test(drugId) || !ID_RE.test(movementId) || !isPlainObject(args.fields)) throw new Error('stock update reference is invalid')
+  const fields = sanitizeMutationValue(args.fields, 0, 'stock update fields')
+  const allowed = new Set(['name','drug_code','strength','pack_size','sku','unit','stock','price','purchase_price','batch','expiry','status','supplier'])
+  if (Object.keys(fields).some((key) => !allowed.has(key)) || !Number.isFinite(fields.stock) || fields.stock < 0) throw new Error('stock update fields are invalid')
+  return { drugId, movementId, fields, previousStock: previousStock || 0 }
+}
+
+export function validatePharmacyReverseArgs(args) {
+  if (!isPlainObject(args)) throw new Error('args must be an object')
+  rejectUnknown(args, STOCK_REVERSE_ARGS, 'args')
+  const requestId = str(args.requestId, 128, 'args.requestId', { required: true })
+  const lineId = str(args.lineId, 128, 'args.lineId', { required: true })
+  const movementId = str(args.movementId, 128, 'args.movementId', { required: true })
+  const ticketId = str(args.ticketId, 128, 'args.ticketId', { required: true })
+  if (![requestId, lineId, movementId, ticketId].every((v) => ID_RE.test(v))) throw new Error('dispense reversal reference is invalid')
+  const preview = isPlainObject(args.preview) ? sanitizeMutationValue(args.preview, 0, 'reversal preview') : {}
+  if (Object.keys(preview).some((k) => !['drugId','batch','expiry','medicine','patientId','patientName','qty'].includes(k))) throw new Error('reversal preview contains unsupported fields')
+  if (preview.drugId && !ID_RE.test(preview.drugId)) throw new Error('reversal drug id is invalid')
+  if (preview.qty !== undefined && (!Number.isFinite(preview.qty) || preview.qty <= 0)) throw new Error('reversal quantity is invalid')
+  return { requestId, lineId, movementId, ticketId, preview }
+}
+
+export function validateFileUploadArgs(args, orgId) {
+  if (!isPlainObject(args)) throw new Error('args must be an object')
+  rejectUnknown(args, FILE_UPLOAD_ARGS, 'args')
+  const kind = str(args.kind, 20, 'args.kind', { required: true })
+  const id = str(args.id, 128, 'args.id', { required: true })
+  const remove = args.remove === true
+  if (args.remove !== undefined && typeof args.remove !== 'boolean') throw new Error('args.remove must be a boolean')
+  if (!['patient_photo', 'result_image'].includes(kind) || !ID_RE.test(id)) throw new Error('file reference is invalid')
+  if (kind === 'patient_photo' && !remove && id.length > 128) throw new Error('patient photo reference is invalid')
+  if (remove) {
+    if (kind !== 'patient_photo' || args.metadata !== undefined || args.contentBase64 !== undefined) throw new Error('only patient photos can be removed')
+    return { kind, id, remove: true }
+  }
+  if (!isPlainObject(args.metadata) || args.metadata.organization_id !== orgId) throw new Error('file metadata must belong to the selected hospital')
+  const contentType = str(args.contentType, 100, 'args.contentType', { required: true })
+  const contentBase64 = str(args.contentBase64, 1250000, 'args.contentBase64', { required: true })
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64) || Buffer.from(contentBase64, 'base64').length > 920 * 1024) throw new Error('file payload is invalid or too large')
+  if (kind === 'patient_photo' && !contentType.startsWith('image/')) throw new Error('patient photo must be an image')
+  if (kind === 'result_image' && !contentType.startsWith('image/') && contentType !== 'application/pdf') throw new Error('result attachment must be an image or PDF')
+  const metadata = sanitizeMutationValue(args.metadata, 0, 'file metadata')
+  if (metadata.content_type !== contentType || Number(metadata.size_bytes) !== Buffer.from(contentBase64, 'base64').length) throw new Error('file metadata does not match its payload')
+  if (kind === 'result_image' && (!['lab', 'imaging'].includes(metadata.kind) || !ID_RE.test(String(metadata.order_id || '')))) throw new Error('result image must reference a valid lab or imaging order')
+  if (kind === 'patient_photo' && metadata.patient_id !== id) throw new Error('photo patient id must match the file reference')
+  if (Object.keys(metadata).some((k) => !['patient_id','organization_id','content_type','size_bytes','width','height','updated_by','updated_by_name','updated_at','kind','order_id','caption','created_by','created_by_name','created_at'].includes(k))) throw new Error('file metadata contains unsupported fields')
+  return { kind, id, metadata, contentType, contentBase64 }
+}
+
 export function validateDocumentMutationArgs(args, orgId) {
   if (!isPlainObject(args)) throw new Error('args must be an object')
   rejectUnknown(args, MUTATION_ARGS, 'args')
@@ -485,6 +577,11 @@ const VALIDATORS = {
   medication_administer: validateMedicationAdministerArgs,
   stock_receive: validateStockReceiveArgs,
   pharmacy_dispense: validatePharmacyDispenseArgs,
+  stock_create: (args, orgId) => validateStockCreateArgs(args, orgId),
+  stock_correct: validateStockCorrectArgs,
+  stock_update: (args, orgId) => validateStockUpdateArgs(args, orgId),
+  pharmacy_reverse: validatePharmacyReverseArgs,
+  file_upload: (args, orgId) => validateFileUploadArgs(args, orgId),
   document_mutation: (args, orgId) => validateDocumentMutationArgs(args, orgId),
 }
 

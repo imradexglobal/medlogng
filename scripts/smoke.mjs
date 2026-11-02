@@ -630,8 +630,8 @@ for (const view of ['AppointmentsView', 'BillingView', 'AdmissionsView']) {
 // The filter must be digit-aware, or '+234 803 123 4567' is unreachable by
 // typing '0803…' — the exact string a Nigerian clerk would type.
 const shellSrc = fs.readFileSync(new URL('../src/components/shell.js', import.meta.url), 'utf8')
-assert.ok(/data-filter-for/.test(shellSrc), 'formModal renders a filter box for searchable selects')
-assert.ok(/replace\(\/\\D\/g, ''\)\.includes\(digits\)/.test(shellSrc), 'the filter matches on digits')
+assert.ok(/data-autocomplete="true"/.test(shellSrc) && /wireSearchableSelect/.test(shellSrc), 'formModal renders searchable selects as autocomplete controls')
+assert.ok(/label\.replace\(\/\\D\/g, ''\)\.includes\(digits\)/.test(shellSrc), 'the autocomplete matches on digits')
 
 // ---- haystack ----------------------------------------------------------------
 assert.ok(patientHaystack(ada).includes('+2348031234567'), 'the stored phone is searchable')
@@ -822,9 +822,12 @@ assert.ok(/sendPasswordResetEmail\(auth,/.test(authSrc), 'authService calls the 
 assert.ok(/export async function requestPasswordReset/.test(authSrc), 'requestPasswordReset is exported for the view')
 assert.ok(/export async function verifyResetCode/.test(authSrc), 'the reset link code can be verified in-app')
 assert.ok(/export async function completePasswordReset/.test(authSrc), 'the new password is saved through confirmPasswordReset')
-assert.ok(/handleCodeInApp: true/.test(authSrc), 'the emailed link returns to the app so the password is entered there')
-assert.ok(!/sendPasswordResetEmail\(auth, mail,\s*\}\)/.test(authSrc), 'the reset email carries a continue URL')
-assert.ok(/auth\/unauthorized-continue-uri/.test(authSrc), 'an unauthorized origin falls back to the hosted reset page instead of failing')
+// This is a browser application, not a native Universal/Android App Link
+// target. Firebase's handleCodeInApp option is for installed mobile apps;
+// the app's custom Firebase email action handler supplies mode/oobCode to the
+// URL and main.js folds those query values into the hash router below.
+assert.ok(/sendPasswordResetEmail\(auth, email\)/.test(authSrc), 'the browser uses Firebase email-action link delivery')
+assert.ok(!/handleCodeInApp\s*:\s*true/.test(authSrc), 'browser reset links do not request mobile in-app link handling')
 assert.ok(/seg\.style\.display = 'none'/.test(loginSrc), 'the reset screen hides the mode switcher inline (.fn-seg sets display:flex, which beats the hidden attribute)')
 
 // The new password must be typed twice, and both must match before saving.

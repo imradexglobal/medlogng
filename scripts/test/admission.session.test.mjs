@@ -1,13 +1,23 @@
 // Admission session isolation test — exercises the full PHASE 1–3 feature set
 // using the real service modules against the in-memory fake Firestore harness.
 // Run: node scripts/test/admission.session.test.mjs
-import './harness.mjs'   // registers fake-firebase-loader, provides signIn/seeddocs
-import { createAdmission, dischargeAdmission, transferAdmission } from '../../src/services/admissionService.js'
-import { createPlanItem, listSessionPlanItems } from '../../src/services/admissionSessionService.js'
-import { createLabOrder, listSessionLabs } from '../../src/services/laboratoryService.js'
-import { createImagingOrder, listSessionImaging } from '../../src/services/imagingService.js'
-import { requestMedication, listSessionMedicationRequests } from '../../src/services/pharmacyService.js'
-import { createInvoice, listSessionInvoices } from '../../src/services/billingService.js'
+// Register the fake-Firebase module hook before importing any service modules.
+// Static imports are evaluated before this module body and therefore bypass it.
+const { signIn, resetFake, docData } = await import('./harness.mjs')
+const [admissions, sessions, labs, imaging, pharmacy, billing] = await Promise.all([
+  import('../../src/services/admissionService.js'),
+  import('../../src/services/admissionSessionService.js'),
+  import('../../src/services/laboratoryService.js'),
+  import('../../src/services/imagingService.js'),
+  import('../../src/services/pharmacyService.js'),
+  import('../../src/services/billingService.js'),
+])
+const { createAdmission, dischargeAdmission, transferAdmission, listPatientAdmissions } = admissions
+const { createPlanItem, listSessionPlanItems } = sessions
+const { createLabOrder, listSessionLabs } = labs
+const { createImagingOrder, listSessionImaging } = imaging
+const { requestMedication, listSessionMedicationRequests } = pharmacy
+const { createInvoice, listSessionInvoices } = billing
 import { ADMISSION_ACTIVE } from '../../src/features/admissions/domain.js'
 
 async function main() {
@@ -17,10 +27,20 @@ async function main() {
   resetFake({
     docs: {
       'ATL-YRM-ZLS/organizations/ATL-YRM-ZLS': { id: 'ATL-YRM-ZLS', name: 'Test Hospital', created_by: 'admin', created_at: new Date() },
-      'ATL-YRM-ZLS/wards/wards/WT-A': { name: 'Female Ward A', totalBeds: 2, created_by: 'admin', created_at: new Date() },
-      'ATL-YRM-ZLS/patients/patient-001': {
+      'wards/WT-A': { organization_id: 'ATL-YRM-ZLS', name: 'Female Ward A', totalBeds: 2, created_by: 'admin', created_at: new Date() },
+      'wards/WT-B': { organization_id: 'ATL-YRM-ZLS', name: 'Male Ward B', totalBeds: 2, created_by: 'admin', created_at: new Date() },
+      'patients/patient-001': {
         id: 'patient-001', surname: 'Adeyemi', given_names: 'Mistura', full_name: 'Mistura Adeyemi', sex: 'F',
         dob: '1980-05-15', organization_id: 'ATL-YRM-ZLS', status: 'active', created_by: 'admin', created_at: new Date(),
+      },
+      'organization_patients/ATL-YRM-ZLS_patient-001': {
+        organization_id: 'ATL-YRM-ZLS', patient_id: 'patient-001', full_name: 'Mistura Adeyemi', status: 'active',
+      },
+      'encounters/enc-91vOZNvnr0LZFzl5D6AS': {
+        organization_id: 'ATL-YRM-ZLS', patient_id: 'patient-001', status: 'open',
+      },
+      'encounters/enc-xx': {
+        organization_id: 'ATL-YRM-ZLS', patient_id: 'patient-001', status: 'open',
       },
       'ATL-YRM-ZLS/organization_memberships/ATL-YRM-ZLS_u1': {
         organization_id: 'ATL-YRM-ZLS', user_id: 'u1', role: 'hospital_admin',
@@ -51,7 +71,10 @@ async function main() {
   // Order lab for session 1
   await createLabOrder({ patient_id: 'patient-001', test_panel: 'CBC', admission_session_id: sid1 })
   const labs1 = await listSessionLabs(sid1)
-  console.log('Labs in session 1:', labs1.length, labs1.every(l => l.admission_session_id === sid1) ? '(session id matches)' : '(MISMATCH)')
+  if (!labs1.length || !labs1.every((lab) => lab.admissionSessionId === sid1)) {
+    throw new Error('Lab order did not retain the admission session ID')
+  }
+  console.log('Labs in session 1:', labs1.length, '(session id matches)')
 
   // Discharge
   await dischargeAdmission(sid1, { reason: 'Resolved' })
