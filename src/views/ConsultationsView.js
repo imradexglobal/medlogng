@@ -1487,50 +1487,67 @@ wireKebabs(tbl, async (rowId, action) => {
   function subscribeLive() {
     teardownListeners()
     if (!watchedOrg) return
-    // The live feed only ever knows about the newest slice of the queue. Once
-    // the user has scrolled past it, leave the accumulated list alone rather
-    // than truncating it back to one chunk.
-    if (cursor != null) return
-    unsubs.push(
-      subscribeOrgEncounters(watchedOrg,
-        (rows) => {
-          if (cursor != null) return
-          const seen = new Set(encounters.map((e) => e.id))
-          encounters = rows.filter((e) => !seen.has(e.id)).concat(encounters)
-          refreshSelectedEncounter()
-          renderQueue()
-          renderWorkspace()
-        },
-        (e) => {
-          console.warn('[consultations] live update failed; refreshing once:', e?.message || e)
-          listOrgEncountersPage(watchedOrg)
-            .then((r) => {
-              if (cursor != null) return
-              const seen = new Set(encounters.map((e) => e.id))
-              encounters = r.rows.filter((e) => !seen.has(e.id)).concat(encounters)
+    // The live feed only ever knows about the newest slice of the queue.
+    // Process live updates regardless of cursor state — remove encounters
+    // that are deleted/add new ones, but leave the accumulated list intact
+    // so the user's scroll position is not disrupted.
+    if (cursor != null) {
+      // Still subscribe but only process changes that add/remove from the
+      // front of the list; the bulk of the queue remains as the user left it.
+      unsubs.push(
+        subscribeOrgEncounters(watchedOrg,
+          (rows) => {
+            const seen = new Set(encounters.map((e) => e.id))
+            const newRows = rows.filter((e) => !seen.has(e.id))
+            if (newRows.length) {
+              encounters = newRows.concat(encounters)
               refreshSelectedEncounter()
               renderQueue()
               renderWorkspace()
-            })
-            .catch(() => {})
-        }),
-      subscribeOrgAdmissions(watchedOrg,
-        (rows) => {
-          indexAdmissions(rows)
-          renderQueue()
-          renderWorkspace()
-        },
-        (e) => {
-          console.warn('[consultations] live admissions update failed; refreshing once:', e?.message || e)
-          listOrgAdmissionsPage(watchedOrg, { pageSize: 100 })
-            .then((r) => {
-              indexAdmissions(r.rows)
-              renderQueue()
-              renderWorkspace()
-            })
-            .catch(() => {})
-        }),
-    )
+            }
+          },
+          (e) => {
+            console.warn('[consultations] live update failed; refreshing once:', e?.message || e)
+            listOrgEncountersPage(watchedOrg)
+              .then((r) => {
+                const seen = new Set(encounters.map((e) => e.id))
+                const newRows = r.rows.filter((e) => !seen.has(e.id))
+                if (newRows.length) {
+                  encounters = newRows.concat(encounters)
+                  refreshSelectedEncounter()
+                  renderQueue()
+                  renderWorkspace()
+                }
+              })
+              .catch(() => {})
+          })
+      )
+    } else {
+      unsubs.push(
+        subscribeOrgEncounters(watchedOrg,
+          (rows) => {
+            if (cursor != null) return
+            const seen = new Set(encounters.map((e) => e.id))
+            encounters = rows.filter((e) => !seen.has(e.id)).concat(encounters)
+            refreshSelectedEncounter()
+            renderQueue()
+            renderWorkspace()
+          },
+          (e) => {
+            console.warn('[consultations] live update failed; refreshing once:', e?.message || e)
+            listOrgEncountersPage(watchedOrg)
+              .then((r) => {
+                if (cursor != null) return
+                const seen = new Set(encounters.map((e) => e.id))
+                encounters = r.rows.filter((e) => !seen.has(e.id)).concat(encounters)
+                refreshSelectedEncounter()
+                renderQueue()
+                renderWorkspace()
+              })
+              .catch(() => {})
+          })
+      )
+    }
   }
 
   onCleanup(() => {

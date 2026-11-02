@@ -45,12 +45,20 @@ if ([version]($Matches[1] + '.' + $Matches[2]) -lt [version]'3.20') { Stop-Build
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Stop-Build 'Git is required to obtain the pinned whisper.cpp source.' }
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path $vswhere -PathType Leaf)) { Stop-Build 'Visual Studio 2022 Build Tools with the Desktop C++ workload (MSVC v143 and Windows SDK) is required.' }
-$vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if ($LASTEXITCODE -ne 0 -or -not $vsInstall -or -not (Test-Path (Join-Path ([string]$vsInstall) 'Common7\Tools\VsDevCmd.bat'))) {
+$vsInstances = & $vswhere -all -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { Stop-Build 'Could not enumerate Visual Studio C++ build-tool instances.' }
+$vsInstance = $vsInstances | Where-Object { [string]$_.installationVersion -match '^17\.' } |
+  Sort-Object { [version]$_.installationVersion } -Descending | Select-Object -First 1
+if (-not $vsInstance -or -not (Test-Path (Join-Path ([string]$vsInstance.installationPath) 'Common7\Tools\VsDevCmd.bat'))) {
   Stop-Build 'MSVC x64 tools were not found. Install the Visual Studio 2022 Desktop development with C++ workload.'
 }
-$vsVersion = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion).Trim()
-if ($LASTEXITCODE -ne 0 -or $vsVersion -notmatch '^17\.') { Stop-Build 'The Whisper worker requires Visual Studio 2022 Build Tools (17.x).'}
+$vsInstall = [string]$vsInstance.installationPath
+$vsVersion = [string]$vsInstance.installationVersion
+$vcToolsPath = Join-Path $vsInstall 'VC\Tools\MSVC'
+if (-not (Get-ChildItem -LiteralPath $vcToolsPath -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^14\.\d+' } | Select-Object -First 1)) {
+  Stop-Build 'Visual Studio 2022 is installed without the required MSVC v143 compiler toolset.'
+}
 
 if (-not $WhisperCppDir) {
   $WhisperCppDir = Join-Path $repoRoot '.cache\whisper.cpp-v1.9.5'
