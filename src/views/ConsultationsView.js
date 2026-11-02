@@ -5,7 +5,7 @@ import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
   myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META, normalizeStatusKey, mapLegacyStatus,
 } from '../services/consultationService.js'
-import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
+import { listOrgPatientsPage, listPatientDocs, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
   listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, myAdmissionCaps, indexAdmissionsByEncounter, activeAdmissionForEncounter,
 } from '../services/admissionService.js'
@@ -31,6 +31,7 @@ import { confirmDelete } from './deleteUi.js'
 import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteEncounter } from '../services/deleteService.js'
+import { planHtmlForEditor, serializePlanHtml } from '../features/encounters/planRichText.js'
 
 // Encounter statuses are stored lowercase, so the shared statusBadge() (whose
 // keys are capitalised) rendered them as bare uncoloured pills. The label +
@@ -52,6 +53,69 @@ function encBadge(status) {
 function txt(v, fallback = '—') {
   const t = String(v == null ? '' : v).trim()
   return t || fallback
+}
+
+const SOAP_FIELDS = [
+  { key: 'S', title: 'Subjective', help: 'What the patient reports: symptoms, concerns, and relevant history.' },
+  { key: 'O', title: 'Objective', help: 'What is observed or measured: examination findings, vital signs, and results.' },
+  { key: 'A', title: 'Assessment', help: 'Your clinical impression, working diagnosis, or interpretation.' },
+  { key: 'P', title: 'Plan', help: 'The next steps: treatment, investigations, and follow-up.' },
+]
+
+const SOAP_MARKERS = Object.fromEntries(SOAP_FIELDS.map(({ key }) => [
+  key, { open: '[[MEDLOGNG_SOAP_V1:' + key + ']]', close: '[[/MEDLOGNG_SOAP_V1:' + key + ']]' },
+]))
+
+const PLAN_COLORS = [
+  { name: 'Black', value: '#111827' }, { name: 'Gray', value: '#475569' }, { name: 'Red', value: '#b91c1c' },
+  { name: 'Orange', value: '#c2410c' }, { name: 'Amber', value: '#b45309' }, { name: 'Green', value: '#15803d' },
+  { name: 'Teal', value: '#0f766e' }, { name: 'Blue', value: '#1d4ed8' }, { name: 'Violet', value: '#6d28d9' },
+  { name: 'Pink', value: '#be185d' }, { name: 'Cyan', value: '#0e7490' }, { name: 'White', value: '#ffffff' },
+]
+
+function parseSoapNote(value) {
+  const text = String(value || '')
+  const fields = { S: '', O: '', A: '', P: '' }
+  if (!text) return fields
+
+  if (SOAP_FIELDS.some(({ key }) => text.includes(SOAP_MARKERS[key].open))) {
+    for (const { key } of SOAP_FIELDS) {
+      const { open, close } = SOAP_MARKERS[key]
+      const start = text.indexOf(open)
+      const end = start < 0 ? -1 : text.indexOf(close, start + open.length)
+      if (end >= 0) fields[key] = text.slice(start + open.length, end).replace(/^\n|\n$/g, '')
+    }
+    return fields
+  }
+
+  // Read legacy free-text notes and split headings that were typed on their
+  // own lines. Unstructured notes stay intact in Subjective.
+  const headings = [...text.matchAll(/(?:^|\r?\n)\s*([SOAP])\s*:\s*/gi)]
+  if (!headings.length) {
+    fields.S = text
+    return fields
+  }
+  headings.forEach((match, index) => {
+    const key = match[1].toUpperCase()
+    const start = match.index + match[0].length
+    const end = index + 1 < headings.length ? headings[index + 1].index : text.length
+    fields[key] += (fields[key] ? '\n' : '') + text.slice(start, end).replace(/[\r\n]+$/, '')
+  })
+  return fields
+}
+
+function serializeSoapNote(fields) {
+  if (!SOAP_FIELDS.some(({ key }) => String(fields[key] || '').trim())) return ''
+  return SOAP_FIELDS.map(({ key }) => {
+    const { open, close } = SOAP_MARKERS[key]
+    return open + '\n' + String(fields[key] || '') + '\n' + close
+  }).join('\n')
+}
+
+function resizeSoapField(field) {
+  if (!field) return
+  field.style.height = 'auto'
+  field.style.height = Math.max(34, field.scrollHeight) + 'px'
 }
 
 // Firestore timestamps arrive as Timestamps, plain numbers or null (a write
@@ -122,6 +186,11 @@ export async function ConsultationsView(app, params = {}) {
   let hasMore = false
   let loading = false
   let selectedEncounter = null
+  // Encounter vitals are also mirrored to the patient's vitals collection.
+  // Cache those encounter-linked rows so selecting a patient (or a live queue
+  // repaint) doesn't issue repeated reads or leave the header blank for staff
+  // whose role cannot write the encounter's embedded vitals block.
+  const encounterVitalsCache = new Map()
   // Which pane of the tabbed workspace is showing. Persists across live
   // repaints so a clinician writing a note is not thrown back to Overview
   // every time the queue ticks.
@@ -166,8 +235,13 @@ export async function ConsultationsView(app, params = {}) {
       '</tbody></table><div class="loadmore" data-loadmore="1"></div></div></div>' +
       '<div class="card enc-ws">' +
       '<div class="enc-ws-head">' +
-      '<div class="card-head"><h3 id="encTitle">No encounter selected</h3><span id="encStatus">—</span></div>' +
+      '<div class="card-head"><h3><a id="encTitle" class="enc-patient-link" aria-disabled="true">No encounter selected</a></h3><span id="encStatus">—</span></div>' +
       '<p class="sub" id="encHint">Select a patient from the queue to open the encounter workspace.</p>' +
+      // Keep identity, allergy warning and the latest vitals in the pinned
+      // workspace header. They remain in view while the clinician writes or
+      // places orders in another tab.
+      '<div id="encWho"></div>' +
+      '<div class="kv enc-vitals"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Resp. rate</em><strong id="v-rr">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div><div><em>Weight</em><strong id="v-weight">—</strong></div><div><em>Height</em><strong id="v-height">—</strong></div><div><em>BMI</em><strong id="v-bmi">—</strong></div></div>' +
       '</div>' +
       // The long workspace is tabbed instead of one endless list: Overview
       // (identity, flow, vitals), the SOAP note, the plan, prescriptions and
@@ -184,20 +258,41 @@ export async function ConsultationsView(app, params = {}) {
       // Only THIS box scrolls — the tab strip above and the action bar below
       // stay pinned, so +Vitals / +Diagnosis / Advance are always reachable.
       '<div class="enc-ws-body" id="encWsBody">' +
-      '<div data-wp="overview">' +
-      '<div class="flow" id="enc-flow">' + STATUS_FLOW.map((s) => '<span class="fstep">' + esc(s.step) + '</span><span class="farrow">→</span>').join('').replace(/<span class="farrow">→<\/span>$/, '') + '</div>' +
-      '<div id="encWho"></div>' +
+      '<div data-wp="overview" class="enc-overview">' +
+      '<section class="enc-overview-section enc-progress-section"><div class="enc-overview-heading"><h4>Encounter progress</h4><span>Arrival to close</span></div>' +
+      '<div class="flow" id="enc-flow">' + STATUS_FLOW.map((s, i) => '<span class="fstep"><span class="enc-step-num">' + (i + 1) + '</span>' + esc(s.step) + '</span>').join('') + '</div></section>' +
       '<div id="encAdm"></div>' +
-      '<div class="kv"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div></div>' +
-      '<div id="encDx" style="margin-top:10px"></div>' +
+      '<section class="enc-overview-section"><div class="enc-overview-heading"><h4>Encounter diagnoses</h4></div><div id="encDx"></div></section>' +
       '</div>' +
       '<div data-wp="note" hidden>' +
-      '<label class="fld full"><span>Clinical note (SOAP)</span><textarea class="input" id="enc-note" rows="8" placeholder="S: … O: … A: … P: …"></textarea></label>' +
-      '<div class="toolbar" style="margin-top:6px"><button class="btn sm" id="saveNoteB">Save note</button><span class="mut" id="noteState"></span></div>' +
+      '<div class="soap-note-grid" aria-label="SOAP clinical note">' + SOAP_FIELDS.map(({ key, title, help }) =>
+        '<label class="soap-note-field"><span class="soap-note-heading"><span class="soap-note-letter" tabindex="0" title="' + esc(help) + '" aria-label="' + esc(title + ': ' + help) + '">' + key + ':</span></span>' +
+        '<textarea class="input" id="enc-soap-' + key + '" rows="1" aria-label="' + esc(title) + '" placeholder="' + esc(title + '…') + '"></textarea></label>'
+      ).join('') + '</div>' +
+      '<div class="toolbar soap-note-actions" style="margin-top:6px"><button class="btn sm" id="saveNoteB">Save note</button><span class="mut" id="noteState"></span></div>' +
       '</div>' +
       '<div data-wp="plan" hidden>' +
-      '<div id="planBox" hidden><div class="fld full"><span>Treatment plan</span><div class="input" id="planView" style="white-space:pre-wrap"></div></div></div>' +
-      '<p class="sub" id="planEmpty">No plan saved on this encounter yet — add one with <strong>+ Plan</strong> below.</p>' +
+      '<div id="planEditorPanel" class="enc-plan-panel">' +
+      (caps.canEdit
+        ? '<div class="enc-plan-toolbar" id="planToolbar" role="toolbar" aria-label="Treatment plan formatting">' +
+          '<button type="button" class="enc-plan-tool" data-plan-command="bold" title="Bold" aria-label="Bold"><strong>B</strong></button>' +
+          '<button type="button" class="enc-plan-tool" data-plan-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>' +
+          '<button type="button" class="enc-plan-tool" data-plan-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>' +
+          '<button type="button" class="enc-plan-tool enc-plan-color-toggle" id="planColorToggle" title="Text color" aria-label="Text color"><strong>A</strong><span class="enc-plan-color-swatch" id="planColorSwatch"></span></button>' +
+          '<span class="enc-plan-toolbar-spacer"></span>' +
+          '<span class="mut enc-plan-state" id="planState"></span>' +
+          '<button type="button" class="enc-plan-tool enc-plan-expand" id="planExpandB" title="Expand editor" aria-label="Expand editor">⛶</button>' +
+          '<button type="button" class="btn sm enc-plan-save" id="savePlanB">Save plan</button>' +
+          '<div class="enc-plan-color-popover" id="planColorPopover" role="dialog" aria-label="Choose text color" hidden>' +
+          '<div class="enc-plan-color-grid" id="planColorGrid">' + PLAN_COLORS.map((color) =>
+            '<button type="button" class="enc-plan-color-choice" data-plan-color="' + color.value + '" aria-label="' + color.name + '" aria-pressed="false" title="' + color.name + '" style="--plan-color:' + color.value + '"></button>'
+          ).join('') + '</div>' +
+          '<div><button type="button" class="btn ghost sm" id="planColorCancel">Cancel</button><button type="button" class="btn sm" id="planColorOk">OK</button></div>' +
+          '</div>' +
+          '</div>'
+        : '') +
+      '<div id="planEditor" class="enc-plan-editor" contenteditable="' + (caps.canEdit ? 'true' : 'false') + '" role="textbox" aria-multiline="true" aria-label="Treatment plan" data-placeholder="' + (caps.canEdit ? 'Write the treatment plan…' : 'No treatment plan saved.') + '"></div>' +
+      '</div>' +
       '</div>' +
       '<div data-wp="rx" hidden><div id="encRx"></div></div>' +
       '<div data-wp="labs" hidden><div id="encLabs"></div></div>' +
@@ -353,6 +448,7 @@ export async function ConsultationsView(app, params = {}) {
   }
 
 let noteDirty = false
+let planDirty = false
 let searchTimeout = null
 
 // Debounced search - 300ms delay to prevent excessive re-renders
@@ -415,6 +511,8 @@ function visibleEncounters() {
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
       r.onclick = () => {
         noteDirty = false
+        planDirty = false
+        savedPlanRange = null
         selectedEncounter = encounters.find((e) => e.id === r.dataset.id) || null
         renderQueue()
         renderWorkspace()
@@ -424,6 +522,8 @@ function visibleEncounters() {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           noteDirty = false
+          planDirty = false
+          savedPlanRange = null
           selectedEncounter = encounters.find((e) => e.id === r.dataset.id) || null
           renderQueue()
           renderWorkspace()
@@ -441,6 +541,10 @@ function visibleEncounters() {
   // strip and the action bar below it stay pinned in place.
   function showWsTab(name) {
     wsTab = name
+    if (name !== 'plan') {
+      const colorPopover = document.getElementById('planColorPopover')
+      if (colorPopover) colorPopover.hidden = true
+    }
     document.querySelectorAll('#encTabs button').forEach((b) => {
       b.classList.toggle('on', b.getAttribute('data-wt') === name)
       b.setAttribute('aria-selected', b.getAttribute('data-wt') === name)
@@ -448,6 +552,7 @@ function visibleEncounters() {
     document.querySelectorAll('#encWsBody [data-wp]').forEach((p) => {
       p.hidden = p.getAttribute('data-wp') !== name
     })
+    if (name === 'note') SOAP_FIELDS.forEach(({ key }) => resizeSoapField(document.getElementById('enc-soap-' + key)))
     // Return focus to the previously focused element or the first tab button
     const focusedEl = document.activeElement
     if (focusedEl && focusedEl.tagName === 'BUTTON' && focusedEl.closest('#encTabs')) {
@@ -468,11 +573,27 @@ function visibleEncounters() {
   function renderWorkspace() {
     const titleEl = document.getElementById('encTitle')
     const statusEl = document.getElementById('encStatus')
-    const noteEl = document.getElementById('enc-note')
+    const soapEls = Object.fromEntries(SOAP_FIELDS.map(({ key }) => [key, document.getElementById('enc-soap-' + key)]))
+    const planPanel = document.getElementById('planEditorPanel')
+    const planEditor = document.getElementById('planEditor')
     const whoEl = document.getElementById('encWho')
     if (!selectedEncounter) {
-      if (titleEl) titleEl.textContent = 'No encounter selected'
+      planPanel?.classList.remove('expanded')
+      if (planEditor) planEditor.innerHTML = ''
+      if (titleEl) {
+        titleEl.textContent = 'No encounter selected'
+        titleEl.removeAttribute('href')
+        titleEl.setAttribute('aria-disabled', 'true')
+        titleEl.removeAttribute('aria-label')
+      }
       if (statusEl) statusEl.textContent = '—'
+      SOAP_FIELDS.forEach(({ key }) => {
+        if (soapEls[key]) { soapEls[key].value = ''; resizeSoapField(soapEls[key]) }
+      })
+      for (const id of ['v-bp', 'v-pulse', 'v-rr', 'v-temp', 'v-spo2', 'v-weight', 'v-height', 'v-bmi']) {
+        const el = document.getElementById(id)
+        if (el) el.textContent = '—'
+      }
       const hintEl = document.getElementById('encHint')
       if (hintEl) hintEl.hidden = false
       if (whoEl) whoEl.innerHTML = ''
@@ -514,9 +635,20 @@ function visibleEncounters() {
           ? '<div class="allergy" style="margin-top:10px">⚠ Allergy: <strong>' + esc(m.allergy) + '</strong> — confirm before prescribing</div>'
           : '') +
         '<div class="toolbar" style="margin:10px 0 12px">' +
-        (m.pid ? '<a class="btn ghost sm" href="#/patients/' + encodeURIComponent(m.pid) + '">Open patient record →</a>' : '') +
-        '<span class="mut">Encounter ' + esc(e.id.slice(0, 8)) + ' · ' + esc(encLabel(e.status)) + (e.type ? ' · ' + esc(e.type) : '') + (e.clinician ? ' · ' + esc(e.clinician) : '') + '</span>' +
+        '<span class="mut" title="Encounter ID: ' + esc(e.id) + '">' +
+        [e.type, e.clinician ? 'Clinician: ' + e.clinician : ''].filter(Boolean).map((value) => esc(value)).join(' · ') + '</span>' +
         '</div>'
+    }
+    if (titleEl) {
+      if (m.pid) {
+        titleEl.href = '#/patients/' + encodeURIComponent(m.pid)
+        titleEl.setAttribute('aria-label', 'Open patient record for ' + m.name)
+        titleEl.removeAttribute('aria-disabled')
+      } else {
+        titleEl.removeAttribute('href')
+        titleEl.setAttribute('aria-disabled', 'true')
+        titleEl.removeAttribute('aria-label')
+      }
     }
     paintFlow(STATUS_FLOW.findIndex((s) => s.key === e.status))
 
@@ -531,14 +663,14 @@ function visibleEncounters() {
     if (admEl) {
       if (anyBed) {
         admEl.innerHTML =
-          '<div class="allergy" style="margin:0 0 12px;background:var(--emr-okbg);border-color:var(--emr-ok)">' +
-          '🛏 Inpatient · <strong>' + esc(anyBed.wardName || 'ward unknown') + ' · ' + esc(anyBed.bedNumber || 'bed unknown') + '</strong>' +
+          '<div class="enc-admission-card">' +
+          '<span class="enc-admission-label">Inpatient</span><strong>' + esc(anyBed.wardName || 'ward unknown') + ' · ' + esc(anyBed.bedNumber || 'bed unknown') + '</strong>' +
           (bed ? ' — admitted from this encounter' : ' — admitted separately') +
           (anyBed.attendingProvider ? ' · ' + esc(anyBed.attendingProvider) : '') +
-          ' <a class="btn ghost sm" href="#/admissions">Bed board →</a></div>'
+          ' <a href="#/admissions">Bed board →</a></div>'
       } else {
         admEl.innerHTML = bedCaps.canAdmit
-          ? '<p class="sub" style="margin:0 0 12px">Not admitted. Admitting from here links the bed to this encounter and leaves the encounter open for documentation.</p>'
+          ? '<div class="enc-admission-none">No active admission linked to this encounter.</div>'
           : ''
       }
     }
@@ -571,9 +703,8 @@ function visibleEncounters() {
         }
       })
     }
-    const vitals = e.vitals || {}
-    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || '—' }
-    set('v-bp', vitals.BP); set('v-pulse', vitals.Pulse); set('v-temp', vitals.Temp); set('v-spo2', vitals.SpO2)
+    paintEncounterVitals(e, encounterVitalsCache.get(e.id))
+    if (e.patientId && !encounterVitalsCache.has(e.id)) loadEncounterVitals(e)
     // Diagnoses recorded on this encounter — the whole list when the doc has
     // it, else the single `diagnosis` string older rows carry.
     const dxEl = document.getElementById('encDx')
@@ -582,32 +713,70 @@ function visibleEncounters() {
         ? e.raw.diagnoses
         : (e.diagnosis ? [{ condition: e.diagnosis }] : [])
       dxEl.innerHTML = dxList.length
-        ? '<em style="font-style:normal;font-size:.7rem;font-weight:700;text-transform:uppercase;color:var(--emr-muted)">Diagnoses</em><div style="margin-top:5px">' +
-          dxList.map((d) => '<span class="pill info" style="margin:0 6px 6px 0">' + esc(txt(d.condition)) + '</span>').join('') +
-          '</div>'
-        : ''
+        ? '<div class="enc-diagnoses">' + dxList.map((d) => '<span class="pill info">' + esc(txt(d.condition)) + '</span>').join('') + '</div>'
+        : '<p class="enc-overview-empty">No diagnosis recorded for this encounter yet.</p>'
     }
-    if (noteEl && document.activeElement !== noteEl) noteEl.value = e.clinical_note ? 'S: ' + e.clinical_note : (e.chiefComplaint ? 'S: ' + e.chiefComplaint : '')
-    // The saved plan is data, not an editor — show it read-only when present so
-    // "Plan set" is backed by something the prescriber can actually read back.
-    const planBox = document.getElementById('planBox')
-    const planView = document.getElementById('planView')
-    const planEmpty = document.getElementById('planEmpty')
-    if (planBox && planView) {
-      if (e.treatmentPlan) {
-        planView.textContent = e.treatmentPlan
-        planBox.hidden = false
-        if (planEmpty) planEmpty.hidden = true
-      } else {
-        planView.textContent = ''
-        planBox.hidden = true
-        if (planEmpty) planEmpty.hidden = false
-      }
+    if (!noteDirty && !SOAP_FIELDS.some(({ key }) => document.activeElement === soapEls[key])) {
+      const soap = parseSoapNote(e.clinicalNote || e.chiefComplaint)
+      SOAP_FIELDS.forEach(({ key }) => {
+        if (soapEls[key]) { soapEls[key].value = soap[key]; resizeSoapField(soapEls[key]) }
+      })
+    }
+    if (planEditor && !planDirty && !planEditor.contains(document.activeElement)) {
+      planEditor.innerHTML = planHtmlForEditor(e.treatmentPlan)
     }
     renderEncLabs()
     loadEncRx()
     paintBadges()
     ensureVisibleMeta()
+  }
+
+  function paintEncounterVitals(encounter, patientRows = []) {
+    const vitals = { ...(encounter?.vitals || {}) }
+    // Prefer the newest reading explicitly linked to this encounter. Keep any
+    // embedded values for fields that were not part of that reading.
+    const linked = (Array.isArray(patientRows) ? patientRows : []).find((row) => row.encounter_id === encounter?.id)
+    if (linked) {
+      const has = (value) => value !== '' && value !== null && value !== undefined
+      if (has(linked.bp_systolic) || has(linked.bp_diastolic)) {
+        vitals.BP = (has(linked.bp_systolic) ? linked.bp_systolic : '') + '/' + (has(linked.bp_diastolic) ? linked.bp_diastolic : '')
+      }
+      if (has(linked.pulse)) vitals.Pulse = linked.pulse
+      if (has(linked.rr)) vitals.RR = linked.rr
+      if (has(linked.temp_c)) vitals.Temp = linked.temp_c
+      if (has(linked.spo2)) vitals.SpO2 = linked.spo2
+      if (has(linked.weight_kg)) vitals.Weight = linked.weight_kg
+      if (has(linked.height_cm)) vitals.Height = linked.height_cm
+    }
+    const set = (id, value) => {
+      const el = document.getElementById(id)
+      if (el) el.textContent = value !== '' && value !== null && value !== undefined ? String(value) : '—'
+    }
+    set('v-bp', vitals.BP)
+    set('v-pulse', vitals.Pulse)
+    set('v-rr', vitals.RR != null && vitals.RR !== '' ? vitals.RR + ' /min' : '')
+    set('v-temp', vitals.Temp)
+    set('v-spo2', vitals.SpO2)
+    set('v-weight', vitals.Weight != null && vitals.Weight !== '' ? vitals.Weight + ' kg' : '')
+    set('v-height', vitals.Height != null && vitals.Height !== '' ? vitals.Height + ' cm' : '')
+    const bmi = Number(vitals.Weight) > 0 && Number(vitals.Height) > 0
+      ? (Number(vitals.Weight) / ((Number(vitals.Height) / 100) ** 2)).toFixed(1)
+      : ''
+    set('v-bmi', bmi)
+  }
+
+  async function loadEncounterVitals(encounter) {
+    if (!encounter?.patientId || encounterVitalsCache.has(encounter.id)) return
+    const pending = listPatientDocs('vitals', encounter.patientId, { limitN: null })
+      .then((result) => result.rows || [])
+      .catch((error) => {
+        console.warn('[consultations] linked vitals read failed:', error?.message || error)
+        return []
+      })
+    encounterVitalsCache.set(encounter.id, pending)
+    const rows = await pending
+    encounterVitalsCache.set(encounter.id, rows)
+    if (selectedEncounter?.id === encounter.id) paintEncounterVitals(selectedEncounter, rows)
   }
 
   // Tab-strip counters: which panes actually hold data, at a glance, without
@@ -927,8 +1096,11 @@ function visibleEncounters() {
         { name: 'bp_systolic', label: 'BP systolic', type: 'number', placeholder: '120' },
         { name: 'bp_diastolic', label: 'BP diastolic', type: 'number', placeholder: '80' },
         { name: 'pulse', label: 'Pulse (bpm)', type: 'number', placeholder: '78' },
+        { name: 'rr', label: 'Respiratory rate (breaths/min)', type: 'number', placeholder: '16' },
         { name: 'temp_c', label: 'Temp °C', type: 'number', placeholder: '36.8' },
         { name: 'spo2', label: 'SpO₂ %', type: 'number', placeholder: '98' },
+        { name: 'weight_kg', label: 'Weight kg', type: 'number', placeholder: '70' },
+        { name: 'height_cm', label: 'Height cm', type: 'number', placeholder: '170' },
         { name: 'note', label: 'Note', full: true, placeholder: 'Optional' },
       ],
       onSubmit: async (v) => {
@@ -936,10 +1108,12 @@ function visibleEncounters() {
         try {
           await recordEncounterVitals(selectedEncounter.id, {
             bp_systolic: num(v.bp_systolic), bp_diastolic: num(v.bp_diastolic),
-            pulse: num(v.pulse), temp_c: num(v.temp_c), spo2: num(v.spo2), note: v.note || '',
+            pulse: num(v.pulse), rr: num(v.rr), temp_c: num(v.temp_c), spo2: num(v.spo2),
+            weight_kg: num(v.weight_kg), height_cm: num(v.height_cm), note: v.note || '',
           })
         } catch (e) { throw new Error(friendlyWriteError(e)) }
         closeModal()
+        encounterVitalsCache.delete(selectedEncounter.id)
         toast('Vitals saved')
         showWsTab('overview')
         reload()
@@ -1068,33 +1242,149 @@ function visibleEncounters() {
     if (adjustB) adjustB.onclick = () => openScriptForm(catalogue, 'adjust', existing)
   }
 
-  function openPlanForm() {
+  function openPlanEditor() {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
     if (!caps.canEdit) { toast(friendlyWriteError({ code: 'permission-denied' })); return }
-    // The plan has no capability of its own — it is part of the encounter, so
-    // it shares `encounter.edit`. Pre-fill with the saved plan so this is an
-    // edit rather than a blind overwrite.
-    formModal({
-      title: 'Treatment plan',
-      submitLabel: 'Save plan',
-      fields: [
-        {
-          name: 'plan', label: 'Plan', type: 'textarea', full: true, required: true,
-          value: selectedEncounter.treatmentPlan || '',
-          placeholder: 'Investigations, treatment, follow-up, referrals…',
-        },
-      ],
-      onSubmit: async (v) => {
-        if (!v.plan) throw new Error('Plan cannot be empty.')
-        try {
-          await addTreatmentPlan(selectedEncounter.id, v.plan)
-        } catch (e) { throw new Error(friendlyWriteError(e)) }
-        closeModal()
-        toast('Plan saved')
-        showWsTab('plan')
-        reload()
-      },
+    showWsTab('plan')
+    const editor = document.getElementById('planEditor')
+    if (editor) editor.focus()
+  }
+
+  const planEditor = document.getElementById('planEditor')
+  const planPanel = document.getElementById('planEditorPanel')
+  const planExpandB = document.getElementById('planExpandB')
+  const planState = document.getElementById('planState')
+  let savedPlanRange = null
+
+  function rememberPlanSelection() {
+    const selection = window.getSelection()
+    if (selection?.rangeCount && planEditor?.contains(selection.anchorNode)) {
+      savedPlanRange = selection.getRangeAt(0).cloneRange()
+    }
+  }
+
+  function restorePlanSelection() {
+    if (!planEditor) return
+    planEditor.focus()
+    if (!savedPlanRange || !planEditor.contains(savedPlanRange.startContainer)) return
+    const selection = window.getSelection()
+    selection.removeAllRanges()
+    selection.addRange(savedPlanRange)
+  }
+
+  function setPlanExpanded(expanded) {
+    if (!planPanel || !planExpandB) return
+    planPanel.classList.toggle('expanded', expanded)
+    planExpandB.textContent = expanded ? '↙' : '⛶'
+    planExpandB.title = expanded ? 'Return to encounter' : 'Expand editor'
+    planExpandB.setAttribute('aria-label', planExpandB.title)
+    planExpandB.setAttribute('aria-expanded', String(expanded))
+    if (expanded) restorePlanSelection()
+  }
+
+  if (planEditor && caps.canEdit) {
+    planEditor.addEventListener('input', () => {
+      planDirty = true
+      if (planState) planState.textContent = 'Unsaved changes'
+      rememberPlanSelection()
     })
+    planEditor.addEventListener('mouseup', rememberPlanSelection)
+    planEditor.addEventListener('keyup', rememberPlanSelection)
+    planEditor.addEventListener('paste', (event) => {
+      event.preventDefault()
+      const html = event.clipboardData?.getData('text/html') || ''
+      const plain = event.clipboardData?.getData('text/plain') || ''
+      const pasted = html
+        ? planHtmlForEditor('[[MEDLOGNG_RICH_PLAN_V1]]\n' + html)
+        : esc(plain).replace(/\r?\n/g, '<br>')
+      document.execCommand('insertHTML', false, pasted)
+      planEditor.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  const planToolbar = document.getElementById('planToolbar')
+  if (planToolbar && planEditor) {
+    planToolbar.addEventListener('mousedown', (event) => {
+      if (event.target.closest('[data-plan-command]')) event.preventDefault()
+      rememberPlanSelection()
+    })
+    planToolbar.querySelectorAll('[data-plan-command]').forEach((button) => {
+      button.onclick = () => {
+        restorePlanSelection()
+        document.execCommand(button.getAttribute('data-plan-command'), false)
+        planEditor.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+    })
+    const colorToggle = document.getElementById('planColorToggle')
+    const colorPopover = document.getElementById('planColorPopover')
+    const colorGrid = document.getElementById('planColorGrid')
+    const colorSwatch = document.getElementById('planColorSwatch')
+    const colorOk = document.getElementById('planColorOk')
+    const colorCancel = document.getElementById('planColorCancel')
+    let appliedPlanColor = '#111827'
+    let pendingPlanColor = appliedPlanColor
+    function selectPlanColor(color) {
+      pendingPlanColor = color
+      colorGrid?.querySelectorAll('[data-plan-color]').forEach((button) => {
+        const selected = button.getAttribute('data-plan-color') === color
+        button.classList.toggle('selected', selected)
+        button.setAttribute('aria-pressed', String(selected))
+      })
+    }
+    if (colorToggle && colorPopover) colorToggle.onclick = () => {
+      const opening = colorPopover.hidden
+      if (opening) {
+        rememberPlanSelection()
+        selectPlanColor(appliedPlanColor)
+        colorPopover.hidden = false
+      } else {
+        colorPopover.hidden = true
+        pendingPlanColor = appliedPlanColor
+        restorePlanSelection()
+      }
+    }
+    colorGrid?.querySelectorAll('[data-plan-color]').forEach((button) => {
+      button.onclick = () => selectPlanColor(button.getAttribute('data-plan-color'))
+    })
+    if (colorOk && colorPopover) colorOk.onclick = () => {
+      restorePlanSelection()
+      document.execCommand('foreColor', false, pendingPlanColor)
+      appliedPlanColor = pendingPlanColor
+      if (colorSwatch) colorSwatch.style.backgroundColor = appliedPlanColor
+      planEditor.dispatchEvent(new Event('input', { bubbles: true }))
+      colorPopover.hidden = true
+    }
+    if (colorCancel && colorPopover) colorCancel.onclick = () => {
+      pendingPlanColor = appliedPlanColor
+      colorPopover.hidden = true
+      restorePlanSelection()
+    }
+  }
+  if (planExpandB) planExpandB.onclick = () => setPlanExpanded(!planPanel?.classList.contains('expanded'))
+
+  const savePlanB = document.getElementById('savePlanB')
+  if (savePlanB) savePlanB.onclick = async () => {
+    if (!selectedEncounter || !planEditor) { toast('Select an encounter first'); return }
+    if (!planEditor.innerText.trim()) { toast('Plan cannot be empty.'); return }
+    const encounterId = selectedEncounter.id
+    const plan = serializePlanHtml(planEditor.innerHTML)
+    savePlanB.disabled = true
+    const planColorPopover = document.getElementById('planColorPopover')
+    if (planColorPopover) planColorPopover.hidden = true
+    try {
+      await addTreatmentPlan(encounterId, plan)
+      if (selectedEncounter?.id === encounterId) selectedEncounter.treatmentPlan = plan
+      planDirty = false
+      if (planState) planState.textContent = 'Saved'
+      setPlanExpanded(false)
+      showWsTab('plan')
+      toast('Plan saved')
+      reload()
+    } catch (e) {
+      toast(friendlyWriteError(e, 'Could not save plan'))
+    } finally {
+      savePlanB.disabled = false
+    }
   }
 
   function openLabOrderForm() {
@@ -1114,7 +1404,7 @@ function visibleEncounters() {
   document.getElementById('dxB').onclick = openDiagnosisForm
   document.getElementById('rxB').onclick = openMedicineForm
   document.getElementById('labB').onclick = openLabOrderForm
-  document.getElementById('planB').onclick = openPlanForm
+  document.getElementById('planB').onclick = openPlanEditor
   document.getElementById('billB').onclick = openBilling
 
   // Admitting hands the patient AND this encounter to the Admissions page, which
@@ -1146,9 +1436,11 @@ function visibleEncounters() {
   }
   document.getElementById('saveNoteB').onclick = async () => {
     if (!selectedEncounter) { toast('Select an encounter first'); return }
-    const noteEl = document.getElementById('enc-note')
+    const note = serializeSoapNote(Object.fromEntries(SOAP_FIELDS.map(({ key }) => [
+      key, document.getElementById('enc-soap-' + key)?.value || '',
+    ])))
     try {
-      await updateEncounterNote(selectedEncounter.id, noteEl ? noteEl.value : '')
+      await updateEncounterNote(selectedEncounter.id, note)
       noteDirty = false
       const st = document.getElementById('noteState')
       if (st) st.textContent = 'Saved'
@@ -1156,11 +1448,14 @@ function visibleEncounters() {
       reload()
     } catch (e) { toast(friendlyWriteError(e, 'Save failed')) }
   }
-  const noteEl0 = document.getElementById('enc-note')
-  if (noteEl0) noteEl0.addEventListener('input', () => {
-    noteDirty = true
-    const st = document.getElementById('noteState')
-    if (st) st.textContent = 'Unsaved changes'
+  SOAP_FIELDS.forEach(({ key }) => {
+    const field = document.getElementById('enc-soap-' + key)
+    if (field) field.addEventListener('input', () => {
+      resizeSoapField(field)
+      noteDirty = true
+      const st = document.getElementById('noteState')
+      if (st) st.textContent = 'Unsaved changes'
+    })
   })
   const qSearch = document.getElementById('qSearch')
   if (qSearch) {

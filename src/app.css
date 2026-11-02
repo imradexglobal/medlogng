@@ -169,20 +169,104 @@
    grid collapses to one column and everything falls back to normal page flow. */
 .consult-grid { align-items: stretch; min-width: 0; }
 .enc-ws { display: flex; flex-direction: column; min-height: 0; }
-.enc-ws .enc-ws-head { flex: none; }
-.enc-ws .enc-tabs { flex: none; margin-bottom: 0; padding-top: 4px; overflow-x: hidden; }
+.enc-ws .enc-ws-head { flex: none; margin: -16px -16px 0; padding: 12px 16px 10px; border-bottom: 1px solid var(--emr-line); border-radius: var(--r) var(--r) 0 0; background: #f2f7fc; }
+.enc-ws-head .card-head { margin-bottom: 4px; }
+.enc-ws-head .card-head h3 { font-size: 1.08rem; letter-spacing: -.02em; }
+.enc-patient-link[href] { color: var(--emr-info); font-weight: 650; text-decoration: none; }
+.enc-patient-link[href]:hover { color: #1e40af; text-decoration: underline; text-underline-offset: 3px; }
+.enc-patient-link[aria-disabled="true"] { color: inherit; font-weight: 650; text-decoration: none; }
+.enc-patient-link:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 3px; border-radius: 2px; }
+.enc-patient-link[aria-disabled="true"] { cursor: default; }
+.enc-ws-head #encHint { margin: 0 0 8px; }
+.enc-ws-head #encWho .kv { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.enc-ws-head #encWho .kv div { display: flex; align-items: baseline; gap: 6px; padding: 5px 7px; border: 1px solid var(--emr-line); border-radius: 7px; background: #fff; white-space: normal; }
+.enc-ws-head #encWho .kv em { display: inline; flex: none; font-size: .66rem; letter-spacing: .02em; }
+.enc-ws-head #encWho .kv strong { font-size: .82rem !important; }
+.enc-ws-head #encWho > .toolbar { margin: 6px 0 8px !important; gap: 8px; }
+.enc-ws-head #encWho > .toolbar .mut { font-size: .72rem; }
+.enc-ws-head .enc-vitals { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.enc-ws-head .enc-vitals div { padding: 6px 9px; border-color: #dbe5ee; background: #fff; }
+.enc-ws-head .enc-vitals strong { font-size: .9rem; font-variant-numeric: tabular-nums; }
+.enc-ws-head .allergy { margin: 7px 0 0 !important; padding: 7px 10px; }
+.enc-ws .enc-tabs { flex: none; gap: 0; margin: 10px -16px 0; padding: 0; overflow-x: hidden; border: 0; border-top: 1px solid #d7e1eb; border-bottom: 1px solid #d7e1eb; border-radius: 0; background: #e9f0f7; }
 /* Every workspace tab sits on the one row, always visible — no sideways pan.
    The five buttons share the strip's width equally and any leftover text wraps
    instead of pushing a tab off the edge. Scoped to .enc-ws so other tab strips
    in the app keep the scrollable behaviour. */
 .enc-ws .enc-tabs button {
   flex: 1 1 0; min-width: 0; white-space: normal;
-  padding: 8px 4px; font-size: .78rem; text-align: center;
+  margin: 0; padding: 5px 3px; border: 1px solid transparent; border-bottom-width: 2px;
+  border-radius: 0; background: transparent; font-size: .75rem; text-align: center; line-height: 1.15;
 }
+.enc-ws .enc-tabs button:hover:not(.on) { background: rgba(255,255,255,.65); color: var(--emr-ink); }
+.enc-ws .enc-tabs button.on { border-color: transparent; border-bottom-color: var(--emr-info); background: #fff; color: var(--emr-navy); }
+.enc-ws .enc-tabs button:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
 .enc-ws-body {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain; padding: 14px 2px 6px;
 }
+.enc-overview { display: grid; gap: 12px; }
+.enc-ws-body [hidden] { display: none !important; }
+.enc-overview-section { min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.enc-overview-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.enc-overview-heading h4 { margin: 0; color: var(--emr-ink); font-size: .82rem; font-weight: 750; }
+.enc-overview-heading > span { color: var(--emr-muted); font-size: .7rem; }
+.enc-progress-section .flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin: 9px 0 0; overflow: visible; }
+.enc-overview .fstep { display: flex; min-width: 0; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 7px; font-size: .72rem; white-space: normal; }
+.enc-step-num { flex: none; display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: 50%; background: #edf2f7; color: var(--emr-muted); font-size: .66rem; font-weight: 800; }
+.enc-overview .fstep.done .enc-step-num { background: #bbf7d0; color: #166534; }
+.enc-overview .fstep.now .enc-step-num { background: rgba(255,255,255,.18); color: #fff; }
+.enc-diagnoses { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.enc-diagnoses .pill { margin: 0; }
+.enc-overview-empty { margin: 7px 0 0; color: var(--emr-muted); font-size: .78rem; }
+.soap-note-grid { display: grid; gap: 8px !important; }
+.soap-note-field { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 7px; min-width: 0; margin: 0 !important; padding: 0; border: 0; background: transparent; }
+.soap-note-heading { display: flex; align-items: flex-start; justify-content: center; margin: 9px 0 0; color: var(--emr-ink); font-size: .8rem; font-weight: 700; }
+.soap-note-letter { display: inline-flex; align-items: center; justify-content: center; color: var(--emr-info); font-weight: 800; cursor: help; }
+.soap-note-letter:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
+.soap-note-field textarea.input { box-sizing: border-box; width: 100%; height: 34px; min-height: 34px; margin: 0 !important; overflow-y: hidden; overflow-wrap: anywhere; padding: 6px 8px; line-height: 1.25; resize: none; }
+.soap-note-actions { justify-content: flex-end; }
+.enc-admission-card, .enc-admission-none { padding: 9px 11px; border: 1px solid #bbebd2; border-radius: 9px; background: #f0faf4; color: #315c45; font-size: .78rem; }
+.enc-admission-card { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.enc-admission-label { color: #166534; font-size: .68rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.enc-admission-card strong { color: #183b28; }
+.enc-admission-card a { margin-left: auto; color: #166534; font-weight: 700; }
+.enc-admission-none { border-color: var(--emr-line); background: #f8fafc; color: var(--emr-muted); }
+.enc-ws-body [data-wp="plan"]:not([hidden]) { display: flex; height: 100%; min-height: 0; flex-direction: column; }
+.enc-plan-panel { position: relative; display: flex; height: 100%; min-height: 0; flex: 1 1 auto; flex-direction: column; gap: 2px; overflow: hidden; }
+.enc-plan-toolbar { position: sticky; top: 0; z-index: 2; display: flex; flex: none; align-items: center; gap: 3px; min-height: 34px; padding: 0; border: 0; background: var(--emr-card); }
+.enc-plan-tool { display: inline-flex; width: 30px; height: 30px; flex: none; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--emr-ink); font-size: .88rem; font-weight: 700; cursor: pointer; }
+.enc-plan-tool:hover { background: #eaf1f7; }
+.enc-plan-tool:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 1px; }
+.enc-plan-color-toggle { color: #b91c1c; font-size: .98rem; }
+.enc-plan-color-swatch { width: 13px; height: 3px; margin: 0 0 -8px -10px; border-radius: 2px; background: #111827; }
+.enc-plan-toolbar-spacer { flex: 1; min-width: 2px; }
+.enc-plan-state { max-width: 80px; overflow: hidden; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+.enc-plan-expand { font-size: 1.1rem; }
+.enc-plan-save { flex: none; padding: 5px 10px; }
+.enc-plan-color-popover { position: absolute; top: calc(100% + 5px); left: 82px; z-index: 5; display: grid; gap: 10px; min-width: 190px; padding: 12px; border: 1px solid var(--emr-line); border-radius: 9px; background: #fff; box-shadow: 0 8px 24px rgba(15,30,46,.16); }
+.enc-plan-color-popover[hidden] { display: none !important; }
+.enc-plan-color-popover > div { display: flex; justify-content: flex-end; gap: 6px; }
+.enc-plan-color-grid { display: grid; grid-template-columns: repeat(6, 24px); justify-content: center; gap: 8px; }
+.enc-plan-color-choice { width: 24px; height: 24px; padding: 0; border: 2px solid #fff; border-radius: 50%; background: var(--plan-color); box-shadow: 0 0 0 1px #cbd5e1; cursor: pointer; }
+.enc-plan-color-choice:hover { transform: scale(1.12); }
+.enc-plan-color-choice.selected { box-shadow: 0 0 0 2px var(--emr-info); }
+.enc-plan-color-choice[style*="#ffffff"] { border-color: #cbd5e1; }
+.enc-plan-color-choice:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
+.enc-plan-editor { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 10px; border: 0; border-radius: 0; outline: none; background: #f1f6fb; color: var(--emr-ink); font-size: .9rem; line-height: 1.6; overflow-wrap: anywhere; }
+.enc-plan-editor:focus { box-shadow: inset 0 0 0 1px rgba(29,78,216,.22); }
+.enc-plan-editor:empty::before { content: attr(data-placeholder); color: #94a3b8; pointer-events: none; }
+.enc-plan-editor[contenteditable="false"] { background: #eaf1f7; }
+.enc-plan-editor p, .enc-plan-editor div { margin: 0 0 .55em; }
+.enc-plan-editor ul, .enc-plan-editor ol { margin: .3em 0 .7em; padding-left: 1.5em; }
+.enc-plan-panel.expanded { position: fixed; inset: 0; z-index: 100; width: 100vw; height: 100vh; height: 100dvh; min-height: 0; gap: 4px; overflow: auto; padding: 20px clamp(16px, 4vw, 56px) calc(20px + env(safe-area-inset-bottom)); border-radius: 0; background: #f3f7fb; }
+.enc-plan-panel.expanded .enc-plan-editor { min-height: 0; }
+.enc-plan-panel.expanded .enc-plan-toolbar { width: min(100%, 1120px); margin-right: auto; margin-left: auto; }
+.enc-plan-panel.expanded .enc-plan-editor { width: min(100%, 1120px); margin-right: auto; margin-left: auto; }
+.enc-plan-panel.expanded .enc-plan-toolbar { margin-top: 4px; }
+.pd-plan-rich { white-space: normal; }
+.pd-plan-rich p, .pd-plan-rich div { margin: 0 0 .55em; }
+.pd-plan-rich ul, .pd-plan-rich ol { margin: .3em 0 .7em; padding-left: 1.5em; }
 .enc-ws .enc-ws-bar {
   flex: none; position: sticky; bottom: 0; z-index: 2;
   /* Beats the shared `.toolbar` margin declared further down, so the bar
@@ -200,6 +284,18 @@
   .consult-grid > .card > .card-head,
   .consult-grid > .card > .toolbar { flex: none; }
   .consult-grid > .card > .tblwrap { flex: 1 1 auto; min-height: 0; max-height: none; }
+}
+@media (max-width: 860px) {
+  .enc-ws-head #encWho .kv { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .enc-ws .enc-ws-head { position: sticky; top: var(--sticky-top, 60px); z-index: 4; background: #f2f7fc; padding-top: 8px; }
+  .enc-ws-body [data-wp="plan"]:not([hidden]) { min-height: 280px; }
+}
+@media (max-width: 640px) {
+  .enc-ws .enc-ws-head { margin: -14px -14px 0; padding-right: 14px; padding-left: 14px; background: #f2f7fc; }
+  .enc-ws .enc-tabs { margin-right: -14px; margin-left: -14px; }
+}
+@media (max-width: 400px) {
+  .enc-progress-section .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .stat { background: var(--emr-card); border: 1px solid var(--emr-line); border-radius: var(--r); padding: 14px 16px; }
 .stat em { font-style: normal; font-size: .74rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--emr-muted); }
@@ -720,6 +816,7 @@ body.nav-open, body.modal-open { overflow: hidden; overscroll-behavior: none; }
 @media (pointer: coarse) and (max-width: 1024px) {
   .btn, .btn.sm, .chip, .tabs button, .fstep, .fn-seg-btn,
   .modal-card [data-close], .step-dot { min-height: 44px; }
+  .enc-plan-tool { width: 44px; height: 44px; }
   .chip, .btn.sm { padding-top: 10px; padding-bottom: 10px; }
   .fn-pw-toggle { min-width: 44px; min-height: 44px; right: 4px; }
   .fn-pw-input-wrap .input, .fn-pw-input-wrap .fn-input { padding-right: 52px !important; }

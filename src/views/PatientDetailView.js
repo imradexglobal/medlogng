@@ -41,6 +41,7 @@ import {
   deletePatientDocument, deleteAdmission, deleteLabOrder,
 } from '../services/deleteService.js'
 import { normalizeLabItems, formatItemResultText, ITEM_STATUS } from '../features/labs/domain.js'
+import { planHtmlForDisplay } from '../features/encounters/planRichText.js'
 
 /** @typedef {{ id: string, label: string, coll?: string|null }} TabDef */
 
@@ -176,6 +177,13 @@ function num(v) {
   if (v === '' || v == null) return null
   const n = Number(v)
   return isNaN(n) ? null : n
+}
+function bmi(weightKg, heightCm) {
+  const weight = Number(weightKg)
+  const height = Number(heightCm)
+  return Number.isFinite(weight) && weight > 0 && Number.isFinite(height) && height > 0
+    ? Number((weight / ((height / 100) ** 2)).toFixed(1))
+    : null
 }
 /** @param {string} [name] */
 function tabDef(name) {
@@ -731,6 +739,7 @@ export async function PatientDetailView(app, params = {}) {
       if (v.spo2) parts.push('SpO₂ ' + v.spo2 + '%')
       if (v.rr) parts.push('RR ' + v.rr)
       if (v.weight_kg) parts.push(v.weight_kg + ' kg')
+      if (v.height_cm) parts.push(v.height_cm + ' cm')
       entries.push({
         type: 'vitals', timestamp: v.created_at, icon: '📍', id: v.id,
         primary: parts.join('  •  '), secondary: who(v.created_by_name || v.created_by),
@@ -836,6 +845,9 @@ export async function PatientDetailView(app, params = {}) {
         { label: 'Temp', value: s(v.temp_c) + ' °C', timestamp: when(v.created_at) },
         { label: 'SpO₂', value: s(v.spo2) + '%', timestamp: when(v.created_at) },
         ...(v.weight_kg ? [{ label: 'Weight', value: s(v.weight_kg) + ' kg', timestamp: when(v.created_at) }] : []),
+        ...(v.height_cm ? [{ label: 'Height', value: s(v.height_cm) + ' cm', timestamp: when(v.created_at) }] : []),
+        ...(v.rr ? [{ label: 'Respiratory rate', value: s(v.rr) + ' /min', timestamp: when(v.created_at) }] : []),
+        ...(bmi(v.weight_kg, v.height_cm) != null ? [{ label: 'BMI', value: bmi(v.weight_kg, v.height_cm).toFixed(1), timestamp: when(v.created_at) }] : []),
       ]
       : [
         { label: 'BP', value: '—' }, { label: 'Pulse', value: '—' },
@@ -1092,19 +1104,21 @@ export async function PatientDetailView(app, params = {}) {
     const chrono = [...rows].sort((a, b) => ms(a.created_at) - ms(b.created_at))
     const chart = '<div class="pd-chart-grid">' +
       [['BP systolic', chrono.map((v) => v.bp_systolic)], ['Pulse', chrono.map((v) => v.pulse)],
-        ['Temp', chrono.map((v) => v.temp_c)], ['SpO₂', chrono.map((v) => v.spo2)],
-        ['Weight', chrono.map((v) => v.weight_kg)]].map(([label, vals]) =>
+        ['Respiratory rate', chrono.map((v) => v.rr)], ['Temp', chrono.map((v) => v.temp_c)], ['SpO₂', chrono.map((v) => v.spo2)],
+        ['Weight', chrono.map((v) => v.weight_kg)], ['Height', chrono.map((v) => v.height_cm)],
+        ['BMI', chrono.map((v) => bmi(v.weight_kg, v.height_cm))]].map(([label, vals]) =>
         '<div class="card pd-chart-card"><h4>' + esc(label) + '</h4>' + sparkline(vals, label, chrono.map((v) => v.created_at)) + '</div>').join('') + '</div>'
     const table = dataTable({
       caption: 'Vitals',
-      cols: ['When', 'BP', 'Pulse', 'Temp', 'SpO₂', 'Weight', 'RR', 'By', ''],
+      cols: ['When', 'BP', 'Pulse', 'RR', 'Temp', 'SpO₂', 'Weight', 'Height', 'BMI', 'By', ''],
       rows,
       htmlRow: (v) => {
         const items = canDelete ? [{ label: 'Delete', dataAction: 'delete', tone: 'danger' }] : []
         return '<tr data-vitals-row="' + esc(v.id) + '"><td>' + esc(when(v.created_at)) + '</td>' +
           '<td><strong>' + esc((v.bp_systolic || '—') + '/' + (v.bp_diastolic || '—')) + '</strong> <span class="mut">mmHg</span></td>' +
-          '<td>' + esc(s(v.pulse)) + ' <span class="mut">bpm</span></td><td>' + esc(s(v.temp_c)) + ' <span class="mut">°C</span></td><td>' + esc(s(v.spo2)) + ' <span class="mut">%</span></td>' +
-          '<td>' + esc(s(v.weight_kg)) + (v.weight_kg != null && v.weight_kg !== '' ? ' <span class="mut">kg</span>' : '') + '</td><td>' + esc(s(v.rr)) + (v.rr != null && v.rr !== '' ? ' <span class="mut">/min</span>' : '') + '</td>' +
+          '<td>' + esc(s(v.pulse)) + ' <span class="mut">bpm</span></td><td>' + esc(s(v.rr)) + (v.rr != null && v.rr !== '' ? ' <span class="mut">/min</span>' : '') + '</td><td>' + esc(s(v.temp_c)) + ' <span class="mut">°C</span></td><td>' + esc(s(v.spo2)) + ' <span class="mut">%</span></td>' +
+          '<td>' + esc(s(v.weight_kg)) + (v.weight_kg != null && v.weight_kg !== '' ? ' <span class="mut">kg</span>' : '') + '</td><td>' + esc(s(v.height_cm)) + (v.height_cm != null && v.height_cm !== '' ? ' <span class="mut">cm</span>' : '') + '</td>' +
+          '<td>' + esc(bmi(v.weight_kg, v.height_cm) != null ? bmi(v.weight_kg, v.height_cm).toFixed(1) : '—') + '</td>' +
           '<td class="mut">' + esc(who(v.created_by_name || v.created_by)) + (v.note ? '<div>' + esc(v.note) + '</div>' : '') + '</td>' +
           '<td>' + (items.length ? kebabCell({ rowId: v.id, items }) : '') + '</td></tr>'
       },
@@ -1349,16 +1363,18 @@ export async function PatientDetailView(app, params = {}) {
         { name: 'bp_systolic', label: 'BP systolic', type: 'number', placeholder: '120' },
         { name: 'bp_diastolic', label: 'BP diastolic', type: 'number', placeholder: '80' },
         { name: 'pulse', label: 'Pulse (bpm)', type: 'number', placeholder: '78' },
+        { name: 'rr', label: 'Respiratory rate (breaths/min)', type: 'number', placeholder: '16' },
         { name: 'temp_c', label: 'Temp °C', type: 'number', placeholder: '36.8' },
         { name: 'spo2', label: 'SpO₂ %', type: 'number', placeholder: '98' },
         { name: 'weight_kg', label: 'Weight kg', type: 'number', placeholder: '70' },
+        { name: 'height_cm', label: 'Height cm', type: 'number', placeholder: '170' },
         { name: 'note', label: 'Note', full: true, placeholder: 'Optional' },
       ],
       onSubmit: async (v) => {
         await createPatientDoc(COLL.VITALS, pid, {
           bp_systolic: num(v.bp_systolic), bp_diastolic: num(v.bp_diastolic),
-          pulse: num(v.pulse), temp_c: num(v.temp_c), spo2: num(v.spo2),
-          weight_kg: num(v.weight_kg), note: v.note || '',
+          pulse: num(v.pulse), rr: num(v.rr), temp_c: num(v.temp_c), spo2: num(v.spo2),
+          weight_kg: num(v.weight_kg), height_cm: num(v.height_cm), note: v.note || '',
         }, CAP.VITALS)
         closeModal()
         toast('Vitals saved')
@@ -1633,7 +1649,7 @@ export async function PatientDetailView(app, params = {}) {
       '<p>' + esc(s(e.encounter_type || e.type || 'Encounter')) + ' · ' + esc(encLabel(e.status)) + ' · ' + esc(when(e.created_at)) + '</p>' +
       '<p>Clinician: ' + esc(who(e.clinician_name || e.clinician || e.created_by)) + '</p>' +
       '<h3>Note</h3><pre>' + esc(s(e.chief_complaint, 'Nothing recorded')) + '</pre>' +
-      '<h3>Plan</h3><pre>' + esc(s(e.treatment_plan, 'Nothing recorded')) + '</pre>'
+      '<h3>Plan</h3>' + (e.treatment_plan ? '<div class="pd-plan-rich">' + planHtmlForDisplay(e.treatment_plan) + '</div>' : '<p>Nothing recorded.</p>')
   }
 
   async function openEncounterDetail(e) {
@@ -1658,13 +1674,15 @@ export async function PatientDetailView(app, params = {}) {
         '<span class="fstep' + (flowIdx > i ? ' done' : flowIdx === i ? ' now' : '') + '">' + esc(m.step) + '</span>' +
         (i < ENCOUNTER_STATUS_FLOW_META.length - 1 ? '<span class="farrow">→</span>' : '')).join('') + '</div>') +
       section('Vitals', Object.values(vitals).some((x) => x !== '' && x != null)
-        ? '<div class="kv pd-kv4">' + kvRow('BP', vitals.BP) + kvRow('Pulse', vitals.Pulse) + kvRow('Temp °C', vitals.Temp) + kvRow('SpO₂', vitals.SpO2) + '</div>'
+        ? '<div class="kv pd-kv4">' + kvRow('BP', vitals.BP) + kvRow('Pulse', vitals.Pulse) + kvRow('Respiratory rate', vitals.RR) + kvRow('Temp °C', vitals.Temp) + kvRow('SpO₂', vitals.SpO2) + kvRow('Weight kg', vitals.Weight) + kvRow('Height cm', vitals.Height) + kvRow('BMI', bmi(vitals.Weight, vitals.Height)) + '</div>'
         : '<p class="sub">No vitals snapshot on the encounter.</p>') +
       section('Clinical note (SOAP)', pre(s(e.chief_complaint, ''))) +
       section('Diagnoses', dxList.length
         ? dxList.map((d) => '<div class="summary-item"><span class="summary-item-label">' + esc(s(d.condition)) + '</span></div>').join('')
         : '<p class="sub">No diagnosis recorded on this encounter.</p>') +
-      section('Treatment plan', pre(e.treatment_plan)) +
+      section('Treatment plan', e.treatment_plan
+        ? '<div class="pd-pre pd-plan-rich">' + planHtmlForDisplay(e.treatment_plan) + '</div>'
+        : '<p class="sub">Nothing recorded.</p>') +
       section('Prescriptions', rxItems.length
         ? '<ul>' + rxItems.map((l) => '<li>' + esc(s(l.medicine)) + ' ' + esc(s(l.dosage)) + '</li>').join('') + '</ul>'
         : '<p class="sub">No medicines snapshotted.</p>') +

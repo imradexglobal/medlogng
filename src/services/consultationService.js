@@ -54,6 +54,7 @@ function toEncounterRow(r) {
     appointmentId: r.appointment_id || '',
     status: r.status || 'arrived',
     chiefComplaint: r.chief_complaint || '',
+    clinicalNote: r.clinical_note || '',
     type: r.type || '',
     clinician: r.clinician || '',
     vitals: r.vitals || {},
@@ -400,7 +401,8 @@ export async function recordEncounterVitals(encounterId, v) {
     try {
       await createPatientDoc('vitals', enc.patientId, {
         bp_systolic: v.bp_systolic ?? null, bp_diastolic: v.bp_diastolic ?? null,
-        pulse: v.pulse ?? null, temp_c: v.temp_c ?? null, spo2: v.spo2 ?? null,
+        pulse: v.pulse ?? null, rr: v.rr ?? null, temp_c: v.temp_c ?? null, spo2: v.spo2 ?? null,
+        weight_kg: v.weight_kg ?? null, height_cm: v.height_cm ?? null,
         note: v.note || '', encounter_id: encounterId,
       }, 'vitals.create')
     } catch (e) {
@@ -419,7 +421,8 @@ export async function recordEncounterVitals(encounterId, v) {
         ? {
           vitals: {
             BP: (v.bp_systolic != null && v.bp_diastolic != null) ? v.bp_systolic + '/' + v.bp_diastolic : '',
-            Pulse: v.pulse ?? '', Temp: v.temp_c ?? '', SpO2: v.spo2 ?? '',
+            Pulse: v.pulse ?? '', RR: v.rr ?? '', Temp: v.temp_c ?? '', SpO2: v.spo2 ?? '',
+            Weight: v.weight_kg ?? '', Height: v.height_cm ?? '',
           },
         }
         : {}),
