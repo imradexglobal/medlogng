@@ -178,6 +178,26 @@ export function createAuthenticator({ auth = null, db = null, log = console, che
     return identity
   }
 
+  async function verifyOnline(req) {
+    const token = bearerToken(req)
+    if (!token) throw new HttpError(401, 'Sign-in required.', 'no_token')
+    if (!auth) throw new HttpError(503, 'Authentication service is unavailable.', 'auth_unavailable')
+    try {
+      const decoded = await auth.verifyIdToken(token, true)
+      const identity = identityFromToken(decoded)
+      if (!identity.uid) throw new HttpError(401, 'The sign-in token has no user id.', 'bad_token')
+      return identity
+    } catch (error) {
+      if (error instanceof HttpError) throw error
+      const code = String(error?.code || '').toLowerCase()
+      if (['app/network-error', 'auth/network-request-failed', 'unavailable', 'deadline-exceeded', 'econnreset', 'etimedout', 'enotfound'].includes(code) ||
+          /network|unavailable|deadline exceeded|connection reset|timed? ?out|dns/i.test(String(error?.message || ''))) {
+        throw new HttpError(503, 'Online identity verification is temporarily unavailable.', 'identity_backend_unavailable')
+      }
+      throw new HttpError(401, 'Your sign-in token is invalid, expired or revoked. Sign in again.', 'bad_token')
+    }
+  }
+
   async function loadMembership(uid, orgId) {
     if (!db) return null
     const ref = db.collection(MEMBERSHIPS).doc(membershipDocId(orgId, uid))
@@ -247,5 +267,5 @@ export function createAuthenticator({ auth = null, db = null, log = console, che
     }
   }
 
-  return { verify, authorize, authorizeSpeech, loadMembership, isSuperAdmin }
+  return { verify, verifyOnline, authorize, authorizeSpeech, loadMembership, isSuperAdmin }
 }

@@ -1606,13 +1606,13 @@ export async function PatientDetailView(app, params = {}) {
           { wards, admissions: existing.rows.map(normalizeAdmission), encounter: openEnc },
         )
         if (invalid) throw new Error(invalid)
-        await createAdmission({
+        const saved = await createAdmission({
           patient_id: pid, patient_name: p.name || '', ward_name: v.ward_name, bed_number: v.bed_number,
           admission_type: v.admission_type, admission_reason: v.admission_reason,
           attending_provider: v.attending_provider, encounter_id: linkedId,
         })
         closeModal()
-        toast('Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
+        toast(saved.pendingSync ? 'Admission saved on this device; it will sync when connected.' : 'Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
         await afterClinical(TAB.ADMISSIONS)
       },
     })
@@ -1635,9 +1635,9 @@ export async function PatientDetailView(app, params = {}) {
         { name: 'notes', label: 'Discharge notes', full: true, placeholder: 'Follow-up instructions…' },
       ],
       onSubmit: async (v) => {
-        await dischargeAdmission(admissionId, v)
+        const result = await dischargeAdmission(admissionId, v)
         closeModal()
-        toast('Patient discharged')
+        toast(result?.pendingSync ? 'Discharge saved on this device; it will sync when connected.' : 'Patient discharged')
         await afterClinical(TAB.ADMISSIONS)
       },
     })

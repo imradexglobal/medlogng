@@ -17,7 +17,7 @@
 //               when the patient is known, and again on submit as a backstop
 //   • Create  — createEncounter() (patient check, duplicate guard, audit log)
 //   • After   — deep-link straight into the encounter workspace
-import { shell, toast, wireToast } from '../components/shell.js'
+import { shell, toast, wireToast, wireSearchableSelect } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import { navigate } from '../router.js'
 import {
@@ -199,6 +199,9 @@ export async function StartEncounterView(app, params = {}) {
       '<button class="btn" id="encSave">Open encounter →</button>' +
       '</div>' +
       '<div id="encErr" class="err" style="margin-top:10px"></div>'
+
+    if (!fixedPatient) wireSearchableSelect(null, document.getElementById('encPatient'))
+    if (staff.length) wireSearchableSelect(null, document.getElementById('encClinician'))
 
     // Searchable pill input for the reason — the same component the modal
     // used, now with room to grow: suggestions drop over the page instead of

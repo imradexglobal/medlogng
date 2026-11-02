@@ -43,17 +43,30 @@ function cleanActor(actor) {
   return Object.keys(out).length ? out : null
 }
 
-export function createQueue(file) {
+export function createQueue(file, { encode = (text) => text, decode = null } = {}) {
   let state = freshState()
+  let migratePlaintext = false
 
   // Load whatever was durable on disk. A corrupt file is moved aside rather
   // than crashing the hub — losing the queue is bad, refusing to start forever
   // is worse; the browser devices keep their own copy and will re-push.
   if (existsSync(file)) {
     try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      const raw = readFileSync(file)
+      let text
+      if (decode) {
+        try { text = decode(raw) }
+        catch {
+          // Migrate pre-encryption JSON, but never discard an encrypted file
+          // that this Windows profile cannot decrypt.
+          try { text = raw.toString('utf8'); JSON.parse(text); migratePlaintext = true }
+          catch { throw new Error('The encrypted hospital queue could not be decrypted; its contents were preserved.') }
+        }
+      } else text = raw.toString('utf8')
+      const parsed = JSON.parse(text)
       if (parsed && typeof parsed === 'object' && parsed.ops) state = parsed
     } catch {
+      if (decode) throw new Error('The hospital queue could not be read safely; its contents were preserved.')
       try { renameSync(file, file + '.corrupt-' + Date.now()) } catch { /* best effort */ }
       state = freshState()
     }
@@ -63,7 +76,7 @@ export function createQueue(file) {
     state.savedAt = Date.now()
     mkdirSync(dirname(file), { recursive: true })
     const tmp = file + '.tmp'
-    writeFileSync(tmp, JSON.stringify(state))
+    writeFileSync(tmp, encode(JSON.stringify(state)))
     renameSync(tmp, file)
   }
 
@@ -79,6 +92,10 @@ export function createQueue(file) {
     }
     if (changed) save()
   }
+
+  // A legacy plaintext file is immediately rewritten using the configured
+  // encrypted encoder, even when no new operation arrives this session.
+  if (migratePlaintext) save()
 
   return {
     // Returns { accepted: true } for a new op, { duplicate: true } for a

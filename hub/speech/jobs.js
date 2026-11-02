@@ -3,7 +3,7 @@
 import { createWriteStream } from 'node:fs'
 import { mkdir, open, readFile, realpath, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { finished } from 'node:stream/promises'
@@ -104,6 +104,7 @@ export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console
 
   function publicJob(job) {
     const out = { id: job.id, status: job.status, createdAt: job.createdAt, updatedAt: job.updatedAt }
+    if (job.encounterId) out.encounterId = job.encounterId
     if (job.status === 'complete') out.text = job.text || ''
     if (job.status === 'failed') out.error = job.error || 'Transcription failed.'
     const pos = pending.findIndex((entry) => entry.id === job.id)
@@ -114,7 +115,7 @@ export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console
 
   function persist() {
     const snapshot = JSON.stringify([...jobs.values()].map((job) => ({
-      id: job.id, owner: job.owner, orgId: job.orgId, requestId: job.requestId, status: job.status,
+      id: job.id, owner: job.owner, orgId: job.orgId, requestId: job.requestId, encounterId: job.encounterId || '', status: job.status,
       createdAt: job.createdAt, updatedAt: job.updatedAt, expiresAt: job.expiresAt,
       audioPath: job.audioPath, encryptedText: job.text ? protectResult(job.text) : '',
       error: job.error, cancelRequested: job.cancelRequested,
@@ -266,7 +267,7 @@ export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console
     return job ? publicJob(job) : null
   }
 
-  async function createFromRequest(req, { owner, orgId, requestId, contentType }) {
+  async function createFromRequest(req, { owner, orgId, requestId, contentType, encounterId = '', expectedBodyHash = '' }) {
     if (!ready) throw Object.assign(new Error('Speech service is not ready.'), { status: 503 })
     if (!REQUEST_ID_RE.test(String(requestId || ''))) throw Object.assign(new Error('Missing or invalid request id.'), { status: 400 })
     const key = requestKey(owner, orgId, requestId)
@@ -285,16 +286,18 @@ export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console
     const wav = path.join(audioDir, id + '.wav')
     let bytes = 0
     const chunks = []
+    const bodyHasher = createHash('sha256')
     let headSize = 0
     const output = createWriteStream(incoming, { flags: 'wx', mode: 0o600 })
     const outputDone = finished(output)
-    const job = { id, owner, orgId, requestId, status: 'uploading', createdAt: Date.now(), updatedAt: Date.now(),
+    const job = { id, owner, orgId, requestId, encounterId, status: 'uploading', createdAt: Date.now(), updatedAt: Date.now(),
       audioPath: '', text: '', error: '', cancelRequested: false }
     jobs.set(id, job)
     requests.set(key, id)
     try {
       await persist()
       for await (const chunk of req) {
+        bodyHasher.update(chunk)
         bytes += chunk.length
         if (bytes > MAX_UPLOAD_BYTES) throw Object.assign(new Error('Audio upload exceeds the 25 MB limit.'), { status: 413 })
         if (headSize < 32) {
@@ -306,6 +309,9 @@ export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console
       }
       output.end()
       await outputDone
+      if (expectedBodyHash && bodyHasher.digest('hex') !== String(expectedBodyHash).toLowerCase()) {
+        throw Object.assign(new Error('Speech request body proof does not match the uploaded recording.'), { status: 401 })
+      }
       if (!bytes) throw Object.assign(new Error('Audio upload is empty.'), { status: 400 })
       const head = Buffer.concat(chunks).subarray(0, 32)
       const kind = audioKind(head)

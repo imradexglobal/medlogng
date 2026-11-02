@@ -1,4 +1,5 @@
 import { openModal } from '../../components/shell.js'
+import { wireSearchableSelect } from '../../components/shell.js'
 import { esc } from '../../utils/sanitize.js'
 import { toQty } from './requests.js'
 
@@ -69,11 +70,7 @@ export function openPrescriptionModal({
     const opts = [...extra, ...options]
       .map((o) => '<option value="' + esc(o.value) + '" data-label="' + esc(o.label) + '"' +
         (o.value === chosen ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('')
-    const filter = options.length > 1
-      ? '<input class="input" style="margin-bottom:6px" data-rx-filter placeholder="Search in-house medicines…" autocomplete="off">'
-      : ''
-    return filter +
-      '<select class="input" data-rx-drug>' +
+    return '<select class="input" data-rx-drug data-search-placeholder="Search in-house medicines…">' +
       '<option value="">Choose a medicine…</option>' + opts + '</select>'
   }
 
@@ -141,29 +138,9 @@ export function openPrescriptionModal({
   // Long catalogues are unusable as a bare scroll list on a phone, so a typed
   // fragment narrows the options in place — the saved value is still the option
   // value, so filtering can never change what gets submitted.
-  function wireFilter(box) {
-    const sel = cardEl.querySelector('[data-rx-drug]')
-    if (!sel) return
-    const opts = Array.from(sel.options)
-    box.oninput = () => {
-      const q = box.value.trim().toLowerCase()
-      const digits = q.replace(/\D/g, '')
-      for (const o of opts) {
-        const label = String(o.getAttribute('data-label') || o.textContent || '').toLowerCase()
-        o.hidden = !(!q || (/[0-9]/.test(q) ? label.replace(/\D/g, '').includes(digits) : label.includes(q)))
-      }
-      if (sel.selectedOptions[0] && sel.selectedOptions[0].hidden) {
-        const first = opts.find((o) => !o.hidden)
-        sel.value = first ? first.value : ''
-      }
-    }
-  }
-
   function clearFilter() {
-    const box = cardEl.querySelector('[data-rx-filter]')
-    if (!box) return
-    box.value = ''
-    box.oninput?.()
+    const input = cardEl.querySelector('[data-rx-drug]')?._autocompleteInput
+    if (input) input.value = ''
   }
 
   function field(sel) {
@@ -305,6 +282,7 @@ export function openPrescriptionModal({
     cardEl.querySelector('[data-rx-qty]').value = String(r.qty ?? r.quantity ?? '')
     cardEl.querySelector('[data-rx-instructions]').value = r.instructions || ''
     clearFilter()
+    sel?._syncAutocomplete?.()
     applyVisibility()
     addBtn.textContent = 'Update row'
     editPill.style.display = ''
@@ -315,8 +293,8 @@ export function openPrescriptionModal({
   }
 
   cardEl.querySelector('[data-rx-source]')?.addEventListener('change', () => applyVisibility())
-  const filterBox = cardEl.querySelector('[data-rx-filter]')
-  if (filterBox) wireFilter(filterBox)
+  const drugSelect = cardEl.querySelector('[data-rx-drug]')
+  if (drugSelect && options.length > 1) wireSearchableSelect(null, drugSelect)
 
   addBtn.onclick = () => {
     errEl.textContent = ''

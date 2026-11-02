@@ -10,12 +10,10 @@
 // Admitting does NOT close the encounter — the clinician keeps documenting.
 import { shell, formModal, toast, closeModal, wireToast, skeletonCard } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
-import { db, doc, setDoc, updateDoc, serverTimestamp } from '../firebase.js'
-import { logAudit } from '../services/adminService.js'
 import {
-  listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, createAdmission, dischargeAdmission, myAdmissionCaps,
+  listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, createAdmission, dischargeAdmission, transferAdmission, myAdmissionCaps,
   listOrgWards, subscribeOrgWards, createWard, updateWardBeds, ADMISSION_TYPES,
-  occupancySummary, validateAdmissionInput, validateWardCapacity, bedClaimKey,
+  occupancySummary, validateAdmissionInput, validateWardCapacity,
 } from '../services/admissionService.js'
 import { getEncounter } from '../services/consultationService.js'
 import { getClinicalStaff } from '../services/authService.js'
@@ -30,7 +28,7 @@ import { confirmDelete } from './deleteUi.js'
 import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteAdmission } from '../services/deleteService.js'
-import { DISCHARGE_TYPES } from '../features/admissions/domain.js'
+import { DISCHARGE_TYPES, normalizeBedId as normalizeBed } from '../features/admissions/domain.js'
 
 // Admission types come from the domain module so this form cannot drift from
 // the list the service and tests agree on.
@@ -74,6 +72,7 @@ export async function AdmissionsView(app, params = {}) {
   let cursor = null
   let hasMore = false
   let loading = false
+  let liveWindowEdge = null
   // Debounce timer for search input so we don't re-render on every keystroke.
   let searchDebounce = null
   let lastSearchTerm = ''
@@ -229,7 +228,7 @@ export async function AdmissionsView(app, params = {}) {
     set('adm-available', sum.hasCapacity ? sum.free : '—')
     set('adm-discharged', sum.discharged)
     const occSub = document.getElementById('adm-occ-sub')
-    if (occSub) occSub.textContent = sum.hasCapacity ? sum.occupancyPct + '% occupancy' : 'no ward master yet'
+    if (occSub) occSub.textContent = sum.hasCapacity ? sum.occupancyPct + '% of configured beds · ' + sum.unconfiguredOccupied + ' in unconfigured wards' : 'no configured capacity'
     set('adm-ward-count', wards.length + (wards.length === 1 ? ' ward' : ' wards'))
 
     // Skeleton state while the first page is still loading.
@@ -274,22 +273,17 @@ export async function AdmissionsView(app, params = {}) {
         ? sum.wards.map((w) => {
           const tone = w.overCapacity ? 'bad' : (w.pct > 80 ? 'warn' : 'info')
           const detail = w.unconfigured
-            ? 'no bed count configured'
+            ? w.occupied + ' occupied · capacity not configured'
             : w.free + ' free · ' + w.pct + '% occupied'
           // Visual bed map: one chip per configured bed, filled for occupied.
           let bedMap = ''
           if (w.totalBeds && w.totalBeds > 0) {
-            const occupiedBeds = new Set((admissions || []).filter((a) =>
-              a.status === 'active' && String(a.wardName || '').trim().toLowerCase() === String(w.name || '').trim().toLowerCase()).map((a) => a.bedNumber))
             bedMap = '<div class="bedgrid" style="margin-top:8px">' +
               Array.from({ length: w.totalBeds }, (_, i) => {
                 const bedNo = String(i + 1)
-                const taken = occupiedBeds.has(bedNo)
-                const patient = taken ? (admissions || []).find((a) =>
-                  a.status === 'active' && String(a.wardName || '').trim().toLowerCase() === String(w.name || '').trim().toLowerCase() && String(a.bedNumber || '') === bedNo) : null
-                return '<div class="bed ' + (taken ? 'o' : 'v') + '" title="' +
-                  (taken ? 'Bed ' + bedNo + ' — ' + esc(patient ? patient.patientName : 'occupied') : 'Bed ' + bedNo + ' — free') +
-                  '">' + esc(bedNo) + '</div>'
+                const patient = (admissions || []).find((a) => a.status === 'active' && String(a.wardName || '').trim().toLowerCase() === String(w.name || '').trim().toLowerCase() && normalizeBed(a.bedNumber) === bedNo)
+                const patientLink = patient ? '<a class="bed-patient" href="#/patients/' + encodeURIComponent(patient.patientId) + '">' + esc(admissionName(patient)) + '</a>' : ''
+                return '<div class="bed ' + (patient ? 'o' : 'v') + '" title="Bed ' + bedNo + (patient ? ' occupied by ' + esc(admissionName(patient)) : ' available') + '"><strong>Bed ' + bedNo + '</strong>' + patientLink + (patient && patient.encounterId ? '<a class="bed-encounter" href="#/consultations?enc=' + encodeURIComponent(patient.encounterId) + '">Encounter</a>' : '') + (!patient && caps.canAdmit ? '<button class="btn ghost sm" data-bed-admit="' + esc(w.id) + '" data-bed-number="' + bedNo + '">Admit</button>' : '') + '</div>'
               }).join('') + '</div>'
           }
           return '<div class="ward"><div class="card-head"><h4>' + esc(w.name) + '</h4>' +
@@ -333,7 +327,10 @@ export async function AdmissionsView(app, params = {}) {
       const items = []
       if (a.status === 'active') {
         items.push({ label: 'Workspace', dataAction: 'workspace' })
-        items.push({ label: 'Transfer', dataAction: 'transfer' })
+        if (caps.canAdmit) {
+          items.push({ label: 'Transfer', dataAction: 'transfer' })
+          items.push({ label: 'Discharge', dataAction: 'discharge' })
+        }
       }
       if (a.status === 'discharged' && canDeleteRecords()) {
         items.push({ label: 'Delete', tone: 'danger', dataAction: 'delete' })
@@ -371,6 +368,7 @@ export async function AdmissionsView(app, params = {}) {
           openTransferForm(rowId)
           return
         }
+        if (action === 'discharge') { openDischargeForm(rowId); return }
         if (action === 'delete') {
           confirmDelete('discharged admission of ' + admissionName(adm), () => deleteAdmission(rowId), () => {
             lastDeletedAdm = rowId
@@ -385,6 +383,9 @@ export async function AdmissionsView(app, params = {}) {
     // Delegate ward admit buttons (re-bound each render; orphaned nodes are safe).
     document.getElementById('adm-wards')?.querySelectorAll('[data-admit-ward]').forEach((b) => {
       b.onclick = () => { navigate('/admissions/new?ward=' + encodeURIComponent(b.getAttribute('data-admit-ward'))) }
+    })
+    document.getElementById('adm-wards')?.querySelectorAll('[data-bed-admit]').forEach((b) => {
+      b.onclick = () => { navigate('/admissions/new?ward=' + encodeURIComponent(b.getAttribute('data-bed-admit')) + '&bed=' + encodeURIComponent(b.getAttribute('data-bed-number'))) }
     })
   }
 
@@ -446,7 +447,7 @@ export async function AdmissionsView(app, params = {}) {
         const invalid = validateAdmissionInput(v, { wards, admissions, encounter: enc })
         if (invalid) throw new Error(invalid)
         const sel = patients.find((p) => p.pid === v.patient_id)
-        await createAdmission({
+        const saved = await createAdmission({
           patient_id: v.patient_id,
           patient_name: (sel && sel.name) || (fixedPatient && fixedPatient.name) || v.patient_id,
           ward_name: v.ward_name,
@@ -458,7 +459,7 @@ export async function AdmissionsView(app, params = {}) {
           encounter_id: enc ? enc.id : '',
         })
         closeModal()
-        toast('Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
+        toast(saved.pendingSync ? 'Admission saved on this device; it will sync when connected.' : 'Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
         reload()
       },
     })
@@ -476,13 +477,15 @@ export async function AdmissionsView(app, params = {}) {
         { name: 'discharge_type', label: 'Discharge type', type: 'select', options: DISCHARGE_TYPES.map((t) => ({ value: t.value, label: t.label })), value: 'discharged', required: true },
       ],
       onSubmit: async (v) => {
+        let pendingSync = false
         try {
-          await dischargeAdmission(id, { reason: v.reason, notes: v.notes, dischargeType: v.discharge_type })
+          const result = await dischargeAdmission(id, { reason: v.reason, notes: v.notes, dischargeType: v.discharge_type })
+          pendingSync = !!result?.pendingSync
         } catch (e) {
           throw new Error(friendlyWriteError(e))
         }
         closeModal()
-        toast('Patient discharged')
+        toast(pendingSync ? 'Discharge saved on this device; it will sync when connected.' : 'Patient discharged')
         reload()
       },
     })
@@ -529,41 +532,18 @@ export async function AdmissionsView(app, params = {}) {
       onSubmit: async (v) => {
         const invalid = validateAdmissionInput(
           { patient_id: adm.patientId, ward_name: v.ward_name, bed_number: v.bed_number, encounter_id: '' },
-          { wards, admissions, encounter: null },
+          { wards, admissions: admissions.filter((a) => a.id !== id), encounter: null },
         )
         if (invalid) throw new Error(invalid)
+        let pendingSync = false
         try {
-          await updateDoc(doc(db, 'admissions', id), {
-            ward_name: String(v.ward_name || '').trim(),
-            bed_number: String(v.bed_number || '').trim(),
-            updated_at: serverTimestamp(),
-          })
-          // Release the old bed claim and claim the new one.
-          try {
-            await deleteDoc(doc(db, 'bed_claims', bedClaimKey(activeOrg, adm.wardName, adm.bedNumber)))
-            await setDoc(doc(db, 'bed_claims', bedClaimKey(activeOrg, v.ward_name, v.bed_number)), {
-              organization_id: activeOrg,
-              ward_name: String(v.ward_name || '').trim(),
-              bed_number: String(v.bed_number || '').trim(),
-              admission_id: id,
-              patient_id: adm.patientId,
-              updated_at: serverTimestamp(),
-            })
-          } catch (e) {
-            console.warn('[admissions] bed claim transfer cleanup failed:', e?.message)
-          }
-          await logAudit({
-            action: 'admission.transferred',
-            organizationId: activeOrg,
-            patientId: adm.patientId,
-            details: 'Admission ' + id + ' transferred from ' + esc(adm.wardName) + ' · ' + esc(adm.bedNumber) +
-              ' to ' + esc(v.ward_name) + ' · ' + esc(v.bed_number) + ' (' + esc(v.reason) + ')',
-          })
+          const result = await transferAdmission(id, { ward_name: v.ward_name, bed_number: v.bed_number, reason: v.reason })
+          pendingSync = !!result?.pendingSync
         } catch (e) {
           throw new Error(friendlyWriteError(e))
         }
         closeModal()
-        toast('Patient transferred to ' + v.ward_name + ' · ' + v.bed_number)
+        toast(pendingSync ? 'Transfer saved on this device; it will sync when connected.' : 'Patient transferred to ' + v.ward_name + ' · ' + v.bed_number)
         reload()
       },
     })
@@ -675,12 +655,14 @@ export async function AdmissionsView(app, params = {}) {
     unsubs.push(
       subscribeOrgAdmissions(watchedOrg,
         (rows) => {
-          const seen = new Set(admissions.map((a) => a.id))
-          const incoming = rows.filter((a) => !seen.has(a.id))
-          if (incoming.length) {
-            admissions = incoming.concat(admissions)
-            render()
-          }
+          // Reconcile the bounded live window: refresh rows in place (including
+          // edits/transfers/discharges), retain paged history beyond its edge.
+          const incomingById = new Map(rows.map((a) => [a.id, a]))
+          if (rows.length) liveWindowEdge = Math.min(...rows.map((a) => a.createdAt || a.admissionDate || 0))
+          const edge = liveWindowEdge ?? Infinity
+          const retained = admissions.filter((a) => !incomingById.has(a.id) && (a.createdAt || a.admissionDate || 0) < edge)
+          admissions = [...rows, ...retained]
+          render()
         },
         (e) => {
           console.warn('[admissions] live update failed; refreshing once:', e?.message || e)

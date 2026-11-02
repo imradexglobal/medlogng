@@ -32,6 +32,11 @@ export async function saveLastLogin(email) {
 }
 
 export async function logout() {
+  const { user } = authStore.getState()
+  if (user?.uid) {
+    const { clearAllSpeechSessions } = await import('./speechSession.js')
+    await clearAllSpeechSessions(user.uid)
+  }
   await signOut(auth)
 }
 
@@ -50,6 +55,11 @@ export function myActiveMembership() {
 }
 
 export async function forceLogout(reason) {
+  const { user } = authStore.getState()
+  if (user?.uid) {
+    const { clearAllSpeechSessions } = await import('./speechSession.js')
+    await clearAllSpeechSessions(user.uid)
+  }
   await signOut(auth)
 }
 
@@ -67,6 +77,16 @@ export async function refreshSession() {
 export function initAuthListener() {
   if (listenerSet) return
   listenerSet = true
+  const revalidateCachedSpeech = async () => {
+    const user = auth.currentUser
+    if (!user || !navigator.onLine) return
+    try {
+      const { revalidateAllSpeechSessions } = await import('./speechSession.js')
+      await revalidateAllSpeechSessions(user)
+    } catch (e) { console.warn('[auth] offline speech session revalidation deferred:', e?.message || e) }
+  }
+  window.addEventListener('online', () => { void revalidateCachedSpeech() })
+  window.addEventListener('focus', () => { void revalidateCachedSpeech() })
   // Firebase restores the session from local storage on cold load, so the
   // first callback can arrive with a user before memberships are loaded. The
   // router guard gates on `ready`, so this is the ONLY place that flips it —
@@ -102,6 +122,7 @@ export function initAuthListener() {
       activeOrgName,
       ready: true,
     })
+    if (u) void revalidateCachedSpeech()
   })
 }
 

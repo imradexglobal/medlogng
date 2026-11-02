@@ -53,6 +53,11 @@ files:
   - public/**/*
   - electron/**/*
   - hub/**/*
+  # Never package developer or imported Firebase credentials/environment.
+  - '!hub/keys/**'
+  - '!**/service-account.json'
+  - '!**/.env'
+  - '!**/.env.*'
   - src/features/pharmacy/requests.js
   - package.json
   # firebase-admin is REQUIRED here (unlike the normal build): the relay
@@ -79,7 +84,10 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: MediLog NG Host
   menuCategory: Imradex Global
-  deleteAppDataOnUninstall: true
+  # Host configuration, encrypted offline sessions, audit and queued handoffs
+  # live in Electron userData. Uninstall removes the program but must preserve
+  # this clinical operational data for a later reinstall/upgrade.
+  deleteAppDataOnUninstall: false
   differentialPackage: false
 
 # Auto-update channel for Host builds

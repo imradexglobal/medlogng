@@ -10,6 +10,11 @@ import { startIdleWatch } from './services/idleService.js'
 import { initUpdater } from './components/updater.js'
 import { startOutboxSync } from './services/clinicalOutbox.js'
 import { installChunkRecovery } from './lib/chunkRecovery.js'
+import { toast } from './components/shell.js'
+
+window.addEventListener('medilog-admission-sync-error', (event) => {
+  toast(event?.detail?.message || 'An admission update could not sync. Reopen Admissions and review it.')
+})
 
 // Views are loaded on demand (see registerRoute in router.js). Login is pulled
 // in eagerly because it is the screen a cold, signed-out load lands on.
@@ -161,6 +166,34 @@ startAccessWatch()
 startIdleWatch()
 initUpdater()
 startOutboxSync() // retry queued cross-department handoffs (offline -> online)
+
+// Enrol the browser's non-exportable device key with the LAN Host while the
+// staff member has a live cloud session. The Host then has a verified,
+// capability-limited identity available during internet outages.
+let enrolledHostKey = ''
+let hostEnrollInFlight = false
+async function enrollHostSession() {
+  const s = authStore.getState()
+  const key = s.user?.uid && s.activeOrg ? `${s.user.uid}:${s.activeOrg}` : ''
+  if (!navigator.onLine || !key || hostEnrollInFlight || key === enrolledHostKey) return
+  hostEnrollInFlight = true
+  try {
+    const { registerHostSession } = await import('./services/hostSession.js')
+    const device = await registerHostSession(s.user, s.activeOrg)
+    if (device) enrolledHostKey = key
+  } catch (error) {
+    console.info('[host session] Enrollment will retry when the hospital network is available.', error?.message || '')
+  } finally {
+    hostEnrollInFlight = false
+    const latest = authStore.getState()
+    if (navigator.onLine && latest.user?.uid && latest.activeOrg && `${latest.user.uid}:${latest.activeOrg}` !== key) {
+      queueMicrotask(() => { void enrollHostSession() })
+    }
+  }
+}
+authStore.subscribe(() => { void enrollHostSession() })
+window.addEventListener('online', () => { enrolledHostKey = ''; void enrollHostSession() })
+void enrollHostSession()
 handleRoute()
 
 // Register the app-shell service worker (web only, production only). Skipped

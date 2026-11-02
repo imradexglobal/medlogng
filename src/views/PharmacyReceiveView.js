@@ -1,6 +1,6 @@
 // Receive batch — full page (replaces the receive modal).
 // Records purchase (unit) cost so profit can be tracked against the selling price.
-import { shell, toast, wireToast } from '../components/shell.js'
+import { shell, toast, wireToast, wireSearchableSelect } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import { listOrgDrugs, receiveBatch } from '../services/pharmacyService.js'
 import { myPharmacyCaps } from '../services/pharmacyService.js'
@@ -88,6 +88,8 @@ export async function PharmacyReceiveView(app) {
       '<p class="sub" style="margin-top:12px">The unit cost you enter becomes this item\'s purchase price. Profit = selling price − purchase price.</p>'
 
     const form = document.getElementById('prvForm')
+    const drugSelect = form.querySelector('[name="drugId"]')
+    if (drugs.length > 1) wireSearchableSelect(null, drugSelect)
     form.onsubmit = async (e) => {
       e.preventDefault()
       const btn = form.querySelector('button[type="submit"]')

@@ -16,6 +16,7 @@ import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
 import { runChunk } from './pagination.js'
 import { currentStaffName } from '../lib/staffName.js'
+import { getDocTolerant, getDocsTolerant, isOffline } from '../lib/offlineRead.js'
 
 const ENCOUNTERS = 'encounters'
 
@@ -106,7 +107,7 @@ export async function findOpenEncounterForPatient(pid, orgId = '') {
   const q = orgId
     ? query(baseQuery, where('organization_id', '==', orgId))
     : baseQuery
-  const snap = await getDocs(q)
+  const snap = await getDocsTolerant(q)
   if (snap.empty) return null
   // Return most recent open encounter
   let latest = null
@@ -201,7 +202,7 @@ export function subscribeOrgEncounters(orgId, onRows, onError) {
 
 // Get single encounter
 export async function getEncounter(eid) {
-  const snap = await getDoc(doc(db, ENCOUNTERS, eid))
+  const snap = await getDocTolerant(doc(db, ENCOUNTERS, eid))
   if (!snap.exists()) return null
   return toEncounterRow({ ...snap.data(), id: snap.id })
 }
@@ -256,14 +257,12 @@ export async function createEncounter(input) {
     updated_at: now,
   }
 
-  await setDoc(doc(db, ENCOUNTERS, encounterId), encounter)
+  const write = setDoc(doc(db, ENCOUNTERS, encounterId), encounter)
+  if (isOffline()) write.catch((e) => console.warn('[encounters] queued offline write rejected during sync:', e?.message || e))
+  else await write
 
-  try {
-    await logAudit({ action: 'encounter.created', organizationId: activeOrg, patientId: pid, details: 'Encounter ' + encounterId + ' for ' + input.patient_name })
-  } catch (e) {
-    console.warn('[encounters] audit append failed:', e?.message)
-  }
-  return { id: encounterId, ...encounter }
+  void logAudit({ action: 'encounter.created', organizationId: activeOrg, patientId: pid, details: 'Encounter ' + encounterId + ' for ' + input.patient_name })
+  return { id: encounterId, ...encounter, pendingSync: isOffline() }
 }
 
 // Fail fast with a friendly message when the caller cannot pass the rules

@@ -55,6 +55,18 @@ export default defineConfig(({ mode }) => {
           }
         },
       },
+      {
+        // A ward device may need to open a workflow it has not visited yet
+        // after the internet goes down. Give the service worker a complete
+        // list of this build's lazy-loaded modules and static assets.
+        name: 'offline-asset-manifest',
+        generateBundle(_options, bundle) {
+          const files = Object.keys(bundle).filter((file) =>
+            !file.endsWith('.map') && file !== 'sw.js' && file !== 'precache-manifest.json')
+            .map((file) => './' + file)
+          this.emitFile({ type: 'asset', fileName: 'precache-manifest.json', source: JSON.stringify(files) })
+        },
+      },
     ],
     optimizeDeps: {
       // sql.js ships a CommonJS/UMD browser build (module.exports.default). It

@@ -368,6 +368,10 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       '<div class="card">' +
         '<div class="card-head"><h3>History</h3></div>' +
         '<div class="timeline">' +
+          ((Array.isArray(admission.raw?.transfer_history) ? admission.raw.transfer_history : []).map((t) =>
+            '<div class="titem"><strong>Transferred</strong><div>' + esc(t.from_ward || '—') + ' · ' + esc(t.from_bed || '—') + ' → ' + esc(t.to_ward || '—') + ' · ' + esc(t.to_bed || '—') + '</div>' +
+            (t.at ? '<div class="when">' + fmtDateTime(t.at) + '</div>' : '') + '<div class="mut">' + esc(t.reason || '') + (t.staff_name ? ' · ' + esc(t.staff_name) : '') + '</div></div>'
+          ).join('')) +
           (timeline.length ? timeline.map(timelineRowHTML).join('') : '<p class="sub">No activity yet.</p>') +
         '</div>' +
       '</div>'
@@ -945,16 +949,18 @@ export async function AdmissionWorkspaceView(app, params = {}) {
       submitLabel: 'Discharge patient',
       fields,
       onSubmit: async (v) => {
+        let pendingSync = false
         try {
           const notesWithClearance = v.clearance
             ? (v.notes ? v.notes + ' | ' : '') + '[Financial clearance: ' + v.clearance + ']'
             : (v.notes || '')
-          await dischargeAdmission(sid, { reason: v.reason, notes: notesWithClearance, dischargeType: v.discharge_type })
+          const result = await dischargeAdmission(sid, { reason: v.reason, notes: notesWithClearance, dischargeType: v.discharge_type })
+          pendingSync = !!result?.pendingSync
         } catch (e) {
           throw new Error(friendlyWriteError(e))
         }
         closeModal()
-        toast('Patient discharged — bed released')
+        toast(pendingSync ? 'Discharge saved on this device; it will sync when connected.' : 'Patient discharged — bed released')
         reload()
       },
     })

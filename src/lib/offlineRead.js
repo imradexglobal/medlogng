@@ -8,8 +8,8 @@
 //  - go straight to the local cache when the device reports offline;
 //  - when online, race the network against a short timeout and fall back to
 //    the cache so a dead connection cannot stall the UI;
-//  - if the timeout fires but the cache is empty, keep waiting for the
-//    original request (it may still succeed) instead of returning nothing.
+//  - after the timeout, use cached results (including an empty query result)
+//    or surface the read error instead of leaving screens waiting forever.
 import {
   getDocs, getDocsFromCache, getDoc, getDocFromCache, getCountFromServer,
 } from '../firebase.js'
@@ -41,11 +41,12 @@ export async function getDocsTolerant(q, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}
   } catch (e) {
     if (e?.code === 'offline/timeout') {
       const cached = await getDocsFromCache(q).catch(() => null)
-      // Only prefer a non-empty cache; an empty one might just mean this query
-      // was never primed, so keep waiting for the live request instead.
-      if (cached && cached.docs.length > 0) return cached
+      // A valid empty cached query is still useful offline. Waiting for the
+      // network after the timeout leaves screens stuck when a LAN is up but
+      // the internet is down.
+      if (cached) return cached
     }
-    return await pending
+    throw e
   }
 }
 
@@ -60,7 +61,7 @@ export async function getDocTolerant(ref, { timeoutMs = DEFAULT_TIMEOUT_MS } = {
       const cached = await getDocFromCache(ref).catch(() => null)
       if (cached && cached.exists()) return cached
     }
-    return await pending
+    throw e
   }
 }
 

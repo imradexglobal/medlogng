@@ -231,7 +231,7 @@ body:
       title: 'Book appointment',
       submitLabel: 'Book slot',
       fields: [
-        { name: 'patient_id', label: 'Patient', type: 'text', list: 'patient-list', listOptions: patientOpts, searchable: true, required: true, placeholder: 'Type patient name, MRN or mobile…' },
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, searchable: true, required: true, searchPlaceholder: 'Type patient name, MRN or mobile…' },
         { name: 'clinic', label: 'Clinic', type: 'select', options: CLINICS, required: true },
         { name: 'doctor', label: 'Doctor', type: 'select', options: DOCTORS },
         { name: 'time', label: 'Date/Time', type: 'datetime-local', required: true, min: nowMin() },

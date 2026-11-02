@@ -1,6 +1,6 @@
 {
   "name": "medilogng",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "main": "electron/main.js",
   "author": "Imradex Global",
@@ -11,7 +11,7 @@
     "test:e2e": "playwright test e2e/onboarding.spec.js",
     "test": "node scripts/smoke.mjs && npm run test:services",
     "test:hub": "node scripts/test/hub.smoke.mjs",
-    "test:speech": "node scripts/test/speech.worker.test.mjs && node scripts/test/speech.jobs.test.mjs && node scripts/test/speech.assets.test.mjs",
+    "test:speech": "node scripts/test/speech.worker.test.mjs && node scripts/test/speech.jobs.test.mjs && node scripts/test/speech.sessions.test.mjs && node scripts/test/speech.assets.test.mjs",
     "test:speech:listeners": "node scripts/test/speech.listeners.test.mjs",
     "test:speech:real": "node scripts/test/speech.real-worker.mjs",
     "hub": "node hub/server.js",

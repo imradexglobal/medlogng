@@ -16,10 +16,10 @@ browser obstacles, zero configuration on ward PCs.
 
 ---
 
-## Auth: Firebase ID token (no shared secret)
+## Auth: Firebase sign-in and enrolled device sessions
 
-The hub no longer uses a shared secret (`HUB_TOKEN`). Ward PCs send the
-signed-in user's Firebase ID token:
+The hub no longer uses a shared secret (`HUB_TOKEN`). Ward PCs normally send
+the signed-in user's Firebase ID token:
 
 ```
 Authorization: Bearer <id_token>
@@ -30,7 +30,35 @@ then checks the caller's hospital membership document
 (`organization_memberships/{orgId}_{uid}`) server-side. Each op kind maps
 to a capability (`rx_mirror` → `prescription.create`, `lab_snapshot` →
 `lab.order`), and every record the handler touches is checked for
-organisation ownership.
+organisation ownership. When the app is served from a configured Hub, it also
+enrols a non-exportable browser-profile key while a live token and hospital
+membership can be verified. If a token later expires or the auth backend is
+unavailable, that key can authenticate a signed `/outbox` handoff using the
+Host's last verified capability set. A live membership denial is not bypassed.
+Revalidation refreshes permissions when connectivity returns; logout revokes
+the Host session when reachable.
+
+Device-session fallback requires a secure browser context (HTTPS or localhost)
+with IndexedDB and Web Crypto support, plus the Electron Host's encrypted
+session storage. Ward devices must open the Host's HTTPS LAN URL for browser
+key enrolment; the HTTP URL does not provide the secure context these browser
+features require. Do not use it as a replacement for HTTPS on untrusted
+networks. While a device is isolated, permission changes made elsewhere cannot
+reach the Host until it reconnects, so the last verified permissions remain in
+effect during that outage.
+
+The packaged Electron Host encrypts its durable clinical handoff queue with
+Windows secure storage. The standalone `npm run hub` development server has no
+OS-backed encryption provider; it logs a warning and writes the queue as
+plaintext, so do not use that mode with real patient data.
+
+**Offline scope today:** the Host queue accepts only `rx_mirror` and
+`lab_snapshot` handoffs. Firestore's browser cache keeps previously loaded
+records and queues supported writes on that individual device, but those
+records are not a shared LAN database. Admissions, patient registration,
+appointments, billing, inventory, and most other workflows do not become
+available to other ward devices while the internet is down. Full shared
+offline operation needs a broader Host data store and sync path.
 
 **Old installs** that still have `HUB_TOKEN` in `.env` will see a startup
 warning; remove the `HUB_TOKEN` line and any `VITE_HUB_TOKEN` from the
@@ -81,7 +109,11 @@ includes clear steps to diagnose and fix the network configuration.
 |---|---|---|---|
 | GET | `/` | none | Hub status + API summary |
 | GET | `/health` | none (minimal) / Bearer (detail) | `{ok, version, hub, firestoreReady, internet, queue, ...}` |
-| POST | `/outbox` | `Authorization: Bearer` | `{ ops: [...] }` → authorised, durably queued |
+| POST | `/device/session/register` | Bearer + live membership | Enrol the current browser key |
+| POST | `/device/session/offline` | Signed device key | Check the saved Host session |
+| POST | `/device/session/revalidate` | Signed key + Bearer | Refresh membership and capabilities |
+| POST | `/device/session/revoke` | Signed device key | Revoke the saved Host session |
+| POST | `/outbox` | Bearer or signed device key | `{ ops: [...] }` → authorised, durably queued |
 
 No wildcard CORS. The hub's own origin (the address the page was served
 from) is always allowed. Extra origins may be listed via `ALLOWED_ORIGINS`

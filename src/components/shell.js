@@ -343,6 +343,7 @@ export function openModal(title, html, opts = {}) {
   // `wide` gives dense clinical summaries (the full A-Z of an encounter) the
   // room to stay readable without the caller patching styles after the fact.
   if (card) card.style.maxWidth = opts.wide ? '780px' : ''
+  if (card) card.classList.toggle('enc-vitals-modal', !!opts.encVitalsHistory)
   body.innerHTML = html
   modal.hidden = false
   document.body.classList.add('modal-open')
@@ -402,49 +403,101 @@ export function demoFormModal(title, fieldsHtml, saveLabel = 'Save (UI preview)'
 // (lab new order, billing new invoice) can offer the exact same patient-search
 // UX without a floating dropdown that can cover the input field.
 export function wireSearchableSelect(box, sel) {
-  if (!box || !sel) return
-  const options = Array.from(sel.options)
-
-  function fireChange() {
-    // Dispatch synthetic change so listeners (onchange) always fire,
-    // even when the selected index was already pointing at that option.
+  if (!sel) return
+  // Older callers pass a separate filter box. Remove it and promote the select
+  // itself into one visible text input while preserving its named ID value.
+  if (box) box.remove()
+  if (sel.dataset.autocompleteReady) return
+  sel.dataset.autocompleteReady = 'true'
+  const wrapper = document.createElement('div')
+  wrapper.className = 'autocomplete'
+  sel.parentNode.insertBefore(wrapper, sel)
+  wrapper.appendChild(sel)
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.className = sel.className || 'input'
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  input.placeholder = sel.dataset.searchPlaceholder || 'Type to search…'
+  input.setAttribute('role', 'combobox')
+  input.setAttribute('aria-autocomplete', 'list')
+  input.setAttribute('aria-expanded', 'false')
+  input.setAttribute('aria-label', sel.getAttribute('aria-label') || sel.closest('label')?.textContent?.trim() || 'Search options')
+  const list = document.createElement('div')
+  list.className = 'autocomplete-menu'
+  list.setAttribute('role', 'listbox')
+  wrapper.insertBefore(input, sel)
+  wrapper.appendChild(list)
+  sel.hidden = true
+  sel.tabIndex = -1
+  const options = Array.from(sel.options).filter((o) => o.value !== '')
+  let active = -1
+  let selectedLabel = ''
+  const labelOf = (o) => String(o.getAttribute('data-label') || o.textContent || '').trim()
+  const matchesQuery = (option, query) => {
+    if (!query) return true
+    const label = labelOf(option)
+    const digits = query.replace(/\D/g, '')
+    return label.toLowerCase().includes(query) || (digits.length > 0 && label.replace(/\D/g, '').includes(digits))
+  }
+  const sync = () => {
+    const option = sel.selectedOptions[0]
+    selectedLabel = option && option.value ? labelOf(option) : ''
+    input.value = selectedLabel
+  }
+  sel._autocompleteInput = input
+  sel._syncAutocomplete = sync
+  const close = () => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); active = -1 }
+  const choose = (option) => {
+    if (!option) return
+    sel.value = option.value
+    sync()
+    close()
     sel.dispatchEvent(new Event('change', { bubbles: true }))
   }
-
-  box.oninput = () => {
-    const q = box.value.trim().toLowerCase()
-    const digits = q.replace(/\D/g, '')
-    for (const o of options) {
-      const label = String(o.getAttribute('data-label') || o.textContent || '').toLowerCase()
-      o.hidden = !(!q
-        || (/[0-9]/.test(q) ? label.replace(/\D/g, '').includes(digits) : label.includes(q)))
-    }
-    // Auto-advance to the first visible option when the current one is hidden.
-    if (sel.selectedOptions[0] && sel.selectedOptions[0].hidden) {
-      const first = options.find((o) => !o.hidden)
-      sel.value = first ? first.value : ''
-      fireChange()
-    }
+  const render = () => {
+    const query = input.value.trim().toLowerCase()
+    const matches = options.filter((o) => matchesQuery(o, query))
+    list.replaceChildren()
+    if (!matches.length) {
+      const empty = document.createElement('div')
+      empty.className = 'autocomplete-empty'
+      empty.textContent = 'No results found'
+      list.appendChild(empty)
+    } else matches.slice(0, 100).forEach((option, index) => {
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.className = 'autocomplete-option'
+      row.setAttribute('role', 'option')
+      row.setAttribute('aria-selected', String(index === active))
+      const label = labelOf(option)
+      const at = query ? label.toLowerCase().indexOf(query) : -1
+      if (at >= 0) {
+        row.append(document.createTextNode(label.slice(0, at)))
+        const mark = document.createElement('mark'); mark.textContent = label.slice(at, at + query.length); row.append(mark)
+        row.append(document.createTextNode(label.slice(at + query.length)))
+      } else row.textContent = label
+      row.onmousedown = (event) => event.preventDefault()
+      row.onclick = () => choose(option)
+      list.appendChild(row)
+    })
+    list.hidden = false
+    input.setAttribute('aria-expanded', 'true')
   }
-
-  // Ensure selecting the very first real option always triggers onchange,
-  // even if it was the browser's pre-selected default.
-  sel.addEventListener('mousedown', () => {
-    sel._beforeValue = sel.value
-  })
-  sel.addEventListener('change', () => {
-    sel._beforeValue = sel.value
-  })
-  // Also handle click-to-same-option (no 'change' would fire natively).
-  sel.addEventListener('click', () => {
-    if (sel.value && sel.value !== '' && sel.value !== sel._beforeValue) {
-      sel._beforeValue = sel.value
-      fireChange()
-    } else if (sel.value && sel.value !== '') {
-      // Value is the same but user explicitly clicked — still fire.
-      fireChange()
-    }
-  })
+  input.value = ''
+  sync()
+  input.onfocus = render
+  input.oninput = () => { sel.value = ''; active = -1; render(); sel.dispatchEvent(new Event('change', { bubbles: true })) }
+  input.onkeydown = (event) => {
+    const rows = Array.from(list.querySelectorAll('.autocomplete-option'))
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault(); if (!rows.length) return
+      active = (active + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
+      rows.forEach((row, i) => row.setAttribute('aria-selected', String(i === active))); rows[active]?.scrollIntoView({ block: 'nearest' })
+    } else if (event.key === 'Enter' && !list.hidden) { event.preventDefault(); if (active >= 0) choose(options.filter((o) => matchesQuery(o, input.value.trim().toLowerCase()))[active]) }
+    else if (event.key === 'Escape') close()
+  }
+  document.addEventListener('mousedown', (event) => { if (!wrapper.contains(event.target)) close() })
 }
 
 // Real form modal: collects named fields, shows errors inline, never claims a
@@ -476,12 +529,10 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
       // that narrows the options in place — the saved value is still the option
       // value, so filtering can never change what gets submitted.
       const filterId = 'fsel' + fi
-      inner = (f.searchable
-        ? '<input class="input" style="margin-bottom:6px" data-filter-for="' + filterId +
-          '" placeholder="' + esc(f.searchPlaceholder || 'Type to filter…') + '" autocomplete="off">'
-        : '') +
-        '<select class="input" name="' + esc(f.name) + '" id="' + filterId + '">' +
-        opts.map((o, oi) => '<option value="' + esc(o.value) + '" data-label="' + esc(o.label) + '"' + (o.value === (f.value ?? '') ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') +
+      inner = '<select class="input" name="' + esc(f.name) + '" id="' + filterId + '"' +
+        (f.searchable ? ' data-autocomplete="true" data-search-placeholder="' + esc(f.searchPlaceholder || 'Type to filter…') + '"' : '') + '>' +
+        (f.placeholder && f.required ? '<option value="">— Select —</option>' : '') +
+        opts.map((o) => '<option value="' + esc(o.value) + '" data-label="' + esc(o.label) + '"' + (o.value === (f.value ?? '') ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') +
         '</select>'
     } else if (f.type === 'textarea') {
       inner = '<textarea class="input" name="' + esc(f.name) + '" rows="3" placeholder="' + esc(f.placeholder || '') + '">' + esc(f.value ?? '') + '</textarea>'
@@ -597,9 +648,7 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
     el.onchange = refreshPreviews
   })
 
-  document.querySelectorAll('#fmFields [data-filter-for]').forEach((box) => {
-    wireSearchableSelect(box, document.getElementById(box.getAttribute('data-filter-for')))
-  })
+  document.querySelectorAll('#fmFields [data-autocomplete="true"]').forEach((sel) => wireSearchableSelect(null, sel))
 
   const errEl = document.getElementById('fmError')
   const btn = document.getElementById('fmSave')

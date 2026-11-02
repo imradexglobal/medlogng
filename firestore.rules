@@ -463,6 +463,29 @@ match /wards/{id} {
   // only allowed through the org-pinned data.delete gate.
   allow delete: if canDelete(resource.data.organization_id);
 }
+// Bed claims serialize concurrent assignment attempts. Keep them scoped to
+// the same beds.manage capability as admissions and pin the owning hospital.
+match /bed_claims/{id} {
+  allow read: if hasCap(resource.data.organization_id, 'beds.manage');
+  allow create: if hasCap(request.resource.data.organization_id, 'beds.manage')
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.organization_id == request.resource.data.organization_id
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.status == 'active'
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.ward_name == request.resource.data.ward_name
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.bed_number == request.resource.data.bed_number;
+  allow update: if resource.data.organization_id == request.resource.data.organization_id
+    && resource.data.admission_id == request.resource.data.admission_id
+    && hasCap(resource.data.organization_id, 'beds.manage')
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.status == 'active'
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.ward_name == request.resource.data.ward_name
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.bed_number == request.resource.data.bed_number;
+  // Deleting a missing claim is a no-op, so it is safe to allow. Existing
+  // claims can only be released atomically with their admission discharge or
+  // move; the referenced stay must no longer occupy this bed after the batch.
+  allow delete: if resource == null || (hasCap(resource.data.organization_id, 'beds.manage')
+    && (getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.status != 'active'
+      || getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.ward_name != resource.data.ward_name
+      || getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.bed_number != resource.data.bed_number));
+}
 match /admission_plan_items/{id} {
   allow read: if signedIn();
   allow create: if hasCap(request.resource.data.organization_id, 'encounter.edit');

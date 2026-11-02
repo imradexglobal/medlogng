@@ -22,6 +22,7 @@ import {
 } from '../features/patients/search.js'
 import { logAudit } from './adminService.js'
 import { currentStaffName } from '../lib/staffName.js'
+import { getDocTolerant } from '../lib/offlineRead.js'
 
 const ORG_PATIENTS = 'organization_patients'
 
@@ -178,7 +179,7 @@ export async function listOrgPatientsAll(orgId, { chunkSize = 300, max = 5000 } 
 }
 
 export async function getPatient(pid) {
-  const snap = await getDoc(doc(db, 'patients', pid))
+  const snap = await getDocTolerant(doc(db, 'patients', pid))
   if (!snap.exists()) return null
   const r = { ...snap.data(), patient_id: snap.id }
   return toPatientRow(r)
@@ -200,7 +201,7 @@ export async function getPatientForOrg(orgId, pid) {
   }
   if (!orgId) return null
   try {
-    const snap = await getDoc(doc(db, ORG_PATIENTS, orgId + '_' + pid))
+    const snap = await getDocTolerant(doc(db, ORG_PATIENTS, orgId + '_' + pid))
     if (!snap.exists()) return null
     const data = snap.data() || {}
     const id = data.patient_id ||

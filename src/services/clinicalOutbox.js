@@ -58,14 +58,9 @@ export const OUTBOX_KINDS = Object.keys(HANDLERS)
 //      (http://<host-ip>:8787), handoffs post back to the SAME address — no
 //      configuration exists on ward PCs at all.
 //
-// AUTH: the hub requires a Firebase ID token. Each push calls
-// auth.currentUser.getIdToken() (the SDK refreshes it when it can) and sends
-// it as `Authorization: Bearer`. There is no shared secret and no token in the
-// HTML; the hub resolves the user's hospital/role from Firestore itself.
-//
-// NOTE: an ID token lives one hour. During an internet outage the token cannot
-// be refreshed, so a hub push is rejected once it expires; the rows stay in
-// IndexedDB and drain normally when connectivity returns (see hub/README.md).
+// AUTH: use a live Firebase token when available. If it has expired during an
+// outage, the LAN Host accepts a request signed by a device key it enrolled
+// while online, limited to that host's last verified hospital capabilities.
 
 let sameOriginHub = null // null = not probed yet
 
@@ -156,14 +151,12 @@ async function pushToHub(rows) {
   const { url } = await hubConfig()
   if (!url || !rows.length) return false
   const token = await currentIdToken()
-  if (!token) {
-    console.warn('[handoff] hospital hub skipped: no signed-in user (cannot authenticate).')
-    return false
-  }
   let orgId = ''
+  let uid = ''
   try {
     const { authStore } = await import('../store/authStore.js')
     orgId = authStore.getState().activeOrg || ''
+    uid = authStore.getState().user?.uid || ''
   } catch { /* no auth context — the hub will reject a missing orgId */ }
   if (!orgId) return false
   const ops = rows.map((r) => ({
@@ -176,17 +169,36 @@ async function pushToHub(rows) {
   }))
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), HUB_TIMEOUT_MS)
+  const body = JSON.stringify({ ops })
   try {
-    const res = await fetch(url + '/outbox', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: 'Bearer ' + token,
-        'x-medilog-client': 'medilogng-web',
-      },
-      body: JSON.stringify({ ops }),
-      signal: ctrl.signal,
-    })
+    let res = null
+    let transportFailed = false
+    if (token) {
+      try {
+        res = await fetch(url + '/outbox', { method: 'POST', headers: {
+          'content-type': 'application/json', authorization: 'Bearer ' + token,
+          'x-medilog-client': 'medilogng-web',
+        }, body, signal: ctrl.signal })
+      } catch { transportFailed = true }
+      // A live, verified membership denial must never fall back to a cached
+      // grant. Expired-token or backend-unavailable responses can use the
+      // previously host-verified capability snapshot.
+      if (res && res.status !== 401 && res.status !== 503) {
+        if (!res.ok) {
+          console.warn('[handoff] hospital hub rejected batch:', res.status)
+          return false
+        }
+      }
+    }
+    if (!res || res.status === 401 || res.status === 503 || transportFailed) {
+      try { if (new URL(url).protocol !== 'https:') return false }
+      catch { return false }
+      const { currentHostSession } = await import('./hostSession.js')
+      const device = await currentHostSession(uid, orgId)
+      if (!device) return false
+      const { signedSpeechRequest } = await import('./speechSession.js')
+      res = await signedSpeechRequest('/outbox', { method: 'POST', body, contentType: 'application/json', baseUrl: url, signal: ctrl.signal }, device)
+    }
     if (!res.ok) {
       console.warn('[handoff] hospital hub rejected batch:', res.status)
       return false

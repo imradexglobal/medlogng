@@ -193,6 +193,22 @@
 .enc-ws-head .enc-vitals { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 .enc-ws-head .enc-vitals div { padding: 6px 9px; border-color: #dbe5ee; background: #fff; }
 .enc-ws-head .enc-vitals strong { font-size: .9rem; font-variant-numeric: tabular-nums; }
+.enc-ws-head .enc-vitals .enc-vital-card { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 3px; padding: 6px 9px; border: 1px solid #dbe5ee; border-radius: 7px; background: #fff; color: inherit; text-align: left; cursor: pointer; }
+.enc-ws-head .enc-vitals .enc-vital-card:hover { border-color: var(--emr-info); background: #f5faff; }
+.enc-vital-card:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
+.enc-vitals .enc-vital-card em { font-size: .66rem; font-style: normal; color: var(--emr-muted); }
+.enc-vitals .enc-vital-card strong { font-size: .9rem; font-variant-numeric: tabular-nums; }
+.enc-vital-history { display: flex; min-height: 0; height: 100%; max-height: none; flex: 1 1 auto; flex-direction: column; gap: 0; overflow: hidden; }
+.enc-vital-history-fixed { flex: none; display: grid; gap: 10px; padding-bottom: 8px; }
+.enc-vital-history-list { min-height: 0; max-height: none; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; }
+.enc-vital-history-list .tbl thead th { position: sticky; top: 0; z-index: 2; }
+.enc-vital-current { margin: 0; color: var(--emr-muted); }
+.enc-vital-current strong { margin-left: 6px; color: var(--emr-ink); font-size: 1.2rem; }
+.enc-vital-chart { padding: 10px; border: 1px solid var(--emr-line); border-radius: 10px; background: #fff; }
+.enc-vital-chart svg { display: block; width: 100%; height: auto; }
+.enc-vital-chart polyline { fill: none; stroke: var(--emr-teal); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.enc-vital-chart-range { display: flex; justify-content: space-between; gap: 12px; color: var(--emr-muted); font-size: .74rem; }
+.enc-vital-history h4 { margin: 4px 0 -4px; font-size: .86rem; }
 .enc-ws-head .allergy { margin: 7px 0 0 !important; padding: 7px 10px; }
 .enc-ws .enc-tabs { flex: none; gap: 0; margin: 10px -16px 0; padding: 0; overflow-x: hidden; border: 0; border-top: 1px solid #d7e1eb; border-bottom: 1px solid #d7e1eb; border-radius: 0; background: #e9f0f7; }
 /* Every workspace tab sits on the one row, always visible — no sideways pan.
@@ -406,6 +422,14 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .search { flex: 1; min-width: 200px; display: flex; gap: 8px; position: relative; }
 .search .input, .input { width: 100%; padding: 10px 12px; border: 1px solid var(--emr-line); border-radius: 10px; font-size: .88rem; background: #fff; }
+.autocomplete { position: relative; width: 100%; }
+.autocomplete > .input { width: 100%; }
+.autocomplete-menu { position: absolute; z-index: 1200; top: calc(100% + 4px); left: 0; right: 0; max-height: 240px; overflow-y: auto; background: #fff; border: 1px solid var(--emr-line); border-radius: 10px; box-shadow: 0 10px 28px rgba(15,23,42,.16); padding: 4px; }
+.autocomplete-menu[hidden] { display: none; }
+.autocomplete-option { display: block; width: 100%; border: 0; background: transparent; color: inherit; text-align: left; padding: 9px 10px; border-radius: 7px; font: inherit; cursor: pointer; }
+.autocomplete-option:hover, .autocomplete-option[aria-selected="true"] { background: #eff6f6; }
+.autocomplete-option mark { background: #d8f3ee; color: inherit; font-weight: 700; }
+.autocomplete-empty { padding: 10px; color: var(--emr-muted, #64748b); font-size: .84rem; }
 .search .input:focus, .input:focus { outline: 2px solid var(--emr-teal); border-color: var(--emr-teal); }
 
 .input.invalid { border-color: #dc2626; background: #fef2f2; }
@@ -473,6 +497,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 .bed.o { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
 .bed.v { background: #dcfce7; border-color: #86efac; color: #166534; }
 .bed:hover { filter: brightness(.96); }
+.bed { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left; padding: 9px; }
+.bed-patient, .bed-encounter { max-width: 100%; overflow-wrap: anywhere; font-size: .72rem; font-weight: 600; }
+.bed .btn { padding: 4px 8px; font-size: .7rem; }
 .ward { background: #fff; border: 1px solid var(--emr-line); border-radius: var(--r); padding: 14px; }
 .ward h4 { margin: 0; }
 .wardgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
@@ -501,6 +528,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: .86rem; backgroun
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--emr-line); flex: none; }
 .modal-head h3 { margin: 0; font-size: 1rem; line-height: 1.3; }
 .modal-body { padding: var(--modal-pad, 18px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; min-height: 0; }
+.modal-card.enc-vitals-modal { height: min(90vh, 90dvh); }
+.modal-card.enc-vitals-modal .modal-body { display: flex; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
 .fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fld { display: block; font-size: .78rem; font-weight: 700; color: #334155; }
 .fld span { display: block; margin-bottom: 5px; }

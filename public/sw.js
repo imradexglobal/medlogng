@@ -18,13 +18,24 @@
  *    login screen paints offline after one successful online visit.
  *  - Cross-origin Firebase/Firestore/Auth: untouched — pass through.
  */
-const CACHE = 'medilogng-shell-v3'
+const CACHE = 'medilogng-shell-v4'
 const SHELL = ['./', './index.html', './logo.svg', './manifest.webmanifest']
 const NAV_TIMEOUT_MS = 2000
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())
+    caches.open(CACHE).then(async (cache) => {
+      let assets = []
+      try {
+        const response = await fetch('./precache-manifest.json', { cache: 'no-cache' })
+        if (response.ok) assets = await response.json()
+        if (!Array.isArray(assets) || assets.some((path) => typeof path !== 'string' || !path.startsWith('./'))) assets = []
+      } catch { /* shell can still install if the asset list is temporarily unavailable */ }
+      await cache.addAll(SHELL)
+      // Cache chunks independently so one missing optional asset does not
+      // discard every successfully downloaded screen.
+      await Promise.allSettled(assets.map((path) => cache.add(path)))
+    }).then(() => self.skipWaiting())
   )
 })
 

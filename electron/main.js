@@ -31,7 +31,7 @@ function sendToRenderer(channel, data) {
 
 function ensureHostWindow(port) {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow(host.localUrl(port));
+    createWindow(host.appUrl(port));
   } else {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
@@ -203,7 +203,7 @@ async function startHostExperience() {
     try { if (wizardWindow && !wizardWindow.isDestroyed()) wizardWindow.close(); } catch (e) {}
     const cfg = host.loadHostConfig();
     const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
-    createWindow(host.localUrl(port));
+    createWindow(host.appUrl(port));
     host.createTray(() => mainWindow, port, () => ensureHostWindow(port));
     host.startStatusPoll(port);
   });
@@ -224,7 +224,7 @@ async function startHostExperience() {
   }
   const cfg = host.loadHostConfig();
   const port = (cfg && cfg.port) || host.HOST_PORT_DEFAULT;
-  createWindow(host.localUrl(port));
+  createWindow(host.appUrl(port));
   host.createTray(() => mainWindow, port, () => ensureHostWindow(port));
   host.startStatusPoll(port);
 }

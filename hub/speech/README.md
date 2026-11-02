@@ -1,5 +1,31 @@
 # Host speech worker
 
+## Offline speech authorization
+
+The existing Firebase sign-in flow remains the entry point. Before enabling
+offline speech on a browser profile, the Host verifies the Firebase identity,
+live hospital membership and `encounter.edit` permission over HTTPS. The
+browser stores a non-exportable P-256 private key in IndexedDB; the Host stores
+the matching public key, clinician/hospital binding and last verified grant in
+Electron `safeStorage` encrypted state. Each upload, status read, cancel,
+offline bootstrap and revoke request is signed and replay checked by the Host.
+
+There is no fixed expiry for the cached permission. It remains usable until an
+explicit sign-out or successful online revalidation. Browser sign-out removes
+the local key immediately and sends signed revoke calls to reachable Host
+sessions. On reconnect/focus, cached sessions are checked against Firebase and
+live Firestore authorization; changed or revoked access invalidates the Host
+grant. During a complete Host network outage, the last verified permission
+continues to apply as approved. The timestamp window on an individual signed
+request prevents replay and does not expire the session.
+
+The Host writes encrypted audit records for session verification/sign-out,
+transcription submission, result access and cancellation. Transcription actions
+include clinician uid, Host timestamp, hospital, device, consultation and job
+or request identifiers. Job ownership remains bound to the verified uid and
+hospital. The browser key is profile-bound rather than hardware-backed; a
+compromised browser profile or same-origin script can use that profile's key.
+
 This is a persistent, single-model CPU worker. The Electron Host will supervise
 it and communicate over stdin/stdout; it does not listen on a network port.
 The Host hands it only validated 16 kHz, mono, 16-bit PCM WAV files from its
@@ -80,9 +106,16 @@ Whisper worker. It automatically fetches missing pinned inputs, verifies
 FFmpeg's signature before extraction/build, resumes an existing matching
 FFmpeg source/build tree, and gives a specific missing-tool error. Run
 `scripts/verify-speech-assets.ps1` to validate all three runtime files,
-their recorded sizes and SHA-256 hashes, the pinned model hash, and FFmpeg's
-reported version. `build-host.bat` runs both preparation and verification
-before building the installer, so a missing or corrupt asset fails packaging.
+their recorded sizes and SHA-256 hashes, the pinned model hash, FFmpeg's
+reported version, and the detached source signature under the pinned FFmpeg
+release-key fingerprint. The verifier compares the signed source hash to the
+manifest and fails closed when signature verification is unavailable.
+`build-host.bat` and `npm run dist:host` run verification before packaging.
+
+For measurements on the intended 4 GB Windows Host with 6–10 clients, follow
+[`PERFORMANCE-BENCHMARK.md`](./PERFORMANCE-BENCHMARK.md) and record one row per
+job in [`performance-results-template.csv`](./performance-results-template.csv).
+Development-machine results do not substitute for that target-hardware run.
 
 The build machine needs internet only to fetch the pinned source/model. The
 Host and clients do not download source, models, or tools at runtime. Keep the

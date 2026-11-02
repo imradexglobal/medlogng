@@ -4,10 +4,10 @@
 // encounter are pre-selected and linked. When admitted directly without an
 // encounter, the user picks a patient and an encounter is auto-created so
 // every admission carries a clinical thread.
-import { shell, toast, wireToast } from '../components/shell.js'
+import { shell, toast, wireToast, wireSearchableSelect } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
 import {
-  createAdmission, listOrgWards, validateAdmissionInput, ADMISSION_TYPES,
+  createAdmission, listOrgWards, listOrgAdmissions, validateAdmissionInput, ADMISSION_TYPES,
 } from '../services/admissionService.js'
 import {
   createEncounter, findOpenEncounterForPatient,
@@ -19,6 +19,7 @@ import { myActiveMembership } from '../services/authService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
+import { normalizeBedId } from '../features/admissions/domain.js'
 
 export async function AdmitView(app, params = {}) {
   const { activeOrg } = authStore.getState()
@@ -49,6 +50,7 @@ export async function AdmitView(app, params = {}) {
   const preselectWardId = String(params.ward || '')
 
   let wards = []
+  let admissions = []
   let patients = []
   let clinicalStaff = []
   let encounter = null
@@ -65,14 +67,16 @@ export async function AdmitView(app, params = {}) {
 
   async function load() {
     try {
-      const [w, pats, staff] = await Promise.all([
+      const [w, pats, staff, a] = await Promise.all([
         listOrgWards(activeOrg).catch(() => []),
         listOrgPatientsPage(activeOrg, { pageSize: 200 }).then((r) => r.rows).catch(() => []),
         getClinicalStaff(activeOrg).catch(() => []),
+        listOrgAdmissions(activeOrg).catch(() => []),
       ])
       wards = w
       patients = pats
       clinicalStaff = staff
+      admissions = a
     } catch (e) {
       console.error('[admit] load failed:', e)
     }
@@ -136,7 +140,7 @@ export async function AdmitView(app, params = {}) {
         : '<option value="">— select patient —</option>' + patientOpts.map((o) => '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join('')) +
       '</select></label>' +
       '<label>Ward' + wardFieldHtml + '</label>' +
-      '<label>Bed<input class="input" id="fld-bed_number" required placeholder="e.g. Bed 1" /></label>' +
+      '<label>Available bed' + bedField(preselectWard?.name || document.getElementById('fld-ward_name')?.value || wards[0]?.name || '') + '</label>' +
       '<label>Admission type<select class="input" id="fld-admission_type">' +
       ADMISSION_TYPES.map((t) => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('') +
       '</select></label>' +
@@ -150,7 +154,16 @@ export async function AdmitView(app, params = {}) {
       '<div id="admitErr" class="err" style="margin-top:10px"></div>' +
       '</div>'
 
+    const patientSelect = document.getElementById('fld-patient_id')
+    if (patientSelect && !fixedPatient) wireSearchableSelect(null, patientSelect)
+    if (wards.length) wireSearchableSelect(null, document.getElementById('fld-ward_name'))
+    if (clinicalStaff.length) wireSearchableSelect(null, document.getElementById('fld-attending_provider'))
+
     document.getElementById('admitCancel').onclick = () => { window.location.hash = '#/admissions' }
+    document.getElementById('fld-ward_name')?.addEventListener('change', () => {
+      const label = document.querySelector('label:has(#fld-bed_number)')
+      if (label) label.innerHTML = 'Available bed' + bedField(document.getElementById('fld-ward_name').value)
+    })
     document.getElementById('admitSave').onclick = async () => {
       const errEl = document.getElementById('admitErr')
       errEl.textContent = ''
@@ -193,7 +206,7 @@ export async function AdmitView(app, params = {}) {
           }
         }
 
-        await createAdmission({
+        const saved = await createAdmission({
           patient_id: pid,
           patient_name: patient.name || '',
           ward_name: v.ward_name,
@@ -203,13 +216,25 @@ export async function AdmitView(app, params = {}) {
           attending_provider: v.attending_provider,
           encounter_id: encToLink ? encToLink.id : '',
         })
-        toast('Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
+        toast(saved.pendingSync || encToLink?.pendingSync
+          ? 'Admission saved on this device; it will sync when connected.'
+          : 'Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
         window.location.hash = '#/admissions'
       } catch (e) {
         errEl.textContent = e?.message || 'Admission failed.'
         btn.disabled = false
       }
     }
+  }
+
+  function bedField(wardName) {
+    const ward = wards.find((w) => w.name === wardName)
+    if (!ward || !ward.totalBeds) return '<input class="input" id="fld-bed_number" required placeholder="Enter bed label; ward capacity is not configured" />'
+    const occupied = new Set(admissions.filter((a) => a.status === 'active' && String(a.wardName).trim().toLowerCase() === wardName.trim().toLowerCase()).map((a) => normalizeBedId(a.bedNumber)))
+    const free = Array.from({ length: ward.totalBeds }, (_, i) => String(i + 1)).filter((bed) => !occupied.has(bed))
+    if (!free.length) return '<select class="input" id="fld-bed_number" required disabled><option value="">No beds available in this ward</option></select><small class="mut">' + esc(wardName) + ' is at configured capacity.</small>'
+    const requested = String(params.bed || '')
+    return '<select class="input" id="fld-bed_number" required>' + free.map((bed) => '<option value="Bed ' + bed + '"' + (normalizeBedId(requested) === bed ? ' selected' : '') + '>Bed ' + bed + '</option>').join('') + '</select><small class="mut">' + free.length + ' available of ' + ward.totalBeds + ' configured beds.</small>'
   }
 
   load()

@@ -2,10 +2,10 @@ import { initializeApp } from 'firebase/app'
 import { getAnalytics, isSupported } from 'firebase/analytics'
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, query, where, getDocs, getDocsFromCache, getCountFromServer, onSnapshot,
+  collection, query, where, getDocs as firestoreGetDocs, getDocsFromCache, getCountFromServer, onSnapshot,
   runTransaction, writeBatch, serverTimestamp, Timestamp,
   waitForPendingWrites,
-  doc, getDoc, getDocFromCache, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
+  doc, getDoc as firestoreGetDoc, getDocFromCache, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
 } from 'firebase/firestore'
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword,
@@ -15,6 +15,8 @@ import {
   verifyPasswordResetCode, confirmPasswordReset,
   EmailAuthProvider, reauthenticateWithCredential,
 } from 'firebase/auth'
+import { readWithCache } from './lib/readFallback.js'
+import { readQueryFromHost } from './services/hostQueryRead.js'
 
 // Live Firestore — NO emulator. Config comes from Vite env (VITE_ keys).
 // `.env.local` holds BOTH blocks: the local-test project (active) and the
@@ -63,12 +65,26 @@ if (measurementId) {
   else window.addEventListener('online', initAnalytics, { once: true })
 }
 
-// Offline-first: keep a persistent IndexedDB cache so reads and writes work
-// without a connection. Writes queue locally and flush to Firestore when the
-// device comes back online (Spark plan — client SDK handles all syncing).
+// Offline-first per device: keep a persistent IndexedDB cache so previously
+// loaded reads and supported writes survive a connection loss. Queued Firestore
+// writes sync when internet returns; this cache is not shared with other LAN PCs.
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 })
+
+// A LAN can remain connected while the internet route to Firebase is down,
+// so navigator.onLine alone is not enough. Bound network-first reads, then
+// fall back to this device's persistent Firestore cache on transport failure.
+// Permission/validation errors are preserved instead of being hidden by stale
+// cache results.
+export async function getDocs(q) {
+  const host = await readQueryFromHost(db, q).catch((error) => { throw error })
+  if (host) return host
+  return readWithCache(() => firestoreGetDocs(q), () => getDocsFromCache(q), { label: 'Collection' })
+}
+export function getDoc(ref) {
+  return readWithCache(() => firestoreGetDoc(ref), () => getDocFromCache(ref), { label: 'Document' })
+}
 
 export const auth = getAuth(app)
 export const googleProvider = new GoogleAuthProvider()
@@ -76,9 +92,9 @@ export const googleProvider = new GoogleAuthProvider()
 setPersistence(auth, browserLocalPersistence).catch(() => {})
 
 export {
-  collection, query, where, getDocs, getDocsFromCache, getCountFromServer, onSnapshot,
+  collection, query, where, getDocsFromCache, getCountFromServer, onSnapshot,
   runTransaction, writeBatch, serverTimestamp, Timestamp, waitForPendingWrites,
-  doc, getDoc, getDocFromCache, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
+  doc, getDocFromCache, setDoc, addDoc, updateDoc, deleteDoc, orderBy, limit, startAfter, Bytes,
   signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword,
   signOut, onAuthStateChanged, updatePassword, sendEmailVerification,
   sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset,

@@ -138,6 +138,10 @@ function localUrl(port) {
   return 'http://127.0.0.1:' + (Number(port) || HOST_PORT_DEFAULT)
 }
 
+function appUrl(port) {
+  return activeHttpsLocalUrl || localUrl(port)
+}
+
 // '' when this PC has no usable LAN address. Deliberately NOT a fallback to
 // 127.0.0.1: another device cannot reach that, and showing it would send the
 // operator chasing a phantom problem.
@@ -437,6 +441,39 @@ async function startHubRuntime() {
     port,
     keyFile: keyFilePath(),
     queueFile: path.join(dataDir(), 'queue.json'),
+    encodeQueueState: (json) => safeStorage.encryptString(json),
+    decodeQueueState: (encrypted) => safeStorage.decryptString(Buffer.from(encrypted)),
+    loadOfflineQueryIndex: async () => {
+      const file = path.join(dataDir(), 'offline-query-cache', 'index.json')
+      try { return JSON.parse(await fs.promises.readFile(file, 'utf8')) }
+      catch (error) { if (error?.code === 'ENOENT') return []; throw error }
+    },
+    saveOfflineQueryIndex: async (json) => {
+      const dir = path.join(dataDir(), 'offline-query-cache')
+      const file = path.join(dir, 'index.json')
+      const tmp = file + '.tmp'
+      await fs.promises.mkdir(dir, { recursive: true })
+      await fs.promises.writeFile(tmp, json, { mode: 0o600 })
+      await fs.promises.rename(tmp, file)
+    },
+    loadOfflineQueryEntry: async (id) => {
+      const file = path.join(dataDir(), 'offline-query-cache', id + '.bin')
+      try { return safeStorage.decryptString(await fs.promises.readFile(file)) }
+      catch (error) { if (error?.code === 'ENOENT') return null; throw error }
+    },
+    saveOfflineQueryEntry: async (id, json) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
+      const dir = path.join(dataDir(), 'offline-query-cache')
+      const file = path.join(dir, id + '.bin')
+      const tmp = file + '.tmp'
+      await fs.promises.mkdir(dir, { recursive: true })
+      await fs.promises.writeFile(tmp, safeStorage.encryptString(json), { mode: 0o600 })
+      await fs.promises.rename(tmp, file)
+    },
+    removeOfflineQueryEntry: async (id) => {
+      const file = path.join(dataDir(), 'offline-query-cache', id + '.bin')
+      await fs.promises.unlink(file).catch((error) => { if (error?.code !== 'ENOENT') throw error })
+    },
     projectId: cfg.projectId || 'medlogng',
     staticDir: path.join(root, 'dist'),
     tls,
@@ -464,6 +501,28 @@ async function startHubRuntime() {
       await fs.promises.mkdir(dir, { recursive: true })
       await fs.promises.writeFile(tmp, safeStorage.encryptString(json).toString('base64'), { mode: 0o600 })
       await fs.promises.rename(tmp, file)
+    },
+    loadSpeechSessions: async () => {
+      const file = path.join(dataDir(), 'speech', 'sessions.bin')
+      try { return safeStorage.decryptString(await fs.promises.readFile(file)) }
+      catch (error) { if (error?.code === 'ENOENT') return '[]'; throw error }
+    },
+    saveSpeechSessions: async (json) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
+      const dir = path.join(dataDir(), 'speech')
+      const file = path.join(dir, 'sessions.bin')
+      const tmp = file + '.tmp'
+      await fs.promises.mkdir(dir, { recursive: true })
+      await fs.promises.writeFile(tmp, safeStorage.encryptString(json), { mode: 0o600 })
+      await fs.promises.rename(tmp, file)
+    },
+    auditSpeech: async (record) => {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
+      const file = path.join(dataDir(), 'speech', 'audit.bin')
+      await fs.promises.mkdir(path.dirname(file), { recursive: true })
+      const encrypted = safeStorage.encryptString(JSON.stringify(record)).toString('base64')
+      const handle = await fs.promises.open(file, 'a', 0o600)
+      try { await handle.write(encrypted + '\n'); await handle.sync() } finally { await handle.close() }
     },
   })
   activeHttpsPort = hubHandle.httpsPort || 0
@@ -777,6 +836,7 @@ module.exports = {
   lanUrl,
   lanAddresses,
   localUrl,
+  appUrl,
   dataDir,
   HOST_PORT_DEFAULT,
 }

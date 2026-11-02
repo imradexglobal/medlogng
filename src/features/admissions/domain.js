@@ -101,10 +101,21 @@ export function normalizeAdmissions(list) {
   return (list || []).map(normalizeAdmission)
 }
 
-const sameText = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
+export const normalizeWardId = (value) => String(value || '').trim().toLocaleLowerCase()
+
+// Treat common labels such as `1`, `Bed 1` and `bed-01` as one physical bed.
+export function normalizeBedId(value) {
+  const text = String(value ?? '').trim().toLocaleLowerCase()
+  if (!text) return ''
+  const match = text.match(/^(?:bed\s*)?(\d+)$/i)
+  if (match) return String(Number(match[1]))
+  return text.replace(/\s+/g, ' ')
+}
+
+const sameText = (a, b) => normalizeWardId(a) === normalizeWardId(b)
 
 export function occupiedInWard(admissions, wardName) {
-  const key = String(wardName || '').trim()
+  const key = normalizeWardId(wardName)
   if (!key) return 0
   return (admissions || []).filter((a) => a.status === ADMISSION_ACTIVE && sameText(a.wardName, key)).length
 }
@@ -117,15 +128,26 @@ export function wardOccupancy(admissions, wards) {
     totalBeds: Number(w.totalBeds ?? w.total_beds ?? 0) || 0,
     occupied: 0,
   }))
-  const byName = new Map(rows.map((r) => [String(r.name || '').trim().toLowerCase(), r]))
+  const byName = new Map(rows.map((r) => [normalizeWardId(r.name), r]))
   for (const a of admissions || []) {
     if (a.status !== ADMISSION_ACTIVE) continue
-    const row = byName.get(String(a.wardName || '').trim().toLowerCase())
+    const row = byName.get(normalizeWardId(a.wardName))
     if (row) row.occupied += 1
+    else if (a.wardName) {
+      const name = String(a.wardName).trim()
+      const key = normalizeWardId(name)
+      let unconfigured = byName.get(key)
+      if (!unconfigured) {
+        unconfigured = { name, totalBeds: 0, occupied: 0 }
+        byName.set(key, unconfigured)
+        rows.push(unconfigured)
+      }
+      unconfigured.occupied += 1
+    }
   }
   return rows.map((r) => ({
     ...r,
-    free: Math.max(0, r.totalBeds - r.occupied),
+    free: r.totalBeds ? Math.max(0, r.totalBeds - r.occupied) : null,
     pct: r.totalBeds ? Math.round((r.occupied / r.totalBeds) * 100) : 0,
     overCapacity: r.totalBeds > 0 && r.occupied > r.totalBeds,
     unconfigured: r.totalBeds === 0,
@@ -138,13 +160,16 @@ export function occupancySummary(admissions, wards) {
   const discharged = rows.filter((a) => a.status === ADMISSION_DISCHARGED)
   const wardRows = wardOccupancy(rows, wards)
   const totalBeds = wardRows.reduce((s, r) => s + r.totalBeds, 0)
+  const configuredOccupied = wardRows.filter((r) => r.totalBeds > 0).reduce((s, r) => s + r.occupied, 0)
+  const unconfiguredOccupied = wardRows.filter((r) => !r.totalBeds).reduce((s, r) => s + r.occupied, 0)
   return {
     active: active.length,
     discharged: discharged.length,
     total: rows.length,
     totalBeds,
-    free: totalBeds ? Math.max(0, totalBeds - active.length) : 0,
-    occupancyPct: totalBeds ? Math.round((active.length / totalBeds) * 100) : 0,
+    free: totalBeds ? Math.max(0, totalBeds - configuredOccupied) : 0,
+    occupancyPct: totalBeds ? Math.round((configuredOccupied / totalBeds) * 100) : 0,
+    unconfiguredOccupied,
     // Patients in a ward that has no capacity configured are real occupied
     // beds; the page shows "—" rather than a misleading 100% or 0%.
     hasCapacity: totalBeds > 0,
@@ -213,10 +238,15 @@ export function validateAdmissionInput(v, ctx = {}) {
 
   const wardName = String(values.ward_name || '').trim()
   if (!wardName) return 'Ward is required.'
-  const bedNumber = String(values.bed_number || '').trim()
+  const bedNumber = normalizeBedId(values.bed_number)
   if (!bedNumber) return 'Bed is required.'
 
   const ward = (wards || []).find((w) => sameText(w.name, wardName))
+  const bedTaken = (admissions || []).find((a) =>
+    a.status === ADMISSION_ACTIVE && sameText(a.wardName, ward ? ward.name : wardName) && normalizeBedId(a.bedNumber) === bedNumber)
+  if (bedTaken) {
+    return 'Bed ' + bedNumber + ' in ' + wardName + ' is already occupied by ' + (bedTaken.patientName || 'another patient') + '.'
+  }
   // No ward master yet: the bed cannot be capacity-checked, so it is allowed
   // through and surfaced as "unconfigured" on the wards grid.
   if (!ward) return null
@@ -233,11 +263,6 @@ export function validateAdmissionInput(v, ctx = {}) {
     if (!Number.isFinite(bedIdx) || bedIdx < 1 || bedIdx > total) {
       return 'Bed ' + bedNumber + ' does not exist in ' + wardName + ' (beds 1 – ' + total + ').'
     }
-  }
-  const bedTaken = (admissions || []).find((a) =>
-    a.status === ADMISSION_ACTIVE && sameText(a.wardName, ward.name) && sameText(a.bedNumber, bedNumber))
-  if (bedTaken) {
-    return 'Bed ' + bedNumber + ' in ' + wardName + ' is already occupied by ' + (bedTaken.patientName || 'another patient') + '.'
   }
   return null
 }

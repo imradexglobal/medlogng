@@ -52,7 +52,7 @@ function applyText(field, value, mode, point) {
   field.focus()
 }
 
-export function attachSpeechInput(field, { getOrgId, disabled = false } = {}) {
+export function attachSpeechInput(field, { getOrgId, getEncounterId, disabled = false } = {}) {
   if (!field || !field.parentNode) return () => {}
   const widget = document.createElement('div')
   widget.className = 'speech-control'
@@ -143,25 +143,20 @@ export function attachSpeechInput(field, { getOrgId, disabled = false } = {}) {
     savedJobKey = ''
   }
 
-  async function authHeaders() {
+  async function sessionFor(org) {
     const { auth } = await import('../firebase.js')
-    const token = await auth.currentUser?.getIdToken()
-    if (!token) throw new Error('Sign in again before recording a note.')
-    return { authorization: 'Bearer ' + token, 'x-medilog-client': 'medilogng-web' }
+    const { ensureSpeechSession } = await import('../services/speechSession.js')
+    return ensureSpeechSession(auth.currentUser, org)
   }
 
   function pollJob(id, activeOrg) {
     if (destroyed) return
     pollTimer = setTimeout(async () => {
       try {
-        const { auth } = await import('../firebase.js')
-        const freshToken = await auth.currentUser?.getIdToken()
-        if (!freshToken) throw new Error('Sign in again to retrieve the transcript.')
-        const response = await fetch(window.location.origin + '/speech/jobs/' + encodeURIComponent(id) +
-          '?orgId=' + encodeURIComponent(activeOrg), {
-          headers: { authorization: 'Bearer ' + freshToken, 'x-medilog-client': 'medilogng-web' },
-          cache: 'no-store',
-        })
+        const { signedSpeechRequest } = await import('../services/speechSession.js')
+        const saved = await sessionFor(activeOrg)
+        const path = '/speech/jobs/' + encodeURIComponent(id) + '?orgId=' + encodeURIComponent(activeOrg)
+        const response = await signedSpeechRequest(path, { headers: {} }, saved)
         const data = await response.json().catch(() => ({}))
         if (!response.ok || !data.job) throw new Error(data.error || 'Could not check transcription status.')
         const job = data.job
@@ -201,20 +196,22 @@ export function attachSpeechInput(field, { getOrgId, disabled = false } = {}) {
     canceling = false
     retryButton.hidden = true
     try {
-      const headers = await authHeaders()
       const activeOrg = String(getOrgId?.() || '')
       if (!activeOrg) throw new Error('Select a hospital before transcribing.')
+      const encounterId = String(getEncounterId?.() || '')
+      if (!encounterId) throw new Error('Open a consultation before recording a note.')
+      const savedSession = await sessionFor(activeOrg)
+      const { signedSpeechHeaders } = await import('../services/speechSession.js')
       orgId = activeOrg
       const reqId = requestId()
+      const endpoint = '/speech/jobs?orgId=' + encodeURIComponent(activeOrg) + '&encounterId=' + encodeURIComponent(encounterId)
+      const headers = await signedSpeechHeaders(endpoint, { method: 'POST', body: blob, contentType: blob.type || 'application/octet-stream', requestId: reqId }, savedSession)
       setStatus('Uploading recording…')
       cancelButton.hidden = false
       upload = new XMLHttpRequest()
       const result = await new Promise((resolve, reject) => {
-        upload.open('POST', window.location.origin + '/speech/jobs?orgId=' + encodeURIComponent(activeOrg))
-        upload.setRequestHeader('authorization', headers.authorization)
-        upload.setRequestHeader('x-medilog-client', headers['x-medilog-client'])
-        upload.setRequestHeader('x-speech-request-id', reqId)
-        upload.setRequestHeader('content-type', blob.type || 'application/octet-stream')
+        upload.open('POST', window.location.origin + endpoint)
+        for (const [name, value] of Object.entries(headers)) upload.setRequestHeader(name, value)
         upload.upload.onprogress = (event) => {
           if (event.lengthComputable) setStatus('Uploading · ' + Math.round(event.loaded / event.total * 100) + '%')
         }
@@ -246,7 +243,7 @@ export function attachSpeechInput(field, { getOrgId, disabled = false } = {}) {
 
   async function startRecording() {
     if (disabled || recording || jobId) return
-    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    if (window.location.protocol !== 'https:' || !window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
       setStatus('Microphone recording needs HTTPS and a supported browser.', 'error')
       return
     }
@@ -324,10 +321,9 @@ export function attachSpeechInput(field, { getOrgId, disabled = false } = {}) {
     stopPolling()
     if (jobId) {
       try {
-        const headers = await authHeaders()
-        await fetch(window.location.origin + '/speech/jobs/' + encodeURIComponent(jobId) + '/cancel?orgId=' + encodeURIComponent(orgId), {
-          method: 'POST', headers,
-        })
+        const { signedSpeechRequest } = await import('../services/speechSession.js')
+        const saved = await sessionFor(orgId)
+        await signedSpeechRequest('/speech/jobs/' + encodeURIComponent(jobId) + '/cancel?orgId=' + encodeURIComponent(orgId), { method: 'POST' }, saved)
       } catch {}
       jobId = ''
     }

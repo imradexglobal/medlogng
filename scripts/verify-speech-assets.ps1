@@ -131,7 +131,55 @@ if ($ffmpegExitCode -ne 0 -or $ffmpegFirstLine -ne [string]$manifest.ffmpeg.vers
   Stop-Verification 'FFmpeg failed to start or its reported version differs from the manifest.'
 }
 
+# The packaging verifier must authenticate the source independently: a hash in
+# a mutable receipt is not an upstream signature check.
+$msysCandidates = @()
+if ($env:MSYS2_ROOT) { $msysCandidates += $env:MSYS2_ROOT }
+$msysCandidates += @('C:\msys64', 'C:\tools\msys64')
+$msysRoot = $msysCandidates | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
+if (-not $msysRoot) { Stop-Verification 'MSYS2 UCRT64 with GnuPG is required to verify the official FFmpeg source signature before packaging.' }
+$bash = Join-Path $msysRoot 'usr\bin\bash.exe'
+$cygpath = Join-Path $msysRoot 'usr\bin\cygpath.exe'
+$verifyScript = Join-Path $PSScriptRoot 'verify-ffmpeg-source.sh'
+if (-not (Test-Path $cygpath -PathType Leaf) -or -not (Test-Path $verifyScript -PathType Leaf)) {
+  Stop-Verification 'MSYS2 cygpath or the FFmpeg source signature verifier is missing.'
+}
+function ConvertTo-MsysPath([string]$WindowsPath) {
+  $converted = & $cygpath -u $WindowsPath
+  if ($LASTEXITCODE -ne 0 -or -not $converted) { Stop-Verification ('Could not convert an FFmpeg proof path for MSYS2: ' + $WindowsPath) }
+  return ([string]$converted).Trim()
+}
+$oldSystem = $env:MSYSTEM
+$oldPathType = $env:MSYS2_PATH_TYPE
+$oldChere = $env:CHERE_INVOKING
+$oldPreference = $ErrorActionPreference
+try {
+  $env:MSYSTEM = 'UCRT64'
+  $env:MSYS2_PATH_TYPE = 'minimal'
+  $env:CHERE_INVOKING = '1'
+  $ErrorActionPreference = 'Continue'
+  $scriptArg = ConvertTo-MsysPath $verifyScript
+  $archiveArg = ConvertTo-MsysPath (Join-Path $AssetDir ([string]$manifest.ffmpeg.sourceArchiveFile))
+  $signatureArg = ConvertTo-MsysPath (Join-Path $AssetDir ([string]$manifest.ffmpeg.sourceSignatureFile))
+  $keyArg = ConvertTo-MsysPath (Join-Path $AssetDir ([string]$manifest.ffmpeg.sourceSigningKeyFile))
+  $verificationOutput = & $bash --login -c 'bash "$1" "$2" "$3" "$4"' 'medlog-verify-ffmpeg' $scriptArg $archiveArg $signatureArg $keyArg 2>&1
+  $signatureExitCode = $LASTEXITCODE
+} catch {
+  Stop-Verification ('FFmpeg source signature verification could not run: ' + $_.Exception.Message)
+} finally {
+  $ErrorActionPreference = $oldPreference
+  if ($null -eq $oldSystem) { Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue } else { $env:MSYSTEM = $oldSystem }
+  if ($null -eq $oldPathType) { Remove-Item Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue } else { $env:MSYS2_PATH_TYPE = $oldPathType }
+  if ($null -eq $oldChere) { Remove-Item Env:CHERE_INVOKING -ErrorAction SilentlyContinue } else { $env:CHERE_INVOKING = $oldChere }
+}
+if ($signatureExitCode -ne 0) { Stop-Verification ('Official FFmpeg signature verification failed: ' + [string]($verificationOutput -join ' ')) }
+$verifiedHashLine = [string]($verificationOutput | Where-Object { [string]$_ -match '^FFMPEG_SOURCE_SHA256=' } | Select-Object -Last 1)
+if ($verifiedHashLine -ne ('FFMPEG_SOURCE_SHA256=' + [string]$manifest.ffmpeg.sourceSha256)) {
+  Stop-Verification 'The signature verifier did not return the manifest source hash under the pinned FFmpeg release key.'
+}
+
 Write-Host 'Speech assets verified:'
 Write-Host ('  Worker: ' + $manifest.worker.version + ' · SHA-256 ' + $manifest.worker.sha256)
 Write-Host ('  Model:  ' + $manifest.model.version + ' · SHA-256 ' + $manifest.model.sha256)
 Write-Host ('  FFmpeg: ' + $manifest.ffmpeg.version + ' · SHA-256 ' + $manifest.ffmpeg.sha256)
+Write-Host ('  FFmpeg source signature: verified with fingerprint ' + $manifest.ffmpeg.signatureFingerprint)

@@ -246,7 +246,7 @@ export async function ConsultationsView(app, params = {}) {
       // workspace header. They remain in view while the clinician writes or
       // places orders in another tab.
       '<div id="encWho"></div>' +
-      '<div class="kv enc-vitals"><div><em>BP</em><strong id="v-bp">—</strong></div><div><em>Pulse</em><strong id="v-pulse">—</strong></div><div><em>Resp. rate</em><strong id="v-rr">—</strong></div><div><em>Temp</em><strong id="v-temp">—</strong></div><div><em>SpO₂</em><strong id="v-spo2">—</strong></div><div><em>Weight</em><strong id="v-weight">—</strong></div><div><em>Height</em><strong id="v-height">—</strong></div><div><em>BMI</em><strong id="v-bmi">—</strong></div></div>' +
+      '<div class="kv enc-vitals" id="encVitalsHistory" aria-label="Patient vitals; select a measurement to view its chart history"><button type="button" class="enc-vital-card" data-vital-chart="bp_systolic" data-vital-label="Blood pressure"><em>BP</em><strong id="v-bp">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="pulse" data-vital-label="Pulse"><em>Pulse</em><strong id="v-pulse">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="rr" data-vital-label="Resp. rate"><em>Resp. rate</em><strong id="v-rr">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="temp_c" data-vital-label="Temperature"><em>Temp</em><strong id="v-temp">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="spo2" data-vital-label="SpO₂"><em>SpO₂</em><strong id="v-spo2">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="weight_kg" data-vital-label="Weight"><em>Weight</em><strong id="v-weight">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="height_cm" data-vital-label="Height"><em>Height</em><strong id="v-height">—</strong></button><button type="button" class="enc-vital-card" data-vital-chart="bmi" data-vital-label="BMI"><em>BMI</em><strong id="v-bmi">—</strong></button></div>' +
       '</div>' +
       // The long workspace is tabbed instead of one endless list: Overview
       // (identity, flow, vitals), the SOAP note, the plan, prescriptions and
@@ -797,6 +797,37 @@ wireKebabs(tbl, async (rowId, action) => {
       ? (Number(vitals.Weight) / ((Number(vitals.Height) / 100) ** 2)).toFixed(1)
       : ''
     set('v-bmi', bmi)
+  }
+
+  function openVitalChart(field, label) {
+    if (!selectedEncounter?.patientId) { toast('This encounter is not linked to a patient.'); return }
+    const cached = encounterVitalsCache.get(selectedEncounter.id)
+    const rows = Array.isArray(cached) ? cached : []
+    const chrono = [...rows].sort((a, b) => Number(a.created_at || 0) - Number(b.created_at || 0))
+    const points = chrono.map((row) => ({
+      date: row.created_at,
+      value: field === 'bmi'
+        ? (Number(row.weight_kg) > 0 && Number(row.height_cm) > 0 ? Number((Number(row.weight_kg) / ((Number(row.height_cm) / 100) ** 2)).toFixed(1)) : null)
+        : Number(row[field]),
+    })).filter((point) => Number.isFinite(point.value))
+    const current = points.length ? String(points[points.length - 1].value) : 'No readings'
+    const width = 640, height = 220, pad = 24
+    let chart = '<p class="sub">No history is available for this measurement yet.</p>'
+    if (points.length > 1) {
+      const values = points.map((p) => p.value)
+      const min = Math.min(...values), max = Math.max(...values), span = max - min || 1
+      const polyline = values.map((v, i) => {
+        const x = pad + i / (values.length - 1) * (width - pad * 2)
+        const y = height - pad - (v - min) / span * (height - pad * 2)
+        return x.toFixed(1) + ',' + y.toFixed(1)
+      }).join(' ')
+      chart = '<div class="enc-vital-chart"><svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="' + esc(label) + ' history chart"><polyline points="' + polyline + '"></polyline></svg><div class="enc-vital-chart-range"><span>Min ' + esc(String(min)) + '</span><span>Max ' + esc(String(max)) + '</span></div><div class="enc-vital-chart-range"><span>' + esc(fmtDate(points[0].date)) + '</span><span>' + esc(fmtDate(points[points.length - 1].date)) + '</span></div></div>'
+    } else if (points.length === 1) {
+      chart = '<p class="sub">One reading is available; at least two are needed to show a trend.</p>'
+    }
+    openModal(label + ' history', '<div class="enc-vital-history"><div class="enc-vital-history-fixed"><p class="enc-vital-current">Latest reading <strong>' + esc(current) + '</strong></p>' + chart + '<h4>Readings</h4></div><div class="tblwrap enc-vital-history-list"><table class="tbl"><thead><tr><th>Date</th><th>Value</th></tr></thead><tbody>' +
+      points.slice().reverse().map((point) => '<tr><td>' + esc(fmtDateTime(point.date)) + '</td><td><strong>' + esc(String(point.value)) + '</strong></td></tr>').join('') +
+      '</tbody></table></div></div>', { wide: true, encVitalsHistory: true })
   }
 
   async function loadEncounterVitals(encounter) {
@@ -1434,6 +1465,9 @@ wireKebabs(tbl, async (rowId, action) => {
   // may no longer contain it.
   document.getElementById('refreshBtn').onclick = () => { selectedEncounter = null; reload() }
   document.getElementById('newEncB').onclick = openNewEncounter
+  document.querySelectorAll('#encVitalsHistory [data-vital-chart]').forEach((button) => {
+    button.onclick = () => openVitalChart(button.getAttribute('data-vital-chart'), button.getAttribute('data-vital-label'))
+  })
   document.getElementById('vitalsB').onclick = openVitalsForm
   document.getElementById('dxB').onclick = openDiagnosisForm
   document.getElementById('rxB').onclick = openMedicineForm
@@ -1494,11 +1528,11 @@ wireKebabs(tbl, async (rowId, action) => {
   if (caps.canEdit) {
     SOAP_FIELDS.forEach(({ key }) => {
       const field = document.getElementById('enc-soap-' + key)
-      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg }))
+      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg, getEncounterId: () => selectedEncounter?.id || '' }))
     })
     const planSpeechField = document.getElementById('planEditor')
     if (planSpeechField) {
-      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg })
+      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg, getEncounterId: () => selectedEncounter?.id || '' })
       const speechControl = planSpeechField.nextElementSibling
       const speechSlot = document.getElementById('planSpeechSlot')
       if (speechControl && speechSlot) {

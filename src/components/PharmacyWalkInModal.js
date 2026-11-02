@@ -3,7 +3,7 @@
 // without requiring an existing consultation or registered patient record.
 // Automatically generates the invoice, records payment, and prints an official receipt.
 
-import { openModal, closeModal, toast } from './shell.js'
+import { openModal, closeModal, toast, wireSearchableSelect } from './shell.js'
 import { dispense } from '../services/pharmacyService.js'
 import { createInvoiceFromLines, recordPayment } from '../services/billingService.js'
 import { printDocument } from '../lib/print.js'
@@ -184,6 +184,7 @@ export function openWalkInSaleModal({ drugs = [], onSuccess }) {
           refreshModal()
         }
       }
+      if (availableDrugs.length > 1) wireSearchableSelect(null, sel)
     })
 
     // Quantity inputs

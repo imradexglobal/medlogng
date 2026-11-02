@@ -12,6 +12,7 @@ import { myActiveMembership } from './authService.js'
 import { can } from '../features/admin/roles.js'
 import { logAudit } from './adminService.js'
 import { watchQuery } from './live.js'
+import { getDocsTolerant } from '../lib/offlineRead.js'
 
 const WARDS = 'wards'
 
@@ -48,7 +49,7 @@ function sortWards(rows) {
 }
 
 export async function listOrgWards(orgId) {
-  const snap = await getDocs(buildOrgWardsQuery(orgId))
+  const snap = await getDocsTolerant(buildOrgWardsQuery(orgId))
   return sortWards(snap.docs.map(mapWardDoc))
 }
 
