@@ -1,4 +1,5 @@
-// Host-issued offline speech authorization bound to one browser-profile key.
+// Host-issued offline device-session authorization for signed LAN reads and
+// handoffs. It is not an audio-transcription permission or backend.
 // The browser keeps a non-exportable P-256 private key in IndexedDB; the Host
 // keeps only its public key and the last live-verified encounter.edit grant.
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto'
@@ -74,10 +75,10 @@ export function createSpeechSessions({ load = async () => '[]', save = async () 
     try {
       const raw = await load()
       parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
-      if (!Array.isArray(parsed)) throw new Error('Speech session state must be an array.')
+      if (!Array.isArray(parsed)) throw new Error('Host device-session state must be an array.')
     } catch (error) {
       log.error('[speech] local session state could not be loaded; refusing offline sessions:', error?.message || error)
-      throw new Error('Speech session state is unavailable; local offline authorization is disabled.')
+      throw new Error('Host device-session state is unavailable; local offline authorization is disabled.')
     }
     for (const row of parsed.slice(-5000)) {
       try {

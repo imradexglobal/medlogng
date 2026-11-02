@@ -18,7 +18,7 @@
     "test:speech:listeners": "node scripts/test/speech.listeners.test.mjs",
     "hub": "node hub/server.js",
     "dev": "vite --port 5174",
-    "build": "vite build",
+    "build": "vite build --configLoader runner",
     "preview": "vite preview --port 5174",
     "cap:sync": "npx cap sync",
     "cap:open": "npx cap open android",

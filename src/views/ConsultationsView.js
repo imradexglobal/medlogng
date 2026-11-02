@@ -712,7 +712,7 @@ wireKebabs(tbl, async (rowId, action) => {
           '<div class="enc-admission-card">' +
           '<span class="enc-admission-label">Inpatient</span><strong>' + esc(anyBed.wardName || 'ward unknown') + ' · ' + esc(anyBed.bedNumber || 'bed unknown') + '</strong>' +
           (bed ? ' — admitted from this encounter' : ' — admitted separately') +
-          (anyBed.attendingProvider ? ' · ' + esc(anyBed.attendingProvider) : '') +
+          (anyBed.attendingProvider ? ' · ' + esc(staffLabel(anyBed.attendingProvider)) : '') +
           ' <a href="#/admissions">Bed board →</a></div>'
       } else {
         admEl.innerHTML = bedCaps.canAdmit

@@ -30,7 +30,7 @@ Provide transcription for hospitals using Firebase hosting without a Windows Hos
 
 ### Reuse and new components
 
-Reuse `attachSpeechInput`, the `speechInput.js` review/insert semantics, `authStore`, membership/capability logic, consultation patient/encounter context, and the job concepts in `hub/speech/jobs.js` (after abstracting transport/persistence). Develop cloud upload storage, cloud job coordinator/worker, provider adapter, deployment-mode selection, retention cleanup, billing/usage observability and operational alerts.
+Reuse `attachSpeechInput`, its local encrypted recording and transcript review/insert semantics, `authStore`, membership/capability logic, and consultation patient/encounter context. The online Deepgram adapter and Firebase/Host transports now exist; operational provider approval, billing/usage observability and hospital testing remain deployment work.
 
 ### Dependencies, security and acceptance
 
@@ -100,7 +100,7 @@ Connect existing encounter work with either local or cloud transcription and cli
 
 1. Doctor opens an authorized patient consultation.
 2. Doctor starts recording.
-3. Host deployment processes with offline Whisper; Firebase-only deployment uses the approved cloud service.
+3. Host and Firebase deployments both use the configured, authorized online transcription service. Recordings can remain encrypted on the client while offline but are never uploaded automatically.
 4. A transcript becomes available with job status and source/version information.
 5. Doctor reviews and corrects the raw transcript.
 6. The approved AI assistant proposes structured SOAP and Plan drafts.

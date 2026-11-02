@@ -49,10 +49,10 @@ These published facts are insufficient to approve processing identifiable clinic
 ## Local verification performed for these foundations
 
 - `npm run test:clinical-drafts` — PASS (synthetic evidence, tampering, binding, explicit review and capability checks).
-- `npm run test:speech` — PASS (existing speech worker/job/session/assets suites plus Hub-vs-Hosting deployment detection).
+- `npm run test:speech` — current PASS (Deepgram adapter input/endpoint/MIP opt-out tests, Host-device session tests, Host/Firebase routing, mock Host HTTPS integration and legacy endpoint retirement). It does not contact Deepgram.
 - `npm run test:clinical-ai` — PASS (synthetic mock adapter: draft structure, exact quote spans, citation fabrication rejection, non-loopback denial and unconfigured-model fail-closed behavior). It does not invoke Ollama or an external model.
-- `npm --prefix functions test` — PASS (injected-store callable policy tests: authenticated identity, active membership/capability, patient/encounter binding, evidence validation, audit record and fail-closed provider).
-- Host AI and Whisper inference share a single scheduling lane; automated tests confirm a mock AI call does not overlap a mock Whisper call, bound queue capacity and worker unloading request. No actual model/Whisper performance was measured.
+- `npm --prefix functions test` — current PASS (clinical-AI policy tests plus speech HTTP handler authentication, live membership, encounter binding, audit, idempotency and fail-closed provider).
+- Host local clinical-note AI uses a single scheduling lane. Speech recognition is online and is independent of the Host CPU inference queue. No actual model, live provider or target-hardware performance has been measured.
 - `npm run build` — PASS after the consultation UI and backend client changes.
 
 These tests do not demonstrate clinical AI quality, Firebase-only speech, provider privacy, production security, or Phase 2–5 acceptance.

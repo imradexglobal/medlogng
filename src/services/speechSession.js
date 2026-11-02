@@ -40,7 +40,7 @@ export async function clearSpeechSession(uid, orgId) {
     await signedSpeechRequest('/device/session/revoke?orgId=' + encodeURIComponent(orgId), {
       method: 'POST', signal: AbortSignal.timeout(1500),
     }, saved).catch(() => {})
-    await signedSpeechRequest('/speech/session/revoke?orgId=' + encodeURIComponent(orgId), {
+    await signedSpeechRequest('/device/session/revoke?orgId=' + encodeURIComponent(orgId), {
       method: 'POST', signal: AbortSignal.timeout(1500),
     }, saved).catch(() => {})
   }
@@ -62,7 +62,7 @@ export async function clearAllSpeechSessions(uid) {
   db.close()
   await Promise.allSettled(owned.flatMap((row) => [
     signedSpeechRequest('/device/session/revoke?orgId=' + encodeURIComponent(row.orgId), { method: 'POST', signal: AbortSignal.timeout(1500) }, row),
-    signedSpeechRequest('/speech/session/revoke?orgId=' + encodeURIComponent(row.orgId), { method: 'POST', signal: AbortSignal.timeout(1500) }, row),
+    signedSpeechRequest('/device/session/revoke?orgId=' + encodeURIComponent(row.orgId), { method: 'POST', signal: AbortSignal.timeout(1500) }, row),
   ]))
 }
 
@@ -83,7 +83,7 @@ export async function getOrCreateDeviceKey(uid, orgId) {
 export async function ensureSpeechSession(user, orgId) {
   if (!user?.uid || !orgId) throw new Error('Sign in and select a hospital before recording.')
   let saved = await read(`${user.uid}:${orgId}`)
-  const url = '/speech/session?orgId=' + encodeURIComponent(orgId)
+  const url = '/device/session/register?orgId=' + encodeURIComponent(orgId)
   if (navigator.onLine) {
     const token = await user.getIdToken()
     if (!saved) saved = await getOrCreateDeviceKey(user.uid, orgId)
@@ -102,8 +102,8 @@ export async function ensureSpeechSession(user, orgId) {
     }
   }
   if (!saved) throw new Error('Connect once to verify speech access on this device.')
-  const response = await signedSpeechRequest('/speech/session/offline?orgId=' + encodeURIComponent(orgId), { method: 'POST' }, saved)
-  if (!response.ok) throw new Error('The Host has no verified offline speech session for this device.')
+  const response = await signedSpeechRequest('/device/session/offline?orgId=' + encodeURIComponent(orgId), { method: 'POST' }, saved)
+  if (!response.ok) throw new Error('The Host has no verified offline device session for this account.')
   return saved
 }
 
@@ -151,7 +151,7 @@ export async function revalidateSpeechSession(user, orgId) {
   if (!saved || !navigator.onLine) return false
   try {
     const token = await user.getIdToken(true)
-    const response = await signedSpeechRequest('/speech/session/revalidate?orgId=' + encodeURIComponent(orgId), {
+    const response = await signedSpeechRequest('/device/session/revalidate?orgId=' + encodeURIComponent(orgId), {
       method: 'POST', headers: { authorization: 'Bearer ' + token },
     }, saved)
     if (response.status === 401 || response.status === 403) {

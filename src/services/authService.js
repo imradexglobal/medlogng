@@ -83,7 +83,7 @@ export function initAuthListener() {
     try {
       const { revalidateAllSpeechSessions } = await import('./speechSession.js')
       await revalidateAllSpeechSessions(user)
-    } catch (e) { console.warn('[auth] offline speech session revalidation deferred:', e?.message || e) }
+    } catch (e) { console.warn('[auth] offline Host device-session revalidation deferred:', e?.message || e) }
   }
   window.addEventListener('online', () => { void revalidateCachedSpeech() })
   window.addEventListener('focus', () => { void revalidateCachedSpeech() })

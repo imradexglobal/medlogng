@@ -4,7 +4,7 @@
 // Readmission isolation: each stay gets a new admission_session_id (doc id).
 import { shell, formModal, toast, closeModal, wireToast, openModal } from '../components/shell.js'
 import { authStore } from '../store/authStore.js'
-import { staffLabel } from '../lib/staffName.js'
+import { staffLabel, currentStaffName } from '../lib/staffName.js'
 import {
   listSessionPlanItems, createPlanItem, updatePlanItem, updatePlanStatus, removePlanItem,
   buildSessionTimelineFn, nextRoundFn, myAdmissionSessionCaps,
@@ -40,7 +40,6 @@ import { labRequestHtml, labResultHtml, imagingRequestHtml, imagingResultHtml } 
 import { listPrices, catalogueItems, priceFor } from '../services/priceCatalogueService.js'
 import { dischargeSummaryHtml } from '../lib/dischargeSummaryHtml.js'
 import { inpatientStatementHtml } from '../lib/billingPrint.js'
-import { staffLabel, currentStaffName } from '../lib/staffName.js'
 
 export async function AdmissionWorkspaceView(app, params = {}) {
   const { activeOrg } = authStore.getState()

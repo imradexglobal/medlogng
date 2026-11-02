@@ -8,6 +8,7 @@ import { onCleanup } from '../lib/lifecycle.js'
 import { onUpdate, getSyncMode } from '../services/clinicalOutbox.js'
 import { createAllergyTagInput } from './AllergyTagInput.js'
 import { getHostNetworkInfo } from '../services/hostService.js'
+import { staffDisplayName } from '../lib/staffName.js'
 
 export const NAV = [
   { path: '/', label: 'Dashboard', icon: '▦', cap: null },
@@ -58,7 +59,7 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
   const role = me?.role ? String(me.role).replace(/_/g, ' ') : 'member'
   // The sidebar identifies the person by staff name — the same value records
   // and reports show — and only falls back to the sign-in email.
-  const who = me?.staff_name || user?.displayName || email
+  const who = me?.staff_name || user?.displayName || staffDisplayName({ email })
   const initials = (String(who || '').match(/\b\w/g) || ['u']).slice(0, 2).join('').toUpperCase()
 
   app.innerHTML =

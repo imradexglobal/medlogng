@@ -30,7 +30,7 @@ export function currentStaffName() {
   const me = activeMembership(activeOrg)
   const name = (me && me.staff_name) || user?.displayName || ''
   if (String(name).trim()) return String(name).trim()
-  return user?.email || ''
+  return staffDisplayName({ email: user?.email })
 }
 
 const byId = new Map() // user_id → staff_name
@@ -38,19 +38,40 @@ const byEmail = new Map() // email (lowercased) → staff_name
 let loadedFor = null
 let loading = null
 
+function emailLabel(email) {
+  const local = String(email || '').split('@')[0].replace(/[._-]+/g, ' ').trim()
+  return local ? local.replace(/\b\w/g, (c) => c.toUpperCase()) : 'Staff member'
+}
+
 // Resolve a stored actor value (email, uid, or an already-written name) for
 // display. Synchronous by design — views render straight to HTML strings.
 export function staffLabel(value) {
   if (value == null) return value
   const s = String(value).trim()
   if (!s) return value
-  return byId.get(s) || byEmail.get(s.toLowerCase()) || value
+  const known = byId.get(s) || byEmail.get(s.toLowerCase())
+  if (known) return known
+  if (/^[A-Z0-9_-]{20,}$/i.test(s)) return 'Staff member'
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) return emailLabel(s)
+  return value
 }
 
 // Name for a uid, or '' when unknown — for callers that need to tell "resolved
 // to a name" apart from "fell back to the raw value".
 export function staffNameForId(userId) {
   return (userId && byId.get(userId)) || ''
+}
+
+// Human-readable fallback for UI that has a staff record but no saved name.
+// Keep Firebase ids available to application logic without exposing them as labels.
+export function staffDisplayName({ staff_name, email, user_id, user_name } = {}) {
+  const known = staff_name || user_name || staffNameForId(user_id) || staffLabel(email)
+  if (known && String(known).trim()) {
+    const label = String(known).trim()
+    if (email && label === email) return emailLabel(email)
+    return label
+  }
+  return 'Staff member'
 }
 
 // Keep the directory in step when a member is renamed (or registered) so the

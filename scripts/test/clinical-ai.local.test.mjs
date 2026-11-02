@@ -17,7 +17,7 @@ const fakeOllama = (output, onGenerate = async () => {}) => async (url, options)
   assert.equal(options.method, 'POST')
   const body = JSON.parse(options.body)
   assert.equal(body.format.additionalProperties, false, 'Ollama receives a constrained JSON schema')
-  assert.equal(body.keep_alive, 0, 'Ollama unloads after the request to release RAM for Whisper')
+  assert.equal(body.keep_alive, 0, 'Ollama unloads after each request to release local RAM')
   await onGenerate(body)
   return new Response(JSON.stringify({ model: 'synthetic-test-model', created_at: 'synthetic', total_duration: 1_250_000_000, load_duration: 250_000_000, prompt_eval_count: 400, eval_count: 100, response: JSON.stringify(output) }), { status: 200 })
 }
@@ -73,12 +73,12 @@ const scheduled = createLocalClinicalAi({ model: 'synthetic-test-model', schedul
   activeWork -= 1
 }) })
 const aiOne = scheduled.generate(transcript)
-const whisperWork = sharedLane.run('whisper', async () => {
-  activeWork += 1; peakWork = Math.max(peakWork, activeWork); laneEvents.push('whisper')
+const secondAiWork = sharedLane.run('clinical-ai', async () => {
+  activeWork += 1; peakWork = Math.max(peakWork, activeWork); laneEvents.push('clinical-ai-2')
   await new Promise((resolve) => setTimeout(resolve, 10)); activeWork -= 1
 })
 const aiTwo = scheduled.generate(transcript)
-await Promise.all([aiOne, whisperWork, aiTwo])
-assert.equal(peakWork, 1, 'Whisper and local documentation generation share one inference lane')
-assert.deepEqual(laneEvents, ['clinical-ai', 'whisper', 'clinical-ai'])
+await Promise.all([aiOne, secondAiWork, aiTwo])
+assert.equal(peakWork, 1, 'local documentation generation requests share one inference lane')
+assert.deepEqual(laneEvents, ['clinical-ai', 'clinical-ai-2', 'clinical-ai'])
 console.log('clinical AI local adapter: synthetic structure, exact evidence, fabricated citation rejection, remote-provider denial and serialized bounded queue passed')

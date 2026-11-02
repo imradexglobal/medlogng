@@ -13,7 +13,7 @@ import {
   listOrgDevices, setDeviceStatus, listAudit, AUDIT_ACTIONS, updateMemberName,
   friendlyAdminError,
 } from '../services/adminService.js'
-import { staffLabel, staffNameForId } from '../lib/staffName.js'
+import { staffDisplayName, staffLabel, staffNameForId } from '../lib/staffName.js'
 import { ROLE_OPTIONS, ALL_CAPS, capsForRole, normalizeCaps, isValidEmail } from '../features/admin/roles.js'
 import {
   listPayers, savePayer, setPayerActive, deletePayer, refreshCache,
@@ -203,7 +203,7 @@ export async function AdminView(app) {
           '<button class="btn ghost sm" data-rename="' + esc(m.id) + '">Rename</button>'
       }
     }
-    return '<tr><td><strong>' + esc(m.staff_name || '(no name)') + '</strong>' +
+    return '<tr><td><strong>' + esc(staffDisplayName(m)) + '</strong>' +
       (m.email ? '<div class="mut">' + esc(m.email) + '</div>' : '') + flags + '</td>' +
       '<td>' + roleSel + (m.requested_role && m.requested_role !== m.role ? '<div class="mut">requested: ' + esc(m.requested_role) + '</div>' : '') + '</td>' +
       '<td class="mut" title="' + esc((m.capabilities || []).join('\n')) + '">' + esc(capsOf(m)) + '</td><td>' + statusPill(m.status) + '</td><td>' + actions + '</td></tr>'
@@ -266,7 +266,7 @@ export async function AdminView(app) {
       b.onclick = () => {
         const m = find(b.getAttribute('data-approve'))
         openModal('Approve staff',
-          '<p class="sub">Approve <strong>' + esc(m.staff_name || m.user_id || m.email || '—') + '</strong>. Choose role and individual capabilities.</p>' +
+          '<p class="sub">Approve <strong>' + esc(staffDisplayName(m)) + '</strong>. Choose role and individual capabilities.</p>' +
           '<div class="fgrid">' +
           field('Role', sel(ROLE_OPTIONS)).replace('<select class="input">', '<select id="apRole" class="input">') +
           '</div>' +
@@ -310,13 +310,13 @@ export async function AdminView(app) {
     pane.querySelectorAll('[data-reject]').forEach((b) => {
       b.onclick = () => {
         const m = find(b.getAttribute('data-reject'))
-        confirmDo('Reject request', 'Reject <strong>' + esc(m.staff_name || m.user_id) + '</strong>? They stay signed in but have no hospital access.', 'Reject', () => rejectMember(m))
+        confirmDo('Reject request', 'Reject <strong>' + esc(staffDisplayName(m)) + '</strong>? They stay signed in but have no hospital access.', 'Reject', () => rejectMember(m))
       }
     })
     pane.querySelectorAll('[data-suspend]').forEach((b) => {
       b.onclick = () => {
         const m = find(b.getAttribute('data-suspend'))
-        confirmDo('Suspend access', 'Suspend <strong>' + esc(m.staff_name || m.user_id) + '</strong>? Their devices become useless immediately. History is kept.', 'Suspend', () => suspendMember(m))
+        confirmDo('Suspend access', 'Suspend <strong>' + esc(staffDisplayName(m)) + '</strong>? Their devices become useless immediately. History is kept.', 'Suspend', () => suspendMember(m))
       }
     })
     pane.querySelectorAll('[data-reactivate]').forEach((b) => {
@@ -331,7 +331,7 @@ export async function AdminView(app) {
         const m = find(b.getAttribute('data-saverole'))
         const role = pane.querySelector('[data-role-for="' + m.id + '"]')?.value || m.role
         if (role === m.role) { toast('Role unchanged.'); return }
-        confirmDo('Change role', 'Change <strong>' + esc(m.staff_name || m.user_id) + '</strong> from <strong>' + esc(m.role) + '</strong> to <strong>' + esc(role) + '</strong>? Role label changes; individual capabilities are preserved.', 'Change role', () => updateMemberRole(m, role))
+        confirmDo('Change role', 'Change <strong>' + esc(staffDisplayName(m)) + '</strong> from <strong>' + esc(m.role) + '</strong> to <strong>' + esc(role) + '</strong>? Role label changes; individual capabilities are preserved.', 'Change role', () => updateMemberRole(m, role))
       }
     })
     pane.querySelectorAll('[data-pwreset]').forEach((b) => {
@@ -346,7 +346,7 @@ export async function AdminView(app) {
         const m = find(b.getAttribute('data-editcaps'))
         if (m.user_id === auth.currentUser?.uid) { toast('You cannot change your own capabilities.'); return }
         openModal('Edit capabilities',
-          '<p class="sub">Customize capabilities for <strong>' + esc(m.staff_name || m.user_id) + '</strong> (role: <strong>' + esc(m.role) + '</strong>). Changes take effect immediately.</p>' +
+          '<p class="sub">Customize capabilities for <strong>' + esc(staffDisplayName(m)) + '</strong> (role: <strong>' + esc(m.role) + '</strong>). Changes take effect immediately.</p>' +
           '<div class="card"><div class="fgrid">' + capCheckboxes(m, true) + '</div></div>' +
           '<p id="ecErr" class="err"></p>' +
           '<div class="mrow"><button class="btn ghost" data-close>Cancel</button><button class="btn" id="ecGo">Save →</button></div>')
@@ -370,7 +370,7 @@ export async function AdminView(app) {
       b.onclick = () => {
         const m = find(b.getAttribute('data-rename'))
         openModal('Rename staff',
-          '<p class="sub">Update the display name for <strong>' + esc(m.staff_name || m.email || m.user_id || '—') + '</strong>. ' +
+          '<p class="sub">Update the display name for <strong>' + esc(staffDisplayName(m)) + '</strong>. ' +
           'The name is what records, reports and printouts show instead of the sign-in email.</p>' +
           '<div class="fgrid">' +
           field('Staff name', '<input id="rnName" class="input" maxlength="80" value="' + esc(m.staff_name || '') + '" placeholder="e.g. Dr. A. Okafor" />').replace('class="fld"', 'class="fld full"') +
@@ -530,7 +530,7 @@ export async function AdminView(app) {
       (devs.length
         ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Device</th><th>User</th><th>Last seen</th><th>Status</th><th></th></tr></thead><tbody>' +
           devs.map((d) => '<tr><td><strong>' + esc(d.device_name || d.id) + '</strong><div class="mut">' + esc(d.platform || '') + ' · ' + esc(d.id) + '</div></td>' +
-            '<td class="mut">' + esc(staffNameForId(d.user_id) || staffLabel(d.user_name) || d.user_email || '—') + '</td>' +
+            '<td class="mut">' + esc(staffDisplayName({ user_id: d.user_id, user_name: d.user_name, email: d.user_email })) + '</td>' +
             '<td class="mut">' + esc(d.last_seen?.toDate ? d.last_seen.toDate().toLocaleString() : '—') + '</td>' +
             '<td>' + statusPill(d.status || 'active') + '</td>' +
             '<td>' + (canManageDevices
@@ -730,7 +730,7 @@ export async function AdminView(app) {
       listEl.innerHTML =
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>When</th><th>Action</th><th>By</th><th>Detail</th></tr></thead><tbody>' +
         shown.map((r) => '<tr><td class="mut">' + esc(fmtTs(r.occurredAt)) + '</td><td><strong>' + esc(r.action || '') + '</strong></td>' +
-          '<td class="mut">' + esc(r.actor_name || staffNameForId(r.actor_user_id) || staffLabel(r.actor_email) || r.actor_user_id || '') + '</td><td>' + esc(r.details || '') + '</td></tr>').join('') +
+          '<td class="mut">' + esc(r.actor_name || staffNameForId(r.actor_user_id) || staffDisplayName({ email: r.actor_email })) + '</td><td>' + esc(r.details || '') + '</td></tr>').join('') +
         '</tbody></table><div class="loadmore" data-loadmore="1"></div></div>'
       more.mount(listEl.querySelector('.tblwrap'))
     }
