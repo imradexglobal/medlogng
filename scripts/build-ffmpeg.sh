@@ -80,7 +80,8 @@ cd "$build_dir"
 make -j2 || fail 'FFmpeg compilation failed.'
 [[ -s ffmpeg.exe ]] || fail 'FFmpeg build completed without producing ffmpeg.exe.'
 ./ffmpeg.exe -version | head -n 1 | grep -Eq '^ffmpeg version 9\.0\.2([[:space:]]|$)' || fail 'Built executable did not report FFmpeg 9.0.2.'
-./ffmpeg.exe -L 2>&1 | grep -Eqi 'GNU Lesser General Public License|LGPL' || fail 'Built executable did not report an LGPL license.'
+license_text="$(./ffmpeg.exe -L 2>&1 | tr '\r\n' '  ' | tr -s '[:space:]' ' ')"
+printf '%s\n' "$license_text" | grep -Eqi 'GNU Lesser General Public License|LGPL' || fail 'Built executable did not report an LGPL license.'
 ./ffmpeg.exe -version 2>&1 | grep -Eq -- '--enable-(gpl|nonfree)([[:space:]]|$)' && fail 'Built executable unexpectedly enables GPL/nonfree components.'
 
 cp -f ffmpeg.exe "$staged_ffmpeg"

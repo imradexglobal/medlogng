@@ -162,7 +162,8 @@ foreach ($requiredArg in $requiredFfmpegArgs) {
 }
 $ffmpegLicenseOutput = & $FfmpegPath -L 2>&1
 $ffmpegLicenseExitCode = $LASTEXITCODE
-if ($ffmpegLicenseExitCode -ne 0 -or [string]($ffmpegLicenseOutput -join "`n") -notmatch 'GNU Lesser General Public License|LGPL') {
+$ffmpegLicenseText = ([string]($ffmpegLicenseOutput -join ' ')) -replace '\s+', ' '
+if ($ffmpegLicenseExitCode -ne 0 -or $ffmpegLicenseText -notmatch 'GNU Lesser General Public License|LGPL') {
   Stop-Build 'The staged FFmpeg executable does not report an LGPL license.'
 }
 if ((Get-Item $FfmpegPath).Length -lt 1MB) { Stop-Build 'The staged FFmpeg executable is unexpectedly small.' }
