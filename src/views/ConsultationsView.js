@@ -483,7 +483,7 @@ function visibleEncounters() {
     const openN = encounters.filter((e) => e.status !== 'closed').length
     if (cnt) cnt.textContent = openN + ' open'
     if (!tbl) return
-    const head = '<thead><tr><th>Patient</th><th>Waited</th><th>Status</th></th></tr></thead>'
+    const head = '<thead><tr><th>Patient</th><th>Dr</th><th>Waited</th><th>Status</th></tr></thead>'
     const shown = visibleEncounters()
     const rows = shown.map((e) => {
       const m = patientMeta(e)
@@ -491,12 +491,14 @@ function visibleEncounters() {
       const bedBadge = patientBed(e)
         ? '<span class="pill ok" title="Admitted to ' + esc(patientBed(e).wardName) + ' · ' + esc(patientBed(e).bedNumber) + '">🛏 </span>'
         : ''
+      const dr = m.clinician ? '<span class="mut" title="Attending: ' + esc(m.clinician) + '">' + esc(m.clinician.slice(0, 12)) + '</span>' : ''
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '" role="button" aria-label="Encounter for ' + esc(m.name) + ', status: ' + encLabel(e.status) + '" tabindex="0">' +
         '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
+        '<td>' + dr + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
         '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
     }).join('')
-    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="3" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
+    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
       r.onclick = () => {
@@ -522,6 +524,12 @@ function visibleEncounters() {
           r.focus()
         }
       })
+      // Add delete button to each row
+      const deleteBtn = document.createElement('button')
+      deleteBtn.className = 'btn ghost sm'
+      deleteBtn.textContent = '✕'
+      deleteBtn.title = 'Delete encounter'
+      r.querySelectorAll('td')[3].appendChild(deleteBtn)
     })
     ensureVisibleMeta()
   }
