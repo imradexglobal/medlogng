@@ -501,12 +501,18 @@ function visibleEncounters() {
     tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
     // Wire kebab menus for queue rows (matching PatientsView pattern)
-    wireKebabs(tbl, async (rowId, action) => {
+wireKebabs(tbl, async (rowId, action) => {
       const enc = encounters.find((e) => e.id === rowId)
       if (!enc) return
       if (action === 'delete') {
-        if (window.confirm('Delete this encounter?')) {
-          toast('Delete not yet implemented')
+        if (window.confirm('Delete this closed encounter?')) {
+          try {
+            await deleteEncounter(rowId)
+            toast('Encounter deleted')
+            renderQueue()
+          } catch (e) {
+            toast(friendlyWriteError(e))
+          }
         }
       }
     })
