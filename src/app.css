@@ -170,6 +170,10 @@
 .consult-grid { align-items: stretch; min-width: 0; }
 .enc-queue-actions { width: 38px; min-width: 38px; padding-right: 8px !important; text-align: right; }
 .enc-queue-actions .kebab-cell { display: flex; justify-content: flex-end; }
+#enc-tbl th:nth-child(2), #enc-tbl td:nth-child(2) { width: 54px; }
+#enc-tbl th:nth-child(3), #enc-tbl td:nth-child(3) { width: 82px; }
+#enc-tbl th:nth-child(4), #enc-tbl td:nth-child(4) { width: 82px; }
+#enc-tbl td:nth-child(4) .pill { white-space: nowrap; }
 .enc-ws { display: flex; flex-direction: column; min-height: 0; }
 .enc-ws .enc-ws-head { flex: none; margin: -16px -16px 0; padding: 12px 16px 10px; border-bottom: 1px solid var(--emr-line); border-radius: var(--r) var(--r) 0 0; background: #f2f7fc; }
 .enc-ws-head .card-head { margin-bottom: 4px; }
@@ -724,6 +728,14 @@ body.nav-open, body.modal-open { overflow: hidden; overscroll-behavior: none; }
   .tbl tbody tr td:first-child { background: #fff; }
   .tbl tr.clickable:hover td:first-child { background: #f0fdfa; }
   .tbl tr.clickable.sel td:first-child { box-shadow: inset 3px 0 0 var(--emr-teal), 1px 0 0 var(--emr-line); }
+
+  /* Keep the consultation queue's status and menu visible together on a
+     phone; other five-column clinical tables still use the shared pan layout. */
+  #enc-tbl { width: 100%; min-width: 0 !important; table-layout: fixed; }
+  #enc-tbl .enc-queue-clinician { display: none; }
+  #enc-tbl th:nth-child(3), #enc-tbl td:nth-child(3) { width: 74px; }
+  #enc-tbl th:nth-child(4), #enc-tbl td:nth-child(4) { width: 82px; }
+  #enc-tbl .enc-queue-actions { width: 38px; min-width: 38px; }
 
   /* Selection column for the patients registry */
   .tbl input.rowSel { width: 20px; height: 20px; margin: 0; }

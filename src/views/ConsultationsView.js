@@ -235,8 +235,8 @@ export async function ConsultationsView(app, params = {}) {
       '<div class="toolbar" style="margin:0 0 8px"><div style="position:relative;display:inline-block"><input class="input" id="qSearch" aria-label="Search encounters by patient, MRN or mobile" placeholder="Search patient, MRN or mobile…" style="max-width:240px"><button type="button" id="qClear" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--emr-muted);cursor:pointer;font-size:1.2rem;line-height:1;padding:0" hidden>✕</button></div>' +
       '<select class="input" id="qStatus" style="max-width:170px"><option value="open" selected>Open encounters</option><option value="closed">Closed</option><option value="all">All</option>' +
       STATUS_FLOW.map((s) => '<option value="' + s.key + '">' + esc(s.label) + '</option>').join('') + '</select></div>' +
-      '<div class="tblwrap"><table class="tbl" id="enc-tbl"><thead><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr></thead><tbody>' +
-      '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
+      '<div class="tblwrap"><table class="tbl" id="enc-tbl"><thead><tr><th>Patient</th><th>Dr</th><th>Waited</th><th>Status</th><th class="enc-queue-actions" aria-label="Actions"></th></tr></thead><tbody>' +
+      '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
       '</tbody></table><div class="loadmore" data-loadmore="1"></div></div></div>' +
       '<div class="card enc-ws">' +
       '<div class="enc-ws-head">' +
@@ -513,7 +513,7 @@ function visibleEncounters() {
     const openN = encounters.filter((e) => e.status !== 'closed').length
     if (cnt) cnt.textContent = openN + ' open'
     if (!tbl) return
-    const head = '<thead><tr><th>Patient</th><th>Dr</th><th>Waited</th><th>Status</th><th class="enc-queue-actions" aria-label="Actions"></th></tr></thead>'
+    const head = '<thead><tr><th>Patient</th><th class="enc-queue-clinician">Dr</th><th>Waited</th><th>Status</th><th class="enc-queue-actions" aria-label="Actions"></th></tr></thead>'
     const shown = visibleEncounters()
     const rows = shown.map((e) => {
       const m = patientMeta(e)
@@ -524,7 +524,7 @@ function visibleEncounters() {
       const dr = m.clinician ? '<span class="mut" title="Attending: ' + esc(m.clinician) + '">' + esc(m.clinician.slice(0, 12)) + '</span>' : ''
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '" role="button" aria-label="Encounter for ' + esc(m.name) + ', status: ' + encLabel(e.status) + '" tabindex="0">' +
         '<td><strong>' + esc(m.name) + '</strong></td>' +
-        '<td>' + dr + '</td>' +
+        '<td class="enc-queue-clinician">' + dr + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
         '<td>' + encBadge(e.status) + '</td>' +
         '<td class="enc-queue-actions">' + kebabCell({ rowId: e.id, items: [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] }) + '</td></tr>'
