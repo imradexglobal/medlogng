@@ -1,0 +1,6 @@
+libavcodec/x86/qpeldsp_init.o: libavcodec/x86/qpeldsp_init.c config.h \
+ libavutil/attributes.h libavutil/attributes_internal.h \
+ libavutil/attributes.h libavutil/cpu.h libavutil/version.h \
+ libavutil/macros.h libavutil/avconfig.h libavutil/mem_internal.h \
+ libavutil/x86/cpu.h libavutil/cpu_internal.h libavutil/cpu.h \
+ libavcodec/qpeldsp.h libavcodec/x86/fpel.h libavcodec/x86/qpel.h
