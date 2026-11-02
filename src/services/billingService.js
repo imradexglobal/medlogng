@@ -450,14 +450,56 @@ export async function recordPayment(input) {
     notes: input.notes || '',
   }
 
-  await runTransaction(db, async (t) => {
-    t.update(doc(db, INVOICES, iid), {
-      paid_kobo: newPaidKobo,
-      status: status,
-      updated_at: serverTimestamp(),
-    })
-    t.set(doc(db, PAYMENTS, paymentId), paymentData)
+  const paymentOp = { invoiceId: iid, paymentId, amountKobo, method: paymentData.method,
+    reference: paymentData.reference, notes: paymentData.notes, labOrderId,
+    preview: { patient_id: invoice.patientId || '', patient_name: invoice.patientName || '',
+      invoice_number: invoice.raw?.invoice_number || iid, total_kobo: totalKobo, paid_kobo: currentPaid } }
+  const queuedResult = () => ({ invoiceId: iid, paymentId, receiptNumber, receipt_number: receiptNumber,
+    reference: paymentData.reference, method: paymentData.method, amount: amountKobo / 100,
+    newOutstanding: Math.max(0, (totalKobo - newPaidKobo) / 100), status, pendingSync: true })
+  const queuePayment = async () => {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('billing_payment', paymentOp)
+    return queuedResult()
+  }
+
+  // Keep cash posting atomic across the invoice balance and the append-only
+  // payment ledger. If the route to Firestore is down, give the durable LAN
+  // outbox the operation; its host handler recomputes the balance under a
+  // transaction instead of replaying this device's stale total.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return await queuePayment()
+  const transaction = runTransaction(db, async (t) => {
+    const paymentRef = doc(db, PAYMENTS, paymentId)
+    const existing = await t.get(paymentRef)
+    if (existing.exists()) return
+    const currentInvoice = await t.get(doc(db, INVOICES, iid))
+    if (!currentInvoice.exists()) throw new Error('Invoice no longer exists.')
+    const current = currentInvoice.data() || {}
+    if (current.organization_id !== activeOrg) throw new Error('Invoice belongs to another hospital.')
+    const paidKobo = Math.max(0, Number(current.paid_kobo) || 0) + amountKobo
+    const invoiceTotal = Math.max(0, Number(current.total_kobo) || 0)
+    const nextStatus = paidKobo >= invoiceTotal ? 'paid' : (paidKobo > 0 ? 'part-paid' : 'unpaid')
+    t.update(doc(db, INVOICES, iid), { paid_kobo: paidKobo, status: nextStatus, updated_at: serverTimestamp() })
+    t.set(paymentRef, paymentData)
   })
+  let timer
+  let transactionTimedOut = false
+  transaction.catch((error) => {
+    if (transactionTimedOut) console.warn('[billing] payment transaction settled after the offline handoff:', error?.message || error)
+  })
+  let outcome
+  try {
+    outcome = await Promise.race([
+      transaction.then(() => 'saved'),
+      new Promise((resolve) => { timer = setTimeout(() => { transactionTimedOut = true; resolve('timeout') }, 2500) }),
+    ])
+  } catch (error) {
+    const code = String(error?.code || '').toLowerCase()
+    if (['unavailable', 'deadline-exceeded', 'network-request-failed', 'failed-precondition'].includes(code) ||
+        /network|offline|timed? ?out|unavailable/i.test(String(error?.message || ''))) return await queuePayment()
+    throw error
+  } finally { clearTimeout(timer) }
+  if (outcome === 'timeout') return await queuePayment()
 
   // Mirror the payment onto the lab order so the lab bench — which cannot
   // read payments/invoices — sees the result-entry gate open. Best-effort:
@@ -488,6 +530,34 @@ export async function recordPayment(input) {
     newOutstanding: Math.max(0, outstandingKobo / 100),
     status: status,
   }
+}
+
+// Browser-cloud fallback for the durable payment outbox when no LAN host is
+// reachable. It uses the same stable payment ID and recalculates the balance
+// from the invoice inside Firestore's transaction.
+export async function applyQueuedPayment(args) {
+  const invoiceRef = doc(db, INVOICES, args.invoiceId)
+  const paymentRef = doc(db, PAYMENTS, args.paymentId)
+  return runTransaction(db, async (t) => {
+    const paymentSnap = await t.get(paymentRef)
+    if (paymentSnap.exists()) return { deduped: true }
+    const invoiceSnap = await t.get(invoiceRef)
+    if (!invoiceSnap.exists()) throw new Error('Invoice no longer exists.')
+    const invoice = invoiceSnap.data() || {}
+    const paidKobo = Math.max(0, Number(invoice.paid_kobo) || 0) + args.amountKobo
+    const totalKobo = Math.max(0, Number(invoice.total_kobo) || 0)
+    const status = paidKobo >= totalKobo ? 'paid' : (paidKobo > 0 ? 'part-paid' : 'unpaid')
+    t.update(invoiceRef, { paid_kobo: paidKobo, status, updated_at: serverTimestamp() })
+    t.set(paymentRef, {
+      invoice_id: args.invoiceId, invoice_number: args.invoiceId,
+      lab_order_id: args.labOrderId || '', patient_id: invoice.patient_id || '', patient_name: invoice.patient_name || '',
+      amount_kobo: args.amountKobo, amount_naira: args.amountKobo / 100, method: args.method || 'Cash',
+      reference: args.reference || '', receipt_number: 'REC-' + args.paymentId.slice(0, 8).toUpperCase(),
+      paid_by: currentStaffName(), paid_at: serverTimestamp(), organization_id: invoice.organization_id,
+      notes: args.notes || '',
+    })
+    return { paidKobo, status }
+  })
 }
 
 // ---- list payments for an org (unbounded for reporting) --------------------

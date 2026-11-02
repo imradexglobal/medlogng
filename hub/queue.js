@@ -111,6 +111,7 @@ export function createQueue(file, { encode = (text) => text, decode = null } = {
         orgId: op.orgId,
         actor: cleanActor(op.actor),
         authVersion: Number(op.authVersion) || 0,
+        authorizedCapability: typeof op.authorizedCapability === 'string' ? op.authorizedCapability.slice(0, 80) : '',
         createdAt: op.createdAt || '',
         status: 'queued',
         attempts: 0,
@@ -203,6 +204,17 @@ export function createQueue(file, { encode = (text) => text, decode = null } = {
 
     get(key) {
       return state.ops[key] ? { ...state.ops[key] } : null
+    },
+
+    pendingForOrg(orgId, kind = '') {
+      return Object.values(state.ops)
+        .filter((op) => op.orgId === orgId && (!kind || op.kind === kind) && ['queued', 'sending'].includes(op.status))
+        .map((op) => ({ ...op }))
+    },
+
+    hasPendingClaim(claimId) {
+      return Object.values(state.ops).some((op) => op.kind === 'admission_create' &&
+        ['queued', 'sending'].includes(op.status) && op.args?.claimId === claimId)
     },
 
     prune,

@@ -33,7 +33,8 @@ export function speechProofPayload({ method, url, requestId = '', contentType = 
 function snapshotFor({ identity, authorization, orgId, publicKey, deviceId }) {
   const membership = authorization.membership || null
   const permissions = authorization.superAdmin ? ['*']
-    : (Array.isArray(membership?.capabilities) ? membership.capabilities.slice(0, 500).map(String) : [])
+    : (Array.isArray(membership?.capabilities) && membership.capabilities.length
+      ? membership.capabilities.slice(0, 500).map(String) : ['read'])
   return {
     deviceId,
     uid: identity.uid,
@@ -94,8 +95,7 @@ export function createSpeechSessions({ load = async () => '[]', save = async () 
   async function register({ identity, authorization, orgId, publicKey }) {
     if (!ready) throw Object.assign(new Error('Speech local-session service is not ready.'), { status: 503, expose: true })
     if (!identity?.uid || !orgId || authorization?.uid !== identity.uid || authorization?.orgId !== orgId ||
-        (!authorization?.superAdmin && authorization?.membership?.status !== 'active') ||
-        (!authorization?.superAdmin && !authorization?.membership?.capabilities?.length)) {
+        (!authorization?.superAdmin && authorization?.membership?.status !== 'active')) {
       throw Object.assign(new Error('An online active hospital membership is required to register this device.'), { status: 403, expose: true })
     }
     const normalizedKey = canonicalPublicKey(publicKey)
@@ -157,8 +157,7 @@ export function createSpeechSessions({ load = async () => '[]', save = async () 
     const current = sessions.get(deviceId)
     if (!current?.active) return null
     if (identity.uid !== current.uid || authorization?.uid !== current.uid || authorization?.orgId !== current.orgId ||
-        (!authorization?.superAdmin && authorization?.membership?.status !== 'active') ||
-        (!authorization?.superAdmin && !authorization?.membership?.capabilities?.length)) {
+        (!authorization?.superAdmin && authorization?.membership?.status !== 'active')) {
       await invalidateUserOrg(current.uid, current.orgId)
       return null
     }

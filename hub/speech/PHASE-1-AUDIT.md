@@ -79,3 +79,59 @@ The installer/build attempt and this report update did not modify Phase 2–5 bu
 - `release/MediLogHost-Setup-1.2.0.exe` was not changed. `release/win-unpacked` is an ignored current app staging build with verified speech assets; the 32-byte NSIS archive is not a usable installer.
 
 Offline speech session business logic was implemented and the approved policy is no longer an open decision. External deployment tests, clean installer, target performance and clinical evaluation mean **Phase 1 remains PARTIALLY COMPLETE**.
+
+## Phase 1 completion follow-up (2026-11-02)
+
+The follow-up security review found and fixed several release issues: Host enrollment now uses HTTPS and device binding; browser microphone use is refused on non-HTTPS origins; the Electron Host window prefers validated local HTTPS; signed device proofs are bound to the current Host process lifetime and replay storage is bounded; verified online 401/403 responses invalidate cached offline sessions; failed audit persistence cancels enrollment; and explicit sign-out clears local keys and revokes both speech and device sessions. The approved offline rule remains unchanged: only an online verified `encounter.edit` grant is cached, and it has no arbitrary expiration. Offline signed requests remain tied to the clinician, device key, consultation and Host audit timestamp. Existing authentication, authorization and job ownership checks remain enforced.
+
+A packaging review also found that the previous Host file glob included `hub/keys/service-account.json`. Host packaging now excludes Firebase credentials and environment files. The pre-existing 1.2.0 installer was confirmed to contain `resources/app.asar.unpacked/hub/keys/service-account.json`; it must not be distributed. Host uninstall configuration now preserves Electron user data, which contains operational Host state.
+
+| Follow-up check | Result |
+|---|---|
+| `npm run test:speech` | PASS: worker protocol/supervision, queue persistence/ownership, offline session binding/grant/signature/replay/restart/sign-out behavior and asset tamper rejection. |
+| `npm run test:speech:listeners` (permitted loopback) | PASS: HTTPS enrollment, offline bootstrap, signed transcription, duplicate protection, revocation, HTTP rejection. |
+| `npm run test:speech:real` | PASS: real Windows Whisper/model startup, pinned audio, malformed input rejection, crash restart and timeout recovery. |
+| `npm run build` | PASS, Vite production bundle generated; existing mixed static/dynamic import warnings remain. |
+| `npm run test:hub` | SKIPPED because Firestore emulator was not reachable at `127.0.0.1:8080`. |
+| `npm test` | FAIL before service suite: existing `scripts/smoke.mjs:633` assertion expects a searchable-select filter box. This is outside the speech/offline-session changes and was not modified. |
+| `npm run test:services` | FAIL in existing pharmacy service tests: 21 passed, one failed (`reverseDispenseIssue is refused without the prescription.dispense capability`). Test harness also logs missing `localStorage`. No unrelated EMR code was changed. |
+| Live Firebase credential check | BLOCKED: configured Admin credential returns `app/invalid-credential`; no live identity/membership/permission revocation test could be run. |
+| Real browser HTTPS/microphone and client trust | NOT RUN: the user stopped the Computer Use session with Escape. No browser UI automation was resumed. Listener tests use a temporary trusted CA, but this does not validate browser/Windows certificate deployment. |
+| Best-available 8-request worker load | PASS as a limited surrogate: 8 concurrent submissions to one serialized real worker all succeeded; startup 0.66 s; total 31.016 s (3.877 s average/request); Host system RAM 8,386,805,760 bytes. This is not 6–10 independent network clients, nor 4 GB hardware; only 337,686,528 bytes were free at measurement time. |
+| Fresh Host NSIS installer | BLOCKED: Electron app staging succeeded, but NSIS cannot finish. The cached `makensis.exe` fails to launch with Windows `Illegal System DLL Relocation`; build attempts left only a 32-byte `.nsis.7z` placeholder. Network-based Electron download also failed DNS. No fresh installer is claimed. |
+| Installer content / install / upgrade / uninstall | NOT COMPLETED: stage content has required speech assets and omits `hub/keys/service-account.json`; installer archive cannot be verified as a valid package and no installation lifecycle test is claimed. The 1.2.0 installer is not a valid substitute because it contains the credential file. |
+
+**Completion decision:** Phase 1 remains **PARTIALLY COMPLETE**, not production-ready. Session implementation and its automated/local integration coverage are complete, but a safe fresh installer, clean installation lifecycle, real browser/client certificate tests, live Firebase revalidation, 4 GB multi-client performance, Firestore-emulator integration, the existing failing full suites and clinical-corpus evaluation remain outstanding. Phase 2–5 remain planning only.
+
+## Continued completion work (2026-11-02)
+
+### Fresh Host installer
+
+The cached NSIS compiler was not corrupt: running its `makensis.exe /VERSION` in the restricted process context reproduced the Windows relocation error, while the same compiler in the permitted Windows process environment returned `v3.04`. That isolated the failure to process isolation, not to the NSIS installation or Host project configuration. Using the local Electron distribution and the permitted compiler environment produced `release/phase1/MediLogHost-Setup-1.2.1.exe` (140,656,512 bytes). The previous `release/MediLogHost-Setup-1.2.0.exe` was not overwritten.
+
+7-Zip read and tested the new self-extracting NSIS installer successfully (the expected appended NSIS stub is reported as trailing data by the archive reader). The payload includes the Host executable, worker, model, FFmpeg, manifest and license files. Extracted installer copies of `medilog-whisper-worker.exe`, `ggml-tiny.en-q5_1.bin`, `ffmpeg.exe`, and `speech-assets.json` had SHA-256 values identical to `vendor/speech`. A path scan found no `service-account.json`, `.env`, `.pem`, `.key`, `id_rsa`, or private-key paths. The installer is unsigned because this build has `sign: false`; it is not yet a signed production distribution.
+
+### Installation lifecycle
+
+- **Fresh install:** the 1.2.1 wizard completed an interactive per-user install to a new directory under `.tmp-host-installtest` on this development PC. The wizard displayed 1.2.1 and completed extraction. This is not a clean VM/machine test.
+- **Host startup:** launching the installed 1.2.1 executable opened the first-time Host setup window. The setup correctly required the hospital service-account JSON and an HTTPS PFX. Neither was supplied, and no firewall rule was changed.
+- **Uninstall and data preservation:** the isolated 1.2.1 uninstall returned exit code 0 and removed the application executable. A synthetic marker placed in the temporary user-data directory remained after uninstall.
+- **Upgrade:** the 1.2.1 wizard recognized the isolated 1.2.0 installation and offered an in-place reinstall/upgrade. It then reported that MediLog NG Host could not be closed. The process could not be identified through the available process listing; a silent retry returned exit code 2 and left the isolated installation at 1.2.0. The user stopped Computer Use with Escape while the interactive retry was in progress, so I issued no further desktop controls. In-place upgrade is therefore **not verified**.
+- **Restart:** a second full launch/shutdown/restart cycle was not completed.
+
+The old installer was exercised only inside the temporary test tree. The original 1.2.0 installer remains unchanged and unsuitable for distribution. The temporary test tree became partly locked (`app.asar` could not be removed after the interrupted upgrade); a filename scan found no extracted service-account, `.env`, private-key or certificate files in it. The original 1.2.0 installer remains preserved at `release/MediLogHost-Setup-1.2.0.exe`.
+
+### Firebase emulator and existing test failures
+
+A portable Microsoft OpenJDK 21 was downloaded into the workspace, checked against Microsoft's published SHA-256, and used only for emulator tests. Firebase CLI downloaded Firestore Emulator 1.22.0 and started it with demo project `demo-medlogng`; no real Firebase project or credentials were used.
+
+- `firebase emulators:exec --only firestore --project demo-medlogng "node scripts/test/hub.smoke.mjs"` — **7 passed, 9 failed**. Six unauthenticated schema-validation cases expected 400 but got 401; the test's own comment says auth-required endpoints return 401 without a minted token. Three handoff cases failed because the fixture created a patient-organization link but no matching patient document. No Phase 2/3 Hub code was changed.
+- `firebase emulators:exec --only firestore --project demo-medlogng "node scripts/test/firestore.rules.test.mjs"` — **failed before running** with `SyntaxError: Illegal return statement` at line 34 of the existing test file. The Firestore rules test was not modified.
+- `npm test` remains **failed** at `scripts/smoke.mjs:633`: the assertion searches for `data-filter-for`, which the existing select-filter implementation does not contain. Neither the smoke test nor its EMR components were changed in this follow-up.
+- `npm run test:services` remains **failed** at the pharmacy test that expects doctors to lack `prescription.dispense`; the current committed doctor role includes that capability. The service, role and test files were not changed in this follow-up. The harness also logs that `localStorage` is unavailable in Node.
+
+These are pre-existing test/fixture inconsistencies outside the Phase 1 speech/Host scope; they were recorded without changing unrelated EMR behavior. No Phase 2–5 implementation was started.
+
+### Updated completion decision
+
+The fresh 1.2.1 installer is now generated and its payload verified, and a fresh install plus uninstall/data-preservation test passed on the development PC. Phase 1 still remains **PARTIALLY COMPLETE**: the 1.2.0-to-1.2.1 upgrade and restart cycle are unverified; installer signing is absent; real browser/microphone/client trust and live Firebase permission revalidation remain unverified; 4 GB/6–10-client target hardware is unavailable; emulator integration suites have existing failures; and clinical corpus results remain pending. The Nigerian English/medical evaluation protocol is documented in `ACCURACY-EVALUATION.md`; it is a prepared protocol, not accuracy evidence.

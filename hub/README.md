@@ -52,13 +52,19 @@ Windows secure storage. The standalone `npm run hub` development server has no
 OS-backed encryption provider; it logs a warning and writes the queue as
 plaintext, so do not use that mode with real patient data.
 
-**Offline scope today:** the Host queue accepts only `rx_mirror` and
-`lab_snapshot` handoffs. Firestore's browser cache keeps previously loaded
-records and queues supported writes on that individual device, but those
-records are not a shared LAN database. Admissions, patient registration,
-appointments, billing, inventory, and most other workflows do not become
-available to other ward devices while the internet is down. Full shared
-offline operation needs a broader Host data store and sync path.
+**Offline scope:** the Host caches successful, hospital-scoped Firestore
+queries and individual hospital-owned documents, encrypted on disk, and can
+serve those exact saved results to another authorized LAN device. A result
+must have been loaded while the Host could read Firestore first. Its durable
+queue accepts prescription and lab handoffs, admission creation, and a
+capability-scoped set of idempotent document writes (patient registration,
+appointments, encounters, observations, selected lab/imaging records and
+catalogues). Queued creates and edits are overlaid on matching shared queries.
+Firestore still keeps each device's own persistent local write queue as a
+fallback. Transaction-sensitive inventory, medication administration,
+financial posting, admission transfer/discharge, files and some administrative
+workflows still need dedicated shared handlers and conflict-safe offline
+semantics; they are not yet fully shared during an internet outage.
 
 **Old installs** that still have `HUB_TOKEN` in `.env` will see a startup
 warning; remove the `HUB_TOKEN` line and any `VITE_HUB_TOKEN` from the
@@ -113,6 +119,8 @@ includes clear steps to diagnose and fix the network configuration.
 | POST | `/device/session/offline` | Signed device key | Check the saved Host session |
 | POST | `/device/session/revalidate` | Signed key + Bearer | Refresh membership and capabilities |
 | POST | `/device/session/revoke` | Signed device key | Revoke the saved Host session |
+| POST | `/device/data/query` | Bearer or signed device key over HTTPS | Read a live or previously cached org-scoped query |
+| POST | `/device/data/document` | Bearer or signed device key over HTTPS | Read a live or previously cached hospital-owned document |
 | POST | `/outbox` | Bearer or signed device key | `{ ops: [...] }` → authorised, durably queued |
 
 No wildcard CORS. The hub's own origin (the address the page was served

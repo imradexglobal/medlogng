@@ -98,11 +98,30 @@ export async function administerDose(input) {
   if (!Number.isFinite(qty) || qty <= 0) throw new Error('Dose quantity must be greater than zero.')
   const route = isValidRoute(input?.route) ? String(input.route).toLowerCase() : 'oral'
   const now = serverTimestamp()
+  const doseRef = doc(collection(db, DOSES))
+  const opArgs = { requestId: input.requestId, doseId: doseRef.id,
+    lineId: input.lineId || '', qty, route, site: input?.site || '', note: input?.note || '' }
 
-  return runTransaction(db, async (tx) => {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return queueDoseFromCache(opArgs, { activeOrg, user })
+  }
+
+  const transaction = runTransaction(db, async (tx) => {
     const reqRef = doc(db, REQUESTS, input.requestId)
     const reqSnap = await tx.get(reqRef)
+    const existingDose = await tx.get(doseRef)
     if (!reqSnap.exists()) throw new Error('This prescription no longer exists.')
+    if (existingDose.exists()) {
+      const prior = existingDose.data() || {}
+      if (prior.medication_request_id === input.requestId && Number(prior.qty) === qty && prior.organization_id === activeOrg) {
+        const currentLines = toRequestItems(reqSnap.data() || {})
+        const currentLine = currentLines.find((item) => item.line_id === prior.line_id)
+        return { administrationId: doseRef.id, event: prior,
+          remaining: currentLine ? lineRemainingToGive(currentLine) : 0,
+          givenTotal: currentLine ? lineGiven(currentLine) : 0, deduped: true }
+      }
+      throw new Error('This dose ID is already used by another medication event.')
+    }
     const request = { id: reqSnap.id, ...reqSnap.data() }
 
     const lines = toRequestItems(reqSnap.data())
@@ -134,7 +153,6 @@ export async function administerDose(input) {
     const { items } = applyAdministration(lines, { [line.line_id]: qty })
     tx.update(reqRef, { items, updated_at: now })
 
-    const doseRef = doc(collection(db, DOSES))
     tx.set(doseRef, event)
 
     try {
@@ -149,6 +167,68 @@ export async function administerDose(input) {
 
     const remaining = lineRemainingToGive(items.find((l) => l.line_id === line.line_id))
     return { administrationId: doseRef.id, event, remaining, givenTotal: lineGiven(items.find((l) => l.line_id === line.line_id)) }
+  })
+  let timer
+  let timedOut = false
+  transaction.catch((error) => { if (timedOut) console.warn('[medication-admin] dose transaction settled after offline handoff:', error?.message || error) })
+  try {
+    const result = await Promise.race([transaction, new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(null) }, 2500) })])
+    if (result === null) return queueDoseFromCache(opArgs, { activeOrg, user })
+    return result
+  } catch (error) {
+    const code = String(error?.code || '').toLowerCase()
+    if (!['unavailable', 'deadline-exceeded', 'network-request-failed'].includes(code) && !/offline|network|timed? ?out/i.test(String(error?.message || ''))) throw error
+    return queueDoseFromCache(opArgs, { activeOrg, user })
+  } finally { clearTimeout(timer) }
+}
+
+async function queueDoseFromCache(args, { activeOrg, user }) {
+  const requestSnap = await getDoc(doc(db, REQUESTS, args.requestId))
+  if (!requestSnap?.exists()) throw new Error('This prescription is not available in the offline hospital copy.')
+  const requestData = requestSnap.data() || {}
+  if (requestData.organization_id !== activeOrg) throw new Error('This prescription belongs to another hospital.')
+  const lines = toRequestItems(requestData)
+  const line = args.lineId ? lines.find((item) => item.line_id === args.lineId) : (lines.length === 1 ? lines[0] : null)
+  if (!line) throw new Error('Which prescription line was given? Reopen the prescription and try again.')
+  if (exceedsOrder(line, args.qty)) throw new Error('Dose exceeds the remaining prescribed quantity.')
+  const { items } = applyAdministration(lines, { [line.line_id]: args.qty })
+  const event = buildDoseEvent({ request: { id: requestSnap.id, ...requestData }, line, qty: args.qty,
+    route: args.route, site: args.site, note: args.note,
+    user: { uid: user?.uid, displayName: currentStaffName() }, activeOrg, now: Date.now() })
+  const queuedArgs = { ...args, lineId: line.line_id, preview: {
+    patient_id: requestData.patient_id || '', patient_name: requestData.patient_name || '',
+    encounter_id: requestData.encounter_id || '', admission_session_id: requestData.admission_session_id || '',
+    medicine: line.medicine || '', unit: line.unit || '', dosage: line.dosage || '', quantity: line.quantity || 0,
+  } }
+  const { enqueue } = await import('./clinicalOutbox.js')
+  await enqueue('medication_administer', queuedArgs)
+  const updatedLine = items.find((item) => item.line_id === line.line_id)
+  return { administrationId: args.doseId, event, remaining: lineRemainingToGive(updatedLine),
+    givenTotal: lineGiven(updatedLine), pendingSync: true }
+}
+
+// Browser-cloud fallback for the LAN outbox. The host path revalidates and
+// applies this as a transaction; the browser uses the same stable event ID.
+export async function applyQueuedAdministration(args) {
+  const requestRef = doc(db, REQUESTS, args.requestId)
+  const doseRef = doc(db, DOSES, args.doseId)
+  return runTransaction(db, async (tx) => {
+    const doseSnap = await tx.get(doseRef)
+    const requestSnap = await tx.get(requestRef)
+    if (doseSnap.exists()) return { administrationId: args.doseId, deduped: true }
+    if (!requestSnap.exists()) throw new Error('The prescription no longer exists.')
+    const requestData = requestSnap.data() || {}
+    const lines = toRequestItems(requestData)
+    const line = lines.find((item) => item.line_id === args.lineId)
+    if (!line || exceedsOrder(line, args.qty)) throw new Error('Dose exceeds the remaining prescribed quantity or the line no longer exists.')
+    const { items } = applyAdministration(lines, { [line.line_id]: args.qty })
+    const event = buildDoseEvent({ request: { id: requestSnap.id, ...requestData }, line, qty: args.qty,
+      route: args.route, site: args.site, note: args.note,
+      user: { uid: authStore.getState().user?.uid, displayName: currentStaffName() },
+      activeOrg: requestData.organization_id, now: serverTimestamp() })
+    tx.update(requestRef, { items, updated_at: serverTimestamp() })
+    tx.set(doseRef, event)
+    return { administrationId: args.doseId }
   })
 }
 

@@ -154,5 +154,52 @@ test('validateOp returns valid op when all fields are correct', () => {
   assert.equal(result.op.clientOpKey, 'v1:rx_mirror:test-1')
 })
 
+test('validateOp accepts a scoped admission handoff and rejects a mismatched bed claim', () => {
+  const admission = {
+    patient_id: 'patient-1', patient_name: 'Test Patient', organization_id: 'test-org',
+    encounter_id: '', ward_name: 'Medical Ward', bed_number: '1', admission_type: '',
+    admission_reason: '', attending_provider: '', status: 'active',
+  }
+  const valid = validateOp({ clientOpKey: 'admission-key-1', kind: 'admission_create', orgId: 'test-org',
+    args: { admissionId: 'admission-1', claimId: 'test-org_medical ward_1', admission } }, 0)
+  assert.ok(valid.op, valid.error || 'expected valid admission op')
+  const invalid = validateOp({ clientOpKey: 'admission-key-2', kind: 'admission_create', orgId: 'test-org',
+    args: { admissionId: 'admission-2', claimId: 'test-org_medical ward_2', admission } }, 0)
+  assert.match(invalid.error || '', /claimId/)
+})
+
+test('validateOp permits an atomic patient plus hospital-link handoff and blocks unsafe collections', () => {
+  const base = { clientOpKey: 'patient-create-1', kind: 'document_mutation', orgId: 'test-org' }
+  const valid = validateOp({ ...base, args: { mutations: [
+    { collection: 'patients', id: 'patient-1', action: 'create', data: { organization_id: 'test-org', full_name: 'Test Patient' } },
+    { collection: 'organization_patients', id: 'test-org_patient-1', action: 'create', data: { organization_id: 'test-org', patient_id: 'patient-1', full_name: 'Test Patient' } },
+  ] } }, 0)
+  assert.ok(valid.op, valid.error || 'expected valid patient write batch')
+  const unsafe = validateOp({ ...base, args: { mutations: [
+    { collection: 'stock_lots', id: 'lot-1', action: 'update', data: { stock: 999 } },
+  ] } }, 0)
+  assert.match(unsafe.error || '', /not available/)
+  const mismatched = validateOp({ ...base, args: { mutations: [
+    { collection: 'patients', id: 'patient-2', action: 'create', data: { organization_id: 'other-hospital' } },
+  ] } }, 0)
+  assert.match(mismatched.error || '', /selected hospital/)
+})
+
+test('validateOp validates discharge and transfer handoffs with hospital bed keys', () => {
+  const discharge = validateOp({ clientOpKey: 'admission-discharge-1', kind: 'admission_discharge', orgId: 'test-org',
+    args: { admissionId: 'admission-1', claimId: 'test-org_medical_1', legacyClaimId: '',
+      dischargeData: { status: 'discharged', discharge_date: 1790000000000, discharge_type: 'discharged', discharge_reason: 'Home', discharge_notes: '' } } }, 0)
+  assert.ok(discharge.op, discharge.error || 'expected valid discharge handoff')
+  const transfer = validateOp({ clientOpKey: 'admission-transfer-1', kind: 'admission_transfer', orgId: 'test-org',
+    args: { admissionId: 'admission-1', oldClaimId: 'test-org_medical_1', newClaimId: 'test-org_surgical_2', legacyOldClaimId: '',
+      wardName: 'Surgical', bedNumber: '2', reason: 'Clinical need', transferAt: 1790000000000,
+      transferHistory: [{ at: 1790000000000, from_ward: 'Medical', from_bed: '1', to_ward: 'Surgical', to_bed: '2', reason: 'Clinical need', staff_id: 'staff-1', staff_name: 'Staff' }],
+      newClaim: { organization_id: 'test-org', ward_name: 'Surgical', bed_number: '2', admission_id: 'admission-1', patient_id: 'patient-1' } } }, 0)
+  assert.ok(transfer.op, transfer.error || 'expected valid transfer handoff')
+  const invalid = validateOp({ clientOpKey: 'admission-transfer-2', kind: 'admission_transfer', orgId: 'test-org',
+    args: { ...transfer.op.args, newClaimId: 'other-org_surgical_2' } }, 0)
+  assert.match(invalid.error || '', /bed claim/)
+})
+
 console.log('\nhub.auth tests: ' + passed.length + ' passed, ' + failed.length + ' failed')
 process.exit(failed.length ? 1 : 0)

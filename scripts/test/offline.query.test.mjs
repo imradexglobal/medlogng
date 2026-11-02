@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { initializeApp } from 'firebase/app'
 import { getFirestore, collection, query, where, orderBy, limit, Timestamp } from 'firebase/firestore'
 import { serializeFirestoreQuery } from '../../src/lib/firestoreQuery.js'
-import { applyQuerySpec, validateQuerySpec } from '../../hub/querySpec.js'
+import { applyQuerySpec, requiredCapabilitiesForRead, validateQuerySpec } from '../../hub/querySpec.js'
 import { createOfflineQueryCache } from '../../hub/offlineQueryCache.js'
 
 const app = initializeApp({ projectId: 'offline-query-test' }, 'offline-query-test')
@@ -36,6 +36,14 @@ assert.throws(() => validateQuerySpec({ ...serialized, filters: [] }, { orgId: '
 assert.throws(() => validateQuerySpec({ ...serialized, collection: 'organization_memberships', filters: [
   { field: 'organization_id', op: '==', value: 'hospital-1' },
 ] }, { orgId: 'hospital-1', uid: 'staff-1' }), /signed-in user/)
+assert.deepEqual(requiredCapabilitiesForRead('invoices', { uid: 'cashier' }), ['billing.invoice', 'billing.payment'])
+assert.deepEqual(requiredCapabilitiesForRead('devices', { uid: 'staff-1' }, [
+  { field: 'user_id', op: '==', value: 'staff-1' },
+]), [], 'own device reads remain available without admin permissions')
+assert.deepEqual(requiredCapabilitiesForRead('devices', { uid: 'staff-1' }), ['admin.devices.manage', 'admin.roles.manage'])
+assert.deepEqual(requiredCapabilitiesForRead('staff_invites', { email: 'a@example.test' }, [
+  { field: 'email', op: '==', value: 'a@example.test' },
+]), [], 'invitees may read their own invite')
 
 const persisted = { index: [], rows: new Map() }
 const makeCache = () => createOfflineQueryCache({

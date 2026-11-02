@@ -46,7 +46,72 @@ const HANDLERS = {
     const { addLabOrder } = await import('./consultationService.js')
     return addLabOrder(args.encounterId, args.labOrder)
   },
+  // The browser already made this admission optimistically. Replaying its
+  // stable IDs is safe and lets the ordinary Firestore cache finish syncing.
+  admission_create: async (args) => {
+    const { db, doc, writeBatch, serverTimestamp } = await import('../firebase.js')
+    const batch = writeBatch(db)
+    batch.set(doc(db, 'admissions', args.admissionId), {
+      ...args.admission,
+      created_at: serverTimestamp(), updated_at: serverTimestamp(),
+    })
+    batch.set(doc(db, 'bed_claims', args.claimId), {
+      organization_id: args.admission.organization_id,
+      ward_name: args.admission.ward_name,
+      bed_number: args.admission.bed_number,
+      admission_id: args.admissionId,
+      patient_id: args.admission.patient_id,
+      created_at: serverTimestamp(),
+    })
+    await batch.commit()
+  },
+  document_mutation: async (args) => {
+    const { applyQueuedMutations } = await import('../firebase.js')
+    await applyQueuedMutations(args.mutations)
+  },
+  admission_discharge: async (args) => {
+    const { db, doc, writeBatch, serverTimestamp, auth } = await import('../firebase.js')
+    const actor = auth.currentUser
+    const batch = writeBatch(db)
+    batch.update(doc(db, 'admissions', args.admissionId), {
+      ...args.dischargeData,
+      discharged_by: actor?.uid || null,
+      updated_at: serverTimestamp(),
+    })
+    for (const id of new Set([args.claimId, args.legacyClaimId].filter(Boolean))) batch.delete(doc(db, 'bed_claims', id))
+    await batch.commit()
+  },
+  admission_transfer: async (args) => {
+    const { db, doc, writeBatch, serverTimestamp } = await import('../firebase.js')
+    const batch = writeBatch(db)
+    batch.update(doc(db, 'admissions', args.admissionId), {
+      ward_name: args.wardName,
+      bed_number: args.bedNumber,
+      transfer_history: args.transferHistory,
+      updated_at: serverTimestamp(),
+    })
+    batch.set(doc(db, 'bed_claims', args.newClaimId), args.newClaim)
+    if (args.oldClaimId !== args.newClaimId) batch.delete(doc(db, 'bed_claims', args.oldClaimId))
+    if (args.legacyOldClaimId && args.legacyOldClaimId !== args.oldClaimId && args.legacyOldClaimId !== args.newClaimId) {
+      batch.delete(doc(db, 'bed_claims', args.legacyOldClaimId))
+    }
+    await batch.commit()
+  },
+  billing_payment: async (args) => {
+    const { applyQueuedPayment } = await import('./billingService.js')
+    return applyQueuedPayment(args)
+  },
+  medication_administer: async (args) => {
+    const { applyQueuedAdministration } = await import('./medicationAdminService.js')
+    return applyQueuedAdministration(args)
+  },
+  stock_receive: async (args) => {
+    const { applyQueuedStockReceive } = await import('./pharmacyService.js')
+    return applyQueuedStockReceive(args)
+  },
 }
+
+const HUB_FIRST_KINDS = new Set(['admission_create', 'admission_discharge', 'admission_transfer', 'billing_payment', 'medication_administer', 'stock_receive', 'document_mutation'])
 
 export const OUTBOX_KINDS = Object.keys(HANDLERS)
 
@@ -423,6 +488,20 @@ export async function drain() {
       const take = batch.slice(0, BATCH_LIMIT)
       const back = batch.slice(BATCH_LIMIT)
       const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+
+      // These handoffs were created because Firestore did not acknowledge the
+      // originating write. When a LAN host is configured, let its durable
+      // queue own them first; retrying the SDK promise here could hang on a
+      // half-open internet route and prevent the shared outbox from syncing.
+      if (!offline && !preferHub && take.some((row) => HUB_FIRST_KINDS.has(row.kind))) {
+        const { url } = await hubConfig()
+        if (url) {
+          for (const r of back) await putRow({ ...r, status: 'queued' })
+          if (await pushToHub(take)) { delivered += take.length; break }
+          for (const r of take) await putRow({ ...r, status: 'queued' })
+          break
+        }
+      }
 
       if (offline || preferHub) {
         // Tail first: it was claimed out of IndexedDB, so it must go back

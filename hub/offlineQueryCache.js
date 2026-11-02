@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 
 const MAX_ENTRIES = 750
 const MAX_ENTRY_BYTES = 4 * 1024 * 1024
+const MAX_TOTAL_BYTES = 128 * 1024 * 1024
 
 function cacheId(query) {
   return createHash('sha256').update(JSON.stringify(query)).digest('hex')
@@ -30,13 +31,15 @@ export function createOfflineQueryCache({ loadIndex = async () => [], saveIndex 
     }
     if (!Array.isArray(index)) throw new Error('Offline query index is malformed.')
     for (const row of index) {
-      if (/^[a-f0-9]{64}$/.test(String(row?.id || '')) && Number.isFinite(row.at)) entries.set(row.id, row.at)
+      if (/^[a-f0-9]{64}$/.test(String(row?.id || '')) && Number.isFinite(row.at)) {
+        entries.set(row.id, { at: row.at, size: Math.max(0, Number(row.size) || 0) })
+      }
     }
     ready = true
   }
 
   function persistIndex() {
-    const value = JSON.stringify([...entries].map(([id, at]) => ({ id, at })))
+    const value = JSON.stringify([...entries].map(([id, row]) => ({ id, at: row.at, size: row.size })))
     writeChain = writeChain.catch(() => {}).then(() => saveIndex(value))
     return writeChain
   }
@@ -55,7 +58,7 @@ export function createOfflineQueryCache({ loadIndex = async () => [], saveIndex 
     try {
       const row = typeof raw === 'string' ? JSON.parse(raw) : raw
       if (row?.id !== id || !Array.isArray(row.docs)) throw new Error('invalid cached query row')
-      entries.set(id, clock())
+      entries.set(id, { at: clock(), size: Buffer.byteLength(typeof raw === 'string' ? raw : JSON.stringify(raw)) })
       await persistIndex()
       return row
     } catch (error) {
@@ -73,15 +76,18 @@ export function createOfflineQueryCache({ loadIndex = async () => [], saveIndex 
       throw Object.assign(new Error('Query is too large to keep in the Host offline cache.'), { code: 'offline/cache-too-large' })
     }
     await saveRow(id, raw)
-    entries.set(id, clock())
-    const expired = [...entries].sort((a, b) => a[1] - b[1]).slice(0, Math.max(0, entries.size - MAX_ENTRIES))
-    for (const [oldId] of expired) {
+    entries.set(id, { at: clock(), size: Buffer.byteLength(raw) })
+    let totalBytes = [...entries.values()].reduce((sum, item) => sum + item.size, 0)
+    for (const [oldId, item] of [...entries].sort((a, b) => a[1].at - b[1].at)) {
+      if (entries.size <= MAX_ENTRIES && totalBytes <= MAX_TOTAL_BYTES) break
       entries.delete(oldId)
+      totalBytes -= item.size
       await removeRow(oldId).catch((error) => log.warn('[hub] old offline query entry could not be pruned:', error?.message || error))
     }
     await persistIndex()
     return row
   }
 
-  return { initialize, get, set, status: () => ({ ready, queries: entries.size }) }
+  return { initialize, get, set, status: () => ({ ready, queries: entries.size,
+    bytes: [...entries.values()].reduce((sum, item) => sum + item.size, 0) }) }
 }

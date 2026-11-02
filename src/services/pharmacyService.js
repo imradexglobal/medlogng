@@ -390,69 +390,74 @@ export async function receiveBatch(input) {
     throw new Error('Your role cannot manage medication inventory (missing "prescription.dispense" capability). Ask an administrator.')
   }
 
-  const did = input.drugId // the stock_lots doc id
-  const lotRef = doc(db, DRUGS, did)
-  const now = serverTimestamp()
+  const did = input.drugId
+  const qty = Number(input.qty)
+  if (qty <= 0) throw new Error('Qty must be greater than zero.')
+  if (new Date(input.expiry) <= new Date()) throw new Error('Expiry date must be in the future.')
+  const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
+  const args = { drugId: did, movementId, qty, batch: String(input.batch || ''), expiry: String(input.expiry || ''),
+    supplier: String(input.supplier || ''), unitCost: Number(input.unit_cost) || 0, invoiceRef: String(input.invoice_ref || '') }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return queueStockReceipt(args, activeOrg)
+  const transaction = applyQueuedStockReceive(args)
+  let timer
+  let timedOut = false
+  transaction.catch((error) => { if (timedOut) console.warn('[pharmacy] stock receipt settled after offline handoff:', error?.message || error) })
+  try {
+    const result = await Promise.race([transaction, new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(null) }, 2500) })])
+    if (result) {
+      try { await logAudit({ action: 'stock.received', organizationId: activeOrg, details: `${input.name || did} · ${qty} · ${args.batch}` }) }
+      catch (e) { console.warn('[pharmacy] audit append failed:', e?.message || e) }
+      return result
+    }
+    return queueStockReceipt(args, activeOrg)
+  } catch (error) {
+    const code = String(error?.code || '').toLowerCase()
+    if (!['unavailable', 'deadline-exceeded', 'network-request-failed'].includes(code) && !/offline|network|timed? ?out/i.test(String(error?.message || ''))) throw error
+    return queueStockReceipt(args, activeOrg)
+  } finally { clearTimeout(timer) }
+}
 
+async function queueStockReceipt(args, orgId) {
+  const snap = await getDoc(doc(db, DRUGS, args.drugId))
+  if (!snap?.exists()) throw new Error('Drug is not available in the offline hospital copy.')
+  const drug = snap.data() || {}
+  if (drug.organization_id !== orgId) throw new Error('Drug belongs to another hospital.')
+  if (new Date(args.expiry) <= new Date()) throw new Error('Expiry date must be in the future.')
+  const { enqueue } = await import('./clinicalOutbox.js')
+  await enqueue('stock_receive', { ...args, preview: { name: drug.name || '', sku: drug.sku || '', unit: drug.unit || 'tabs',
+    stock: Number(drug.stock) || 0, purchase_price: Number(drug.purchase_price) || 0 } })
+  return { id: args.drugId, newStock: (Number(drug.stock) || 0) + args.qty, pendingSync: true }
+}
+
+export async function applyQueuedStockReceive(args) {
+  const lotRef = doc(db, DRUGS, args.drugId)
+  const movementRef = doc(db, 'stock_movements', args.movementId)
   return runTransaction(db, async (tx) => {
-    const snap = await tx.get(lotRef)
-    if (!snap.exists()) throw new Error('Drug not found')
-    const data = snap.data()
-
-    const qty = Number(input.qty)
-    if (qty <= 0) throw new Error('Qty must be greater than zero.')
-
-    const expiryDate = new Date(input.expiry)
-    const today = new Date()
-    if (expiryDate < today) throw new Error('Expiry date must be in the future.')
-
-    // Warn if expiry is less than 6 months from today
-    const sixMonthsLater = new Date(today.getTime() + 6 * 30 * 24 * 60 * 60 * 1000)
-    if (expiryDate < sixMonthsLater) {
-      console.warn('[pharmacy] Batch expiry within 6 months:', input.expiry)
+    const movementSnap = await tx.get(movementRef)
+    const lotSnap = await tx.get(lotRef)
+    if (movementSnap.exists()) {
+      const prior = movementSnap.data() || {}
+      if (prior.drug_id === args.drugId && Number(prior.qty) === Number(args.qty) && prior.type === 'in') {
+        return { id: args.drugId, newStock: Number(lotSnap.data()?.stock) || 0, deduped: true }
+      }
+      throw new Error('Stock movement ID is already in use.')
     }
-
-    // Generate a movement ID and create the 'in' movement
-    const movementId = 'mov_' + Date.now() + Math.random().toString(36).slice(2)
-    const movementRef = doc(db, 'stock_movements', movementId)
-    tx.set(movementRef, {
-      type: 'in',
-      organization_id: activeOrg,
-      drug_id: did,
-      sku: data.sku,
-      name: data.name,
-      qty: qty,
-      batch: input.batch,
-      expiry: input.expiry,
-      supplier: input.supplier || data.supplier,
-      unit_cost: input.unit_cost || 0,
-      invoice_ref: input.invoice_ref || '',
-      received_at: now,
-      created_by: user?.uid || null,
-      created_by_name: currentStaffName(),
-      created_at: now,
-    })
-
-    // Update lot stock and sync batch/expiry to the new batch
-    const newStock = (data.stock || 0) + qty
-    tx.update(lotRef, {
-      stock: newStock,
-      batch: input.batch,
-      expiry: input.expiry,
-      purchase_price: input.unit_cost != null ? Number(input.unit_cost) : data.purchase_price,
-      // Keep the derived status in step with stock, so restocking a lot that had
-      // fallen to zero stops reading "Out".
-      status: newStock === 0 ? 'Out' : (newStock < 20 ? 'Low' : 'OK'),
-      updated_at: now,
-    })
-
-    try {
-      await logAudit({ action: 'stock.received', organizationId: activeOrg, details: `${data.name} · ${qty} · ${input.batch}` })
-    } catch (e) {
-      console.warn('[pharmacy] audit append failed:', e?.message)
-    }
-
-    return { id: did, newStock }
+    if (!lotSnap.exists()) throw new Error('Drug not found.')
+    const data = lotSnap.data() || {}
+    const { activeOrg, user } = authStore.getState()
+    if (data.organization_id !== activeOrg) throw new Error('Drug belongs to another hospital.')
+    if (new Date(args.expiry) <= new Date()) throw new Error('Expiry date must be in the future.')
+    const qty = Number(args.qty)
+    const newStock = (Number(data.stock) || 0) + qty
+    const now = serverTimestamp()
+    tx.update(lotRef, { stock: newStock, batch: args.batch, expiry: args.expiry,
+      purchase_price: args.unitCost != null ? Number(args.unitCost) : data.purchase_price,
+      status: newStock === 0 ? 'Out' : (newStock < 20 ? 'Low' : 'OK'), updated_at: now })
+    tx.set(movementRef, { type: 'in', organization_id: activeOrg, drug_id: args.drugId, sku: data.sku || '',
+      name: data.name || '', qty, batch: args.batch, expiry: args.expiry, supplier: args.supplier || data.supplier || '',
+      unit_cost: args.unitCost || 0, invoice_ref: args.invoiceRef || '', received_at: now,
+      created_by: user?.uid || null, created_by_name: currentStaffName(), created_at: now })
+    return { id: args.drugId, newStock }
   })
 }
 

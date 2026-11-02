@@ -39,13 +39,13 @@ import { networkInterfaces } from 'node:os'
 import { loadConfig, PROJECT_ROOT, normalizeOrigin, parseOrigins } from './config.js'
 import { createQueue } from './queue.js'
 import { createOfflineQueryCache } from './offlineQueryCache.js'
-import { applyQuerySpec, serializeFirestoreData, validateQuerySpec } from './querySpec.js'
+import { applyQuerySpec, MAX_CACHED_QUERY_DOCS, ORG_QUERY_READS, requiredCapabilitiesForRead, serializeFirestoreData, validateQuerySpec } from './querySpec.js'
+import { capabilitiesForMutationArgs, validateOp, capabilityFor } from './ops.js'
 import { HANDLERS } from './handlers.js'
 import { createRelay } from './relay.js'
 import { initFoundation, foundationSummary } from './foundation.js'
 import { createAuthenticator } from './auth.js'
 import { createAuditor } from './audit.js'
-import { validateOp, capabilityFor } from './ops.js'
 import { listLanAddresses, startupLines, describeListenError } from './netinfo.js'
 
 const VERSION = 'hub-2.0.0'
@@ -290,7 +290,7 @@ function makeStaticHandler(staticDir) {
 
 // ---- request handler -------------------------------------------------------
 
-function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
+export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
   speechJobs = null, speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, verifiedHttpsAddresses = new Set() }) {
   async function handleOutbox(req, res) {
     const ip = String(req.socket.remoteAddress || 'unknown')
@@ -389,22 +389,38 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
     // Authorise each distinct (org, capability) pair once, before queueing.
     // A request touching two hospitals must be allowed in both.
     const approved = new Map()
+    const opCapabilities = new Map()
     for (const op of ops) {
-      const capability = capabilityFor(op.kind)
+      const candidates = op.kind === 'document_mutation' ? capabilitiesForMutationArgs(op.args) : [capabilityFor(op.kind, op.args)]
+      const capability = candidates[0]
       if (offlineSession) {
         if (op.orgId !== offlineSession.orgId ||
-            (!offlineSession.permissions.includes('*') && !offlineSession.permissions.includes(capability))) {
+            (!offlineSession.permissions.includes('*') && !candidates.some((cap) => offlineSession.permissions.includes(cap)))) {
           json(res, 403, { ok: false, error: 'This device session does not have permission for this handoff.' })
           return
         }
-        approved.set(op.orgId + '|' + capability, { membership: offlineSession.membership })
+        const chosen = candidates.find((cap) => offlineSession.permissions.includes('*') || offlineSession.permissions.includes(cap))
+        approved.set(op.orgId + '|' + chosen, { membership: offlineSession.membership })
+        opCapabilities.set(op.clientOpKey, chosen)
         continue
       }
-      const key = op.orgId + '|' + capability
-      if (approved.has(key)) continue
-      try {
-        approved.set(key, await authenticator.authorize(identity, op.orgId, capability))
-      } catch (e) {
+      let authorized = false
+      let lastError = null
+      for (const candidate of candidates) {
+        const key = op.orgId + '|' + candidate
+        if (approved.has(key)) { opCapabilities.set(op.clientOpKey, candidate); authorized = true; break }
+        try {
+          approved.set(key, await authenticator.authorize(identity, op.orgId, candidate))
+          opCapabilities.set(op.clientOpKey, candidate)
+          authorized = true
+          break
+        } catch (e) {
+          lastError = e
+          if (!(e?.status === 403 || e?.status === 400)) break
+        }
+      }
+      if (!authorized) {
+        const e = lastError || new Error('No capability is configured for this operation.')
         // Authenticated but forbidden: safe to name the org/capability in the
         // server log (no patient data). The client gets a short message.
         log.warn('[hub] denied op', op.kind, 'uid=' + identity.uid, 'org=' + op.orgId, 'cap=' + capability, '—', e?.message || e)
@@ -423,13 +439,25 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
       email: identity.email,
       name: identity.displayName || approved.values().next().value?.membership?.staff_name || '',
     }
+    const requestedBedClaims = new Set()
+    for (const op of ops) {
+      if (op.kind !== 'admission_create') continue
+      const queueKey = op.orgId + ':' + op.clientOpKey
+      const alreadyHeld = !!queue.get(queueKey)
+      if (!alreadyHeld && (requestedBedClaims.has(op.args.claimId) || queue.hasPendingClaim?.(op.args.claimId))) {
+        json(res, 409, { ok: false, error: 'That bed already has an admission waiting to sync from another device. Refresh Admissions and choose another bed.' })
+        return
+      }
+      requestedBedClaims.add(op.args.claimId)
+    }
     let accepted = 0
     let duplicates = 0
     for (const op of ops) {
+      const queueKey = op.orgId + ':' + op.clientOpKey
       const r = queue.add({
         // Org-scoped storage key: legacy v1 client keys are only unique per
         // device, so two hospitals must never collide in one queue file.
-        queueKey: op.orgId + ':' + op.clientOpKey,
+        queueKey,
         clientOpKey: op.clientOpKey,
         kind: op.kind,
         args: op.args,
@@ -437,6 +465,7 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
         // Identity from the verified token, never from the request body.
         actor,
         authVersion: 2,
+        authorizedCapability: opCapabilities.get(op.clientOpKey) || '',
         createdAt: op.createdAt,
       })
       if (r.duplicate) duplicates += 1
@@ -609,7 +638,9 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
   // come from Firestore and are saved on the Host; during an internet outage,
   // the exact previously authorized query can be served to another LAN PC.
   async function offlineDataQueryRoute(req, res) {
-    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Shared clinical data reads require HTTPS.' }); return }
+    if (!req.socket.encrypted && !isLoopbackAddress(req.socket.remoteAddress)) {
+      req.resume(); json(res, 403, { ok: false, error: 'Shared clinical data reads require HTTPS.' }); return
+    }
     if (!offlineQueryCache) { req.resume(); json(res, 503, { ok: false, error: 'Host offline data cache is unavailable.' }); return }
     const origin = checkOrigin(req, cfg)
     if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
@@ -667,7 +698,6 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
       json(res, 403, { ok: false, error: 'This Host session has no access to the selected hospital.' }); return
     }
 
-    const cacheKey = { orgId, query: body.query }
     let membershipLive = false
     try {
       await authenticator.authorize(identity, orgId, '')
@@ -680,6 +710,199 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
       }
     }
 
+    const requiredCaps = requiredCapabilitiesForRead(spec.collection, identity, spec.filters)
+    if (requiredCaps.length) {
+      let allowed = false
+      let backendUnavailable = false
+      if (membershipLive) {
+        for (const capability of requiredCaps) {
+          try { await authenticator.authorize(identity, orgId, capability); allowed = true; break }
+          catch (error) {
+            if (!(error?.status === 403 || error?.status === 400)) { backendUnavailable = true; break }
+          }
+        }
+      } else if (deviceSession) {
+        allowed = deviceSession.permissions.includes('*') || requiredCaps.some((cap) => deviceSession.permissions.includes(cap))
+      }
+      if (!allowed && !backendUnavailable) {
+        json(res, 403, { ok: false, error: 'Your hospital role does not allow reading this collection.' }); return
+      }
+      if (!allowed && backendUnavailable && !deviceSession) {
+        json(res, 503, { ok: false, error: 'Hospital access could not be verified.' }); return
+      }
+      if (!allowed && backendUnavailable && deviceSession &&
+          !deviceSession.permissions.includes('*') && !requiredCaps.some((cap) => deviceSession.permissions.includes(cap))) {
+        json(res, 403, { ok: false, error: 'Your last verified hospital role does not allow reading this collection.' }); return
+      }
+    }
+
+    const cacheKey = { orgId, query: body.query }
+    const withPendingWrites = (docs) => {
+      const byId = new Map((docs || []).map((row) => [row.id, row]))
+      const stamp = (ms) => ({ __firestoreType: 'timestamp', seconds: Math.floor(ms / 1000), nanoseconds: (ms % 1000) * 1e6 })
+      const decode = (value, at) => {
+        if (Array.isArray(value)) return value.map((item) => decode(item, at))
+        if (!value || typeof value !== 'object') return value
+        if (value.__firestoreType === 'serverTimestamp') return stamp(at)
+        if (value.__firestoreType === 'timestamp' && value.value) {
+          const ms = new Date(value.value).getTime()
+          return Number.isFinite(ms) ? stamp(ms) : null
+        }
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, decode(v, at)]))
+      }
+      const matches = (data) => spec.filters.every((f) => {
+        const value = data?.[f.field]
+        const norm = (x) => x && typeof x === 'object' && Number.isFinite(x.seconds)
+          ? x.seconds * 1000 + (x.nanoseconds || 0) / 1e6 : x instanceof Date ? x.getTime() : x
+        const a = norm(value), b = norm(f.value)
+        if (f.op === '==') return a === b
+        if (f.op === '!=') return a !== b
+        if (f.op === 'in') return Array.isArray(f.value) && f.value.some((x) => norm(x) === a)
+        if (f.op === '<') return a < b
+        if (f.op === '<=') return a <= b
+        if (f.op === '>') return a > b
+        if (f.op === '>=') return a >= b
+        return false
+      })
+      for (const op of (queue.pendingForOrg?.(orgId) || [])) {
+        if (op.kind === 'admission_create' && spec.collection === 'admissions') {
+          const data = { ...op.args.admission, created_at: stamp(op.addedAt), updated_at: stamp(op.addedAt) }
+          if (matches(data)) byId.set(op.args.admissionId, { id: op.args.admissionId, data })
+        }
+        if (op.kind === 'admission_discharge') {
+          const { admissionId, claimId, legacyClaimId, dischargeData } = op.args
+          if (spec.collection === 'admissions') {
+            const current = byId.get(admissionId)?.data
+            if (current) {
+              const data = { ...current, ...dischargeData, discharged_by: op.actor?.uid || null,
+                discharged_by_name: op.actor?.name || op.actor?.email || '', updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(admissionId, { id: admissionId, data })
+              else byId.delete(admissionId)
+            }
+          } else if (spec.collection === 'bed_claims') {
+            byId.delete(claimId)
+            if (legacyClaimId) byId.delete(legacyClaimId)
+          }
+        }
+        if (op.kind === 'admission_transfer') {
+          const { admissionId, oldClaimId, newClaimId, legacyOldClaimId, wardName, bedNumber, reason, transferAt, newClaim } = op.args
+          if (spec.collection === 'admissions') {
+            const current = byId.get(admissionId)?.data
+            if (current) {
+              const history = Array.isArray(current.transfer_history) ? current.transfer_history : []
+              const data = { ...current, ward_name: wardName, bed_number: bedNumber,
+                transfer_history: [...history, { at: transferAt, from_ward: current.ward_name || '', from_bed: String(current.bed_number || ''),
+                  to_ward: wardName, to_bed: bedNumber, reason, staff_id: op.actor?.uid || '', staff_name: op.actor?.name || op.actor?.email || '' }],
+                updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(admissionId, { id: admissionId, data })
+              else byId.delete(admissionId)
+            }
+          } else if (spec.collection === 'bed_claims') {
+            byId.delete(oldClaimId)
+            if (legacyOldClaimId) byId.delete(legacyOldClaimId)
+            const data = { ...newClaim, created_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(newClaimId, { id: newClaimId, data })
+          }
+        }
+        if (op.kind === 'billing_payment') {
+          const { invoiceId, paymentId, amountKobo, method, reference, notes, labOrderId, preview = {} } = op.args
+          if (spec.collection === 'invoices') {
+            const current = byId.get(invoiceId)?.data
+            if (current) {
+              const paid = Math.max(0, Number(current.paid_kobo) || 0) + amountKobo
+              const total = Math.max(0, Number(current.total_kobo) || 0)
+              const data = { ...current, paid_kobo: paid, status: paid >= total ? 'paid' : (paid > 0 ? 'part-paid' : 'unpaid'), updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(invoiceId, { id: invoiceId, data })
+              else byId.delete(invoiceId)
+            }
+          } else if (spec.collection === 'payments') {
+            const data = { invoice_id: invoiceId, invoice_number: preview.invoice_number || invoiceId,
+              lab_order_id: labOrderId || '', patient_id: preview.patient_id || '', patient_name: preview.patient_name || '',
+              amount_kobo: amountKobo, amount_naira: amountKobo / 100, method, reference: reference || '',
+              receipt_number: 'REC-' + paymentId.slice(0, 8).toUpperCase(), paid_by: op.actor?.name || op.actor?.email || '',
+              paid_at: stamp(op.addedAt), organization_id: orgId, notes: notes || '' }
+            if (matches(data)) byId.set(paymentId, { id: paymentId, data })
+          } else if (spec.collection === 'lab_orders' && labOrderId) {
+            const current = byId.get(labOrderId)?.data
+            if (current) {
+              const paid = Math.max(0, Number(current.paid_kobo) || 0) + amountKobo
+              const data = { ...current, paid_kobo: paid, payment_recorded_at: stamp(op.addedAt), updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(labOrderId, { id: labOrderId, data })
+            }
+          }
+        }
+        if (op.kind === 'medication_administer') {
+          const { requestId, doseId, lineId, qty, route, site, note, preview = {} } = op.args
+          if (spec.collection === 'medication_requests') {
+            const current = byId.get(requestId)?.data
+            if (current) {
+              let items = Array.isArray(current.items) ? current.items.map((item) => ({ ...item })) : []
+              if (!items.length && preview.quantity) items = [{ line_id: lineId, medicine: preview.medicine || '', unit: preview.unit || '',
+                dosage: preview.dosage || '', quantity: preview.quantity, administered_qty: Number(current.administered_qty) || 0 }]
+              items = items.map((item) => item.line_id === lineId
+                ? { ...item, administered_qty: Math.min(Number(item.quantity) || 0, (Number(item.administered_qty) || 0) + qty) }
+                : item)
+              const data = { ...current, items, updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(requestId, { id: requestId, data })
+            }
+          } else if (spec.collection === 'medication_administrations') {
+            const data = { ...preview, medication_request_id: requestId, line_id: lineId, medicine: preview.medicine || '',
+              unit: preview.unit || '', dosage: preview.dosage || '', qty, route, site: site || '', note: note || '', type: 'given',
+              reverses_id: '', administered_by: op.actor?.uid || '', administered_by_name: op.actor?.name || op.actor?.email || '',
+              organization_id: orgId, administered_at: stamp(op.addedAt), created_at: stamp(op.addedAt), updated_at: stamp(op.addedAt) }
+            if (matches(data)) byId.set(doseId, { id: doseId, data })
+          }
+        }
+        if (op.kind === 'stock_receive') {
+          const { drugId, movementId, qty, batch, expiry, supplier, unitCost, invoiceRef, preview = {} } = op.args
+          if (spec.collection === 'stock_lots') {
+            const current = byId.get(drugId)?.data
+            if (current) {
+              const stock = (Number(current.stock) || 0) + qty
+              const data = { ...current, stock, batch, expiry, purchase_price: unitCost,
+                status: stock === 0 ? 'Out' : (stock < 20 ? 'Low' : 'OK'), updated_at: stamp(op.addedAt) }
+              if (matches(data)) byId.set(drugId, { id: drugId, data })
+            }
+          } else if (spec.collection === 'stock_movements') {
+            const data = { type: 'in', organization_id: orgId, drug_id: drugId, sku: preview.sku || '', name: preview.name || '',
+              qty, batch, expiry, supplier: supplier || '', unit_cost: unitCost || 0, invoice_ref: invoiceRef || '',
+              received_at: stamp(op.addedAt), created_at: stamp(op.addedAt), created_by: op.actor?.uid || null,
+              created_by_name: op.actor?.name || op.actor?.email || '' }
+            if (matches(data)) byId.set(movementId, { id: movementId, data })
+          }
+        }
+        if (op.kind !== 'document_mutation') continue
+        for (const mutation of op.args.mutations || []) {
+          if (mutation.collection !== spec.collection) continue
+          if (mutation.action === 'delete') { byId.delete(mutation.id); continue }
+          const incoming = decode(mutation.data || {}, op.addedAt)
+          let data
+          if (mutation.action === 'create' || mutation.action === 'merge') {
+            const current = byId.get(mutation.id)?.data
+            data = mutation.action === 'merge' && current
+              ? { ...current, ...incoming, updated_at: stamp(op.addedAt) }
+              : { ...incoming, created_by: op.actor?.uid || null, created_by_name: op.actor?.name || op.actor?.email || '', updated_at: stamp(op.addedAt) }
+          } else {
+            const current = byId.get(mutation.id)?.data
+            if (!current) continue
+            data = { ...current, ...incoming, updated_at: stamp(op.addedAt) }
+          }
+          if (matches(data)) byId.set(mutation.id, { id: mutation.id, data })
+          else byId.delete(mutation.id)
+        }
+      }
+      let rows = [...byId.values()]
+      for (const order of [...spec.orderBy].reverse()) {
+        rows.sort((a, b) => {
+          const convert = (v) => v && typeof v === 'object' && Number.isFinite(v.seconds) ? v.seconds * 1000 + (v.nanoseconds || 0) / 1e6 : v
+          const x = convert(a.data?.[order.field]), y = convert(b.data?.[order.field])
+          return (x < y ? -1 : x > y ? 1 : 0) * (order.dir === 'desc' ? -1 : 1)
+        })
+      }
+      if (spec.limit) rows = rows.slice(0, spec.limit)
+      return rows
+    }
+
     if (membershipLive && db) {
       let queryTimer
       try {
@@ -688,10 +911,13 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
           query.get(),
           new Promise((_, reject) => { queryTimer = setTimeout(() => reject(Object.assign(new Error('Firestore query timed out.'), { code: 'ETIMEDOUT' })), 3500) }),
         ])
+        if (!spec.limit && snap.docs.length > MAX_CACHED_QUERY_DOCS) {
+          json(res, 413, { ok: false, error: 'This query is too large for shared Host reads; narrow the list and retry.' }); return
+        }
         const docs = snap.docs.map((item) => ({ id: item.id, data: serializeFirestoreData(item.data() || {}) }))
         try { await offlineQueryCache.set(cacheKey, docs) }
         catch (error) { log.warn('[hub] query result was served but not cached:', error?.message || error) }
-        json(res, 200, { ok: true, source: 'cloud', docs, savedAt: Date.now() }); return
+        json(res, 200, { ok: true, source: 'cloud', docs: withPendingWrites(docs), savedAt: Date.now() }); return
       } catch (error) {
         const code = String(error?.code || '').toLowerCase()
         const transport = ['unavailable', 'deadline-exceeded', 'resource-exhausted', 'econnreset', 'econnrefused', 'etimedout', 'enotfound', 'eai_again'].includes(code) ||
@@ -707,7 +933,95 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
     if (!cached) {
       json(res, 503, { ok: false, error: 'This query has no saved Host copy yet.' }); return
     }
-    json(res, 200, { ok: true, source: 'host-cache', docs: cached.docs, savedAt: cached.savedAt })
+    json(res, 200, { ok: true, source: 'host-cache', docs: withPendingWrites(cached.docs), savedAt: cached.savedAt })
+  }
+
+  async function offlineDataDocumentRoute(req, res) {
+    if (!req.socket.encrypted && !isLoopbackAddress(req.socket.remoteAddress)) {
+      req.resume(); json(res, 403, { ok: false, error: 'Shared clinical data reads require HTTPS.' }); return
+    }
+    if (!offlineQueryCache) { req.resume(); json(res, 503, { ok: false, error: 'Host offline data cache is unavailable.' }); return }
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
+      req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to read Host data.' }); return
+    }
+    let body
+    try { body = await readJson(req, 32 * 1024) }
+    catch (error) { json(res, error?.status || 400, { ok: false, error: error?.expose ? error.message : 'Could not read record request.' }); return }
+    const { orgId, collection: collectionName, id } = body || {}
+    if (!ORG_QUERY_READS.has(String(collectionName || '')) || !/^[A-Za-z0-9_-]{1,128}$/.test(String(id || '')) ||
+        !/^[A-Za-z0-9_-]{1,100}$/.test(String(orgId || ''))) {
+      json(res, 400, { ok: false, error: 'Hospital record reference is invalid.' }); return
+    }
+
+    let bearerIdentity = null
+    let bearerError = null
+    try { bearerIdentity = await authenticator.verify(req) } catch (error) { bearerError = error }
+    let deviceSession = null
+    if (String(req.headers['x-speech-device'] || '')) {
+      try {
+        deviceSession = speechSessions?.authenticate(req, orgId, '') || null
+        if (String(req.headers['x-speech-body-sha256'] || '').toLowerCase() !== createHash('sha256').update(JSON.stringify(body)).digest('hex')) {
+          throw Object.assign(new Error('Signed record request does not match.'), { status: 401, expose: true })
+        }
+        if (bearerIdentity && bearerIdentity.uid !== deviceSession.uid) {
+          throw Object.assign(new Error('Signed-in user does not match the Host device session.'), { status: 401, expose: true })
+        }
+      } catch (error) {
+        if (error?.expose) { json(res, error.status || 401, { ok: false, error: error.message }); return }
+        deviceSession = null
+      }
+    }
+    const identity = bearerIdentity || (deviceSession ? { uid: deviceSession.uid, email: deviceSession.email, displayName: deviceSession.displayName } : null)
+    if (!identity) {
+      json(res, bearerError?.expose ? bearerError.status || 401 : 503,
+        { ok: false, error: bearerError?.expose ? bearerError.message : 'Host authentication is unavailable.' }); return
+    }
+    if (deviceSession && deviceSession.orgId !== orgId) { json(res, 403, { ok: false, error: 'Device session belongs to another hospital.' }); return }
+
+    let membershipLive = false
+    try { await authenticator.authorize(identity, orgId, ''); membershipLive = true }
+    catch (error) {
+      if (error?.expose && error.status !== 503) { json(res, error.status || 403, { ok: false, error: error.message }); return }
+      if (!deviceSession) { json(res, 503, { ok: false, error: 'Hospital access could not be verified.' }); return }
+    }
+    const caps = requiredCapabilitiesForRead(collectionName, identity, [])
+    if (caps.length) {
+      let allowed = deviceSession && !membershipLive
+        ? deviceSession.permissions.includes('*') || caps.some((cap) => deviceSession.permissions.includes(cap))
+        : false
+      if (membershipLive) {
+        for (const capability of caps) {
+          try { await authenticator.authorize(identity, orgId, capability); allowed = true; break }
+          catch (error) { if (!(error?.status === 403 || error?.status === 400)) { if (!deviceSession) { json(res, 503, { ok: false, error: 'Hospital access could not be verified.' }); return } } }
+        }
+      }
+      if (!allowed) { json(res, 403, { ok: false, error: 'Your hospital role does not allow reading this record.' }); return }
+    }
+
+    const cacheKey = { orgId, query: { collection: collectionName, documentId: id } }
+    if (membershipLive && db) {
+      let timer
+      try {
+        const snap = await Promise.race([
+          db.collection(collectionName).doc(id).get(),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Firestore document read timed out.'), { code: 'ETIMEDOUT' })), 3500) }),
+        ])
+        const exists = snap.exists && (snap.data()?.organization_id === orgId || collectionName === 'patients' && snap.data()?.organization_id === orgId)
+        const docData = exists ? serializeFirestoreData(snap.data() || {}) : null
+        const row = { id, exists: !!exists, data: docData }
+        try { await offlineQueryCache.set(cacheKey, [row]) }
+        catch (error) { log.warn('[hub] document result was served but not cached:', error?.message || error) }
+        json(res, 200, { ok: true, source: 'cloud', ...row }); return
+      } catch (error) {
+        const transport = ['unavailable', 'deadline-exceeded', 'resource-exhausted', 'econnreset', 'econnrefused', 'etimedout', 'enotfound', 'eai_again'].includes(String(error?.code || '').toLowerCase()) ||
+          /network|unavailable|deadline exceeded|connection reset|connection refused|timed? ?out|dns/i.test(String(error?.message || ''))
+        if (!transport) { json(res, 400, { ok: false, error: 'Host could not read this record.' }); return }
+      } finally { clearTimeout(timer) }
+    }
+    const cached = await offlineQueryCache.get(cacheKey)
+    if (!cached?.docs?.[0]) { json(res, 503, { ok: false, error: 'This record has no saved Host copy yet.' }); return }
+    json(res, 200, { ok: true, source: 'host-cache', ...cached.docs[0] })
   }
 
   async function speechSessionRoute(req, res, url, action) {
@@ -909,6 +1223,10 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
       await offlineDataQueryRoute(req, res)
       return
     }
+    if (req.method === 'POST' && path === '/device/data/document') {
+      await offlineDataDocumentRoute(req, res)
+      return
+    }
 
     if (req.method === 'POST' && path === '/outbox') {
       await handleOutbox(req, res)
@@ -941,7 +1259,7 @@ function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDi
         version: VERSION,
         note: 'web app (dist/) not present on this hub — API only',
         auth: 'Firebase ID token or enrolled Host device session',
-        endpoints: ['GET /health', 'POST /outbox', 'POST /device/data/query'],
+        endpoints: ['GET /health', 'POST /outbox', 'POST /device/data/query', 'POST /device/data/document'],
       })
       return
     }

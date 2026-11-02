@@ -1,7 +1,46 @@
 const COLLECTION_RE = /^[A-Za-z][A-Za-z0-9_]{0,79}$/
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_.]{0,119}$/
 const OPS = new Set(['==', '!=', '<', '<=', '>', '>=', 'in', 'not-in', 'array-contains', 'array-contains-any'])
-const MAX_QUERY_LIMIT = 2000
+const MAX_QUERY_LIMIT = 10001
+const MAX_CACHED_QUERY_DOCS = 10000
+
+export const ORG_QUERY_READS = new Set([
+  'patients', 'organization_patients', 'encounters', 'vitals', 'allergies', 'diagnoses',
+  'appointments', 'admissions', 'wards', 'lab_orders', 'admission_plan_items', 'documents',
+  'lab_test_catalogue', 'lab_settings', 'imaging_orders', 'result_images', 'organization_memberships',
+  'stock_lots', 'medication_requests', 'medication_administrations', 'dispensations', 'stock_movements',
+  'bed_claims', 'invoices', 'payments', 'claims', 'coverages', 'plans', 'price_catalogue',
+  'devices', 'staff_invites', 'audit_events',
+])
+
+const READ_CAPABILITIES = {
+  bed_claims: ['beds.manage'],
+  stock_lots: ['prescription.dispense'],
+  medication_requests: ['prescription.dispense', 'medication.administer'],
+  medication_administrations: ['prescription.dispense', 'medication.administer'],
+  dispensations: ['prescription.dispense'],
+  stock_movements: ['prescription.dispense'],
+  invoices: ['billing.invoice', 'billing.payment'],
+  payments: ['billing.payment'],
+  claims: ['billing.invoice'],
+  coverages: ['billing.invoice'],
+  plans: ['billing.invoice'],
+  price_catalogue: ['billing.invoice'],
+  audit_events: ['admin.roles.manage'],
+}
+
+export function requiredCapabilitiesForRead(collection, identity, filters = []) {
+  let required = READ_CAPABILITIES[collection] || []
+  if (collection === 'devices') {
+    const ownDevices = filters.some((f) => f.field === 'user_id' && f.op === '==' && f.value === identity?.uid)
+    if (!ownDevices) required = ['admin.devices.manage', 'admin.roles.manage']
+  }
+  if (collection === 'staff_invites') {
+    const ownInvite = identity?.email && filters.some((f) => f.field === 'email' && f.op === '==' && f.value === identity.email)
+    if (!ownInvite) required = ['admin.roles.manage']
+  }
+  return required
+}
 
 function decodeValue(value, depth = 0) {
   if (depth > 8) throw new Error('Query values are nested too deeply.')
@@ -43,6 +82,7 @@ export function validateQuerySpec(raw, { orgId, uid }) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Query must be an object.')
   const collection = String(raw.collection || '')
   if (!COLLECTION_RE.test(collection)) throw new Error('Query collection is invalid.')
+  if (!ORG_QUERY_READS.has(collection)) throw new Error('This collection is not available through the Host query cache.')
   if (!Array.isArray(raw.filters) || raw.filters.length > 20) throw new Error('Query filters are invalid.')
   const filters = raw.filters.map((filter) => {
     if (!filter || typeof filter !== 'object' || !FIELD_RE.test(String(filter.field || '')) || !OPS.has(filter.op)) {
@@ -79,6 +119,8 @@ export function applyQuerySpec(db, spec) {
   q = q.limit(spec.limit || MAX_QUERY_LIMIT)
   return q
 }
+
+export { MAX_CACHED_QUERY_DOCS }
 
 export function serializeFirestoreData(value, depth = 0) {
   if (depth > 16) throw new Error('Document data is too deeply nested.')

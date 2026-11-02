@@ -8,9 +8,15 @@ async function getHubBase() {
   if (typeof window === 'undefined' || !window.location || !window.isSecureContext) return hubBase = ''
   try {
     const configured = localStorage.getItem('medilogng.hubUrl') || import.meta.env?.VITE_HUB_URL || ''
-    if (configured) return hubBase = String(configured).replace(/\/+$/, '')
+    if (configured) {
+      const candidate = String(configured).replace(/\/+$/, '')
+      const parsed = new URL(candidate)
+      return hubBase = parsed.protocol === 'https:' || ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname) ? candidate : ''
+    }
   } catch { /* disabled storage */ }
   try {
+    const origin = new URL(window.location.origin)
+    if (origin.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]', '::1'].includes(origin.hostname)) return hubBase = ''
     const response = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(1200) })
     if (!response.ok) return hubBase = ''
     const data = await response.json()
@@ -52,12 +58,55 @@ function makeSnapshot(db, query, collectionName, rows, source) {
   }
 }
 
+function makeDocumentSnapshot(db, ref, row, source) {
+  const fromCache = source === 'host-cache'
+  const exists = !!row.exists
+  const data = exists ? reviveData(row.data || {}) : undefined
+  const localRef = doc(db, ref.path)
+  return {
+    id: ref.id,
+    ref: localRef,
+    metadata: { fromCache, hasPendingWrites: false },
+    exists: () => exists,
+    data: () => data,
+    get: (field) => exists ? String(field).split('.').reduce((v, k) => v?.[k], data) : undefined,
+    isEqual: (other) => other?.ref?.path === localRef.path,
+  }
+}
+
+async function signedHostRequest(baseUrl, path, body, user, orgId, signal) {
+  const payload = JSON.stringify(body)
+  let token = ''
+  if (navigator.onLine !== false) {
+    let tokenTimer
+    token = await Promise.race([
+      user.getIdToken().catch(() => ''),
+      new Promise((resolve) => { tokenTimer = setTimeout(() => resolve(''), 600) }),
+    ])
+    clearTimeout(tokenTimer)
+  }
+  let device = null
+  try {
+    const { readDeviceSession } = await import('./speechSession.js')
+    device = await readDeviceSession(user.uid, orgId)
+  } catch { /* not enrolled */ }
+  if (device) {
+    const { signedSpeechRequest } = await import('./speechSession.js')
+    return signedSpeechRequest(path, { method: 'POST', body: payload, contentType: 'application/json', baseUrl,
+      headers: token ? { authorization: 'Bearer ' + token } : {}, signal }, device)
+  }
+  if (!token) return null
+  return fetch(baseUrl + path, { method: 'POST', headers: {
+    authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-medilog-client': 'medilogng-web',
+  }, body: payload, signal, cache: 'no-store' })
+}
+
 export async function readQueryFromHost(db, query) {
   const spec = serializeFirestoreQuery(query)
   if (!spec) return null
   const baseUrl = await getHubBase()
   if (!baseUrl) return null
-  let authStore, auth
+    let authStore, auth
   try {
     ;[{ authStore }, { auth }] = await Promise.all([
       import('../store/authStore.js'), import('../firebase.js'),
@@ -67,31 +116,13 @@ export async function readQueryFromHost(db, query) {
   const user = auth.currentUser
   const orgId = state.activeOrg || ''
   if (!user?.uid || !orgId) return null
-  const payload = { orgId, query: spec }
-  const body = JSON.stringify(payload)
   const path = '/device/data/query'
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 5000)
   try {
-    const token = await user.getIdToken().catch(() => '')
-    let device = null
-    try {
-      const { readDeviceSession } = await import('./speechSession.js')
-      device = await readDeviceSession(user.uid, orgId)
-    } catch { /* no Host device key enrolled yet */ }
-    let response = null
-    if (device) {
-      const { signedSpeechRequest } = await import('./speechSession.js')
-      response = await signedSpeechRequest(path, {
-        method: 'POST', body, contentType: 'application/json', baseUrl,
-        headers: token ? { authorization: 'Bearer ' + token } : {}, signal: controller.signal,
-      }, device)
-    } else if (token) {
-      response = await fetch(baseUrl + path, { method: 'POST', headers: {
-        authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-medilog-client': 'medilogng-web',
-      }, body, signal: controller.signal, cache: 'no-store' })
-    } else return null
-    if (response.status === 400 || response.status === 404 || response.status === 405 || response.status >= 500) return null
+    const response = await signedHostRequest(baseUrl, path, { orgId, query: spec }, user, orgId, controller.signal)
+    if (!response) return null
+    if (response.status === 400 || response.status === 404 || response.status === 405 || response.status === 413 || response.status >= 500) return null
     if (response.status === 403) {
       const data = await response.json().catch(() => ({}))
       if (/only caches queries scoped|query (?:filter|collection|order|cursor|limit)/i.test(String(data.error || ''))) return null
@@ -104,6 +135,44 @@ export async function readQueryFromHost(db, query) {
   } catch (error) {
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return null
     if (/denied access to this hospital data/.test(String(error?.message || ''))) throw error
+    return null
+  } finally { clearTimeout(timer) }
+}
+
+export async function readDocumentFromHost(db, ref) {
+  const segments = String(ref?.path || '').split('/')
+  if (segments.length !== 2 || !segments[0] || !segments[1]) return null
+  const baseUrl = await getHubBase()
+  if (!baseUrl) return null
+  let authStore, auth
+  try {
+    ;[{ authStore }, { auth }] = await Promise.all([
+      import('../store/authStore.js'), import('../firebase.js'),
+    ])
+  } catch { return null }
+  const state = authStore.getState()
+  const user = auth.currentUser
+  const orgId = state.activeOrg || ''
+  if (!user?.uid || !orgId) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+  try {
+    const response = await signedHostRequest(baseUrl, '/device/data/document', {
+      orgId, collection: segments[0], id: segments[1],
+    }, user, orgId, controller.signal)
+    if (!response || response.status === 400 || response.status === 404 || response.status === 405 || response.status >= 500) return null
+    if (response.status === 403) {
+      const data = await response.json().catch(() => ({}))
+      if (/collection is not available|record reference is invalid/i.test(String(data.error || ''))) return null
+      throw new Error(data.error || 'The Host denied access to this hospital record.')
+    }
+    if (!response.ok) return null
+    const data = await response.json()
+    if (typeof data.exists !== 'boolean') return null
+    return makeDocumentSnapshot(db, ref, data, data.source)
+  } catch (error) {
+    if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return null
+    if (/denied access to this hospital record/.test(String(error?.message || ''))) throw error
     return null
   } finally { clearTimeout(timer) }
 }

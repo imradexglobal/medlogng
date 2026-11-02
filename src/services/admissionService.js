@@ -288,6 +288,31 @@ export async function createAdmission(input) {
       })
   const writeResult = await commitAdmissionBatch(batch)
 
+  // Keep an independent durable handoff for the hospital LAN host. Firestore
+  // owns its own local queue; this copy survives a closed browser and can be
+  // relayed if internet service remains unavailable.
+  try {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    await enqueue('admission_create', {
+      admissionId,
+      claimId: bedClaimRef.id,
+      admission: {
+        patient_id: pid,
+        patient_name: admission.patient_name,
+        organization_id: activeOrg,
+        encounter_id: encounterId,
+        ward_name: wardName,
+        bed_number: bedNumber,
+        admission_type: admission.admission_type,
+        admission_reason: admission.admission_reason,
+        attending_provider: admission.attending_provider,
+        status: admission.status,
+      },
+    })
+  } catch (e) {
+    console.warn('[admissions] host sync handoff could not be stored:', e?.message || e)
+  }
+
   try {
     void logAudit({
       action: 'admission.created',
@@ -346,6 +371,23 @@ export async function dischargeAdmission(admissionId, dischargeInput) {
   const writeResult = await commitAdmissionBatch(batch)
 
   try {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    const legacyClaimId = legacyBedClaimKey(activeOrg, adm.wardName, adm.bedNumber)
+    await enqueue('admission_discharge', {
+      admissionId,
+      claimId: claimRef.id,
+      legacyClaimId: legacyClaimId === claimRef.id ? '' : legacyClaimId,
+      dischargeData: {
+        status: ADMISSION_DISCHARGED,
+        discharge_date: dischargeInput.dischargeDate ? tsMillis(dischargeInput.dischargeDate) : Date.now(),
+        discharge_type: dischargeType,
+        discharge_reason: dischargeData.discharge_reason,
+        discharge_notes: dischargeData.discharge_notes,
+      },
+    })
+  } catch (e) { console.warn('[admissions] discharge handoff could not be stored:', e?.message || e) }
+
+  try {
     void logAudit({
       action: 'admission.discharged',
       organizationId: activeOrg,
@@ -382,9 +424,12 @@ export async function transferAdmission(admissionId, input) {
   const now = serverTimestamp()
   const transferAt = Date.now()
   const batch = writeBatch(db)
+  const transferEntry = { at: transferAt, from_ward: adm.wardName, from_bed: adm.bedNumber,
+    to_ward: wardName, to_bed: bedNumber, reason, staff_id: user?.uid || '', staff_name: currentStaffName() }
+  const transferHistory = [...(Array.isArray(adm.raw?.transfer_history) ? adm.raw.transfer_history : []), transferEntry]
   batch.update(admissionRef, {
       ward_name: wardName, bed_number: bedNumber, updated_at: now,
-      transfer_history: [...(Array.isArray(adm.raw?.transfer_history) ? adm.raw.transfer_history : []), { at: transferAt, from_ward: adm.wardName, from_bed: adm.bedNumber, to_ward: wardName, to_bed: bedNumber, reason, staff_id: user?.uid || '', staff_name: currentStaffName() }],
+      transfer_history: transferHistory,
     })
   batch.set(newClaim, { organization_id: activeOrg, ward_name: wardName, bed_number: bedNumber, admission_id: admissionId, patient_id: adm.patientId, created_at: now })
   if (oldClaim.path !== newClaim.path) {
@@ -393,6 +438,17 @@ export async function transferAdmission(admissionId, input) {
     if (legacyOldPath !== oldClaim.id && legacyOldPath !== newClaim.id) batch.delete(doc(db, BED_CLAIMS, legacyOldPath))
   }
   const writeResult = await commitAdmissionBatch(batch)
+  try {
+    const { enqueue } = await import('./clinicalOutbox.js')
+    const legacyOldClaimId = legacyBedClaimKey(activeOrg, adm.wardName, adm.bedNumber)
+    await enqueue('admission_transfer', {
+      admissionId, oldClaimId: oldClaim.id, newClaimId: newClaim.id,
+      legacyOldClaimId: legacyOldClaimId === oldClaim.id ? '' : legacyOldClaimId,
+      wardName, bedNumber, reason, transferAt, transferHistory,
+      newClaim: { organization_id: activeOrg, ward_name: wardName, bed_number: bedNumber,
+        admission_id: admissionId, patient_id: adm.patientId },
+    })
+  } catch (e) { console.warn('[admissions] transfer handoff could not be stored:', e?.message || e) }
   void logAudit({ action: 'admission.transferred', organizationId: activeOrg, patientId: adm.patientId,
     details: 'Admission ' + admissionId + ' transferred from ' + adm.wardName + ' · ' + adm.bedNumber + ' to ' + wardName + ' · ' + bedNumber + ' (' + reason + ')' })
   return writeResult

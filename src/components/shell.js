@@ -225,13 +225,24 @@ export function shell(app, { active, title, subtitle = '', actions = '', body = 
     }
   }
   const onNetChange = () => updateSync()
+  let writeNoticeTimer = 0
+  const onWritePending = () => {
+    clearTimeout(writeNoticeTimer)
+    writeNoticeTimer = setTimeout(() => toast('Saved on this device. It will sync when the connection is available.'), 250)
+  }
+  const onWriteSyncError = (event) => toast(event?.detail?.message || 'A saved change could not sync. Reopen the affected page to review it.')
   window.addEventListener('online', onNetChange)
   window.addEventListener('offline', onNetChange)
+  window.addEventListener('medilog-write-pending', onWritePending)
+  window.addEventListener('medilog-write-sync-error', onWriteSyncError)
   const stopOutboxWatch = onUpdate((n) => { pendingChanges = n || 0; updateSync() })
   updateSync()
   onCleanup(() => {
     window.removeEventListener('online', onNetChange)
     window.removeEventListener('offline', onNetChange)
+    window.removeEventListener('medilog-write-pending', onWritePending)
+    window.removeEventListener('medilog-write-sync-error', onWriteSyncError)
+    clearTimeout(writeNoticeTimer)
     stopOutboxWatch()
   })
 }

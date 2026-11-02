@@ -86,6 +86,7 @@ console.log('hub.handlers tests')
 test('isKnownHandler returns true for known kinds', () => {
   assert.ok(isKnownHandler('rx_mirror'), 'rx_mirror should be known')
   assert.ok(isKnownHandler('lab_snapshot'), 'lab_snapshot should be known')
+  assert.ok(isKnownHandler('document_mutation'), 'document_mutation should be known')
   assert.ok(!isKnownHandler('bad_kind'), 'bad_kind should not be known')
 })
 

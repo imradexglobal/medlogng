@@ -14,7 +14,7 @@ import {
   getDocs, getDocsFromCache, getDoc, getDocFromCache, getCountFromServer,
 } from '../firebase.js'
 
-const DEFAULT_TIMEOUT_MS = 2500
+const DEFAULT_TIMEOUT_MS = 5500
 
 export function isOffline() {
   return typeof navigator !== 'undefined' && navigator.onLine === false
@@ -34,7 +34,9 @@ function withTimeout(promise, ms) {
 
 // getDocs() that serves the IndexedDB cache when the network is gone or slow.
 export async function getDocsTolerant(q, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  if (isOffline()) return await getDocsFromCache(q)
+  // getDocs is the shared Firestore adapter: it first asks the hospital Host
+  // for an authorized cached query, then falls back to this device's cache.
+  if (isOffline()) return await getDocs(q)
   const pending = getDocs(q)
   try {
     return await withTimeout(pending, timeoutMs)
@@ -52,7 +54,7 @@ export async function getDocsTolerant(q, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}
 
 // getDoc() with the same offline behaviour as getDocsTolerant().
 export async function getDocTolerant(ref, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  if (isOffline()) return await getDocFromCache(ref)
+  if (isOffline()) return await getDoc(ref)
   const pending = getDoc(ref)
   try {
     return await withTimeout(pending, timeoutMs)
