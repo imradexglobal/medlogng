@@ -1,0 +1,1 @@
+config:x86:x86_64:generic:mingw32:gcc 16.2.0 (Rev6, Built by MSYS2 project):--arch=x86_64 --target-os=mingw32 --disable-autodetect --disable-shared --enable-static --disable-ffplay --disable-ffprobe --disable-doc --disable-debug --extra-ldflags=-static
