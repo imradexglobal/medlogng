@@ -483,32 +483,20 @@ function visibleEncounters() {
     const openN = encounters.filter((e) => e.status !== 'closed').length
     if (cnt) cnt.textContent = openN + ' open'
     if (!tbl) return
-    const head = '<thead><tr><th>Patient</th><th>MRN · contact</th><th>Waited</th><th>Status</th></tr></thead>'
+    const head = '<thead><tr><th>Patient</th><th>Waited</th><th>Status</th></th></tr></thead>'
     const shown = visibleEncounters()
     const rows = shown.map((e) => {
       const m = patientMeta(e)
-      const who = [m.age !== '' && m.age != null ? m.age + 'y' : '', m.sex].filter(Boolean).join(' · ')
-      const b = patientBed(e)
       const waited = e.createdAt ? Math.max(0, Math.floor(((e.status === 'closed' ? e.updatedAt : Date.now()) - e.createdAt) / 1000)) : 0
-      // Bed badge lives inside the status cell so the table keeps its four
-      // columns — the "Waited" clock ticks r.cells[2].
-      const bedBadge = b
-        ? '<div style="margin-top:4px"><span class="pill ok" title="Admitted to ' + esc(b.wardName) + ' · ' + esc(b.bedNumber) + '">🛏 ' +
-          esc(String(b.wardName || '').slice(0, 14)) + ' · ' + esc(b.bedNumber) + '</span></div>'
+      const bedBadge = patientBed(e)
+        ? '<span class="pill ok" title="Admitted to ' + esc(patientBed(e).wardName) + ' · ' + esc(patientBed(e).bedNumber) + '">🛏 </span>'
         : ''
-      // Build clinical details row for the status cell - include encounter type and triage info
-      const clinicalInfo = [
-        m.encounterType ? '<span class="mut" title="Encounter type: ' + esc(m.encounterType) + '">' + esc(m.encounterType.slice(0, 8)) + '</span>' : '',
-        m.triagePriority ? '<span class="mut" title="Triage: ' + esc(m.triagePriority) + '">' + esc(m.triagePriority.slice(0, 6)) + '</span>' : ''
-      ].filter(Boolean).join(' ')
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '" role="button" aria-label="Encounter for ' + esc(m.name) + ', status: ' + encLabel(e.status) + '" tabindex="0">' +
         '<td><strong>' + esc(m.name) + '</strong><div class="mut">' + esc(m.pid.slice(0, 8)) + '</div></td>' +
-        '<td><div>' + esc(m.mrn) + '</div><div class="mut">' + esc(who || 'No demographics on file') + '</div>' +
-        (m.phone ? '<div class="mut">' + esc(m.phone) + '</div>' : '') + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
-        '<td>' + encBadge(e.status) + clinicalInfo + bedBadge + '</td></tr>'
+        '<td>' + encBadge(e.status) + bedBadge + '</td></tr>'
     }).join('')
-    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
+    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="3" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
     tbl.querySelectorAll('tr.clickable').forEach((r) => {
       r.onclick = () => {
