@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper-worker-v1.9.5\CMakeFiles\6eb255c7920a002a2ef983a2c6a5f590\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{467C5B39-BF62-34C0-8A4C-DD704C136E44}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

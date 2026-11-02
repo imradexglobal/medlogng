@@ -1,0 +1,16 @@
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/CMakeFiles/medilog-whisper-worker.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/CMakeFiles/INSTALL.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/CMakeFiles/ALL_BUILD.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/CMakeFiles/ZERO_CHECK.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/CMakeFiles/INSTALL.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/CMakeFiles/ALL_BUILD.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/CMakeFiles/INSTALL.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/CMakeFiles/ALL_BUILD.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/CMakeFiles/ggml-base.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/CMakeFiles/ggml.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/CMakeFiles/ggml-cpu.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/CMakeFiles/INSTALL.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/ggml-cpu/CMakeFiles/INSTALL.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/src/CMakeFiles/whisper.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/src/CMakeFiles/parakeet.dir
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/src/CMakeFiles/INSTALL.dir

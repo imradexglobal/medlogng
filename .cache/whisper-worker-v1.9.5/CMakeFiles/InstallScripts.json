@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/cmake_install.cmake",
+		"C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/cmake_install.cmake",
+		"C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/cmake_install.cmake",
+		"C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/cmake_install.cmake",
+		"C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/ggml/src/ggml-cpu/cmake_install.cmake",
+		"C:/Users/User/Documents/GitHub/medlogng/.cache/whisper-worker-v1.9.5/whisper-cpp/src/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

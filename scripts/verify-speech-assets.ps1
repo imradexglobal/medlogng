@@ -18,6 +18,18 @@ function Stop-Verification([string]$Message) {
   exit 1
 }
 
+function Get-Sha256([string]$Path) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $stream = $null
+  try {
+    $stream = [IO.File]::OpenRead($Path)
+    return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+  } finally {
+    if ($stream) { $stream.Dispose() }
+    $sha.Dispose()
+  }
+}
+
 if (-not (Test-Path $manifestPath -PathType Leaf)) { Stop-Verification 'speech-assets.json is missing.' }
 try { $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json }
 catch { Stop-Verification 'speech-assets.json is not valid JSON.' }
@@ -72,7 +84,7 @@ if ($mitLicenseText -notmatch 'MIT License' -or $ffmpegLicenseText -notmatch 'GN
 }
 $sourceArchivePath = Join-Path $AssetDir ([string]$manifest.ffmpeg.sourceArchiveFile)
 if (-not (Test-Path $sourceArchivePath -PathType Leaf)) { Stop-Verification 'The exact FFmpeg source archive is missing from the asset package.' }
-$actualSourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceArchivePath).Hash
+$actualSourceHash = Get-Sha256 $sourceArchivePath
 if (-not [StringComparer]::OrdinalIgnoreCase.Equals($actualSourceHash, [string]$manifest.ffmpeg.sourceSha256)) {
   Stop-Verification 'FFmpeg source archive SHA-256 does not match its verified build provenance.'
 }
@@ -91,7 +103,7 @@ foreach ($role in $required.Keys) {
   if (-not (Test-Path $file -PathType Leaf)) { Stop-Verification ("Required asset is missing: " + $expectedName + '.') }
   $actual = Get-Item -LiteralPath $file
   if ($actual.Length -ne [int64]$record.sizeBytes) { Stop-Verification ("Asset size does not match the manifest: " + $expectedName + '.') }
-  $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash
+  $actualHash = Get-Sha256 $file
   if (-not [StringComparer]::OrdinalIgnoreCase.Equals($actualHash, [string]$record.sha256)) {
     Stop-Verification ("Asset SHA-256 does not match the manifest: " + $expectedName + '.')
   }
@@ -106,7 +118,7 @@ foreach ($role in $required.Keys) {
   if (-not $record.version) { Stop-Verification ("Manifest entry '$role' has no version information.") }
 }
 
-$modelHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $AssetDir $required.model)).Hash
+$modelHash = Get-Sha256 (Join-Path $AssetDir $required.model)
 $pinnedModelHash = 'c77c5766f1cef09b6b7d47f21b546cbddd4157886b3b5d6d4f709e91e66c7c2b'
 if (-not [StringComparer]::OrdinalIgnoreCase.Equals($modelHash, $pinnedModelHash)) {
   Stop-Verification 'The quantized Tiny English model does not match the pinned upstream SHA-256.'

@@ -13,6 +13,7 @@
     "test:hub": "node scripts/test/hub.smoke.mjs",
     "test:speech": "node scripts/test/speech.worker.test.mjs && node scripts/test/speech.jobs.test.mjs && node scripts/test/speech.assets.test.mjs",
     "test:speech:listeners": "node scripts/test/speech.listeners.test.mjs",
+    "test:speech:real": "node scripts/test/speech.real-worker.mjs",
     "hub": "node hub/server.js",
     "dev": "vite --port 5174",
     "build": "vite build",

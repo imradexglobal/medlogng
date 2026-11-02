@@ -1,0 +1,10 @@
+prefix=C:/Program Files/medilog_whisper_worker
+exec_prefix=${prefix}
+libdir=C:/Program Files/medilog_whisper_worker/lib
+includedir=C:/Program Files/medilog_whisper_worker/include
+
+Name: parakeet
+Description: Port of NVIDIA's Parakeet model in C/C++
+Version: 1.9.5-dev
+Libs: -L${libdir} -lggml -lggml-base -lparakeet
+Cflags: -I${includedir}

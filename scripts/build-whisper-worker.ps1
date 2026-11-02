@@ -31,9 +31,29 @@ function Stop-Build([string]$Message) {
   throw ('Whisper packaging preparation failed: ' + $Message)
 }
 
+function Get-Sha256([string]$Path) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $stream = $null
+  try {
+    $stream = [IO.File]::OpenRead($Path)
+    return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+  } finally {
+    if ($stream) { $stream.Dispose() }
+    $sha.Dispose()
+  }
+}
+
 function Invoke-Checked([string]$File, [string[]]$Arguments, [string]$Step) {
-  & $File @Arguments
-  if ($LASTEXITCODE -ne 0) { Stop-Build ($Step + ' exited with code ' + $LASTEXITCODE + '.') }
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $output = & $File @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  foreach ($line in $output) { Write-Host ([string]$line) }
+  if ($exitCode -ne 0) { Stop-Build ($Step + ' exited with code ' + $exitCode + '.') }
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) { Stop-Build 'A 64-bit Windows build machine is required.' }
@@ -88,7 +108,7 @@ $modelInfo = Get-Item $modelPath
 if ($modelInfo.Length -lt 25MB -or $modelInfo.Length -gt 45MB) {
   Stop-Build ('Model size is outside the expected 25–45 MiB range: ' + $modelInfo.Length + ' bytes.')
 }
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $modelPath).Hash -ne $modelSha256) {
+if ((Get-Sha256 $modelPath) -ne $modelSha256) {
   Stop-Build 'The model SHA-256 does not match the pinned upstream tiny.en-q5_1 artifact.'
 }
 
@@ -125,26 +145,58 @@ if ($ffmpegBuildInfo.schemaVersion -ne 1 -or $ffmpegBuildInfo.sourceVersion -ne 
     -not $ffmpegBuildInfo.toolchain -or -not $ffmpegBuildInfo.configureArgs) {
   Stop-Build 'FFmpeg build receipt must identify its toolchain and complete configure arguments.'
 }
-$ffmpegSourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpegSourceArchive).Hash.ToLowerInvariant()
+$ffmpegSourceHash = Get-Sha256 $ffmpegSourceArchive
 if ($ffmpegBuildInfo.sourceSha256 -and
     -not [StringComparer]::OrdinalIgnoreCase.Equals($ffmpegSourceHash, [string]$ffmpegBuildInfo.sourceSha256)) {
   Stop-Build 'FFmpeg source archive SHA-256 differs from the build receipt.'
 }
-$gpg = Get-Command gpg.exe -ErrorAction SilentlyContinue
-if (-not $gpg) { $gpg = Get-Command gpg -ErrorAction SilentlyContinue }
-if (-not $gpg) { Stop-Build 'GnuPG is required to verify the official FFmpeg source signature.' }
-$gpgHome = Join-Path (Join-Path $repoRoot '.cache') ('ffmpeg-gpg-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $gpgHome | Out-Null
-& $gpg.Source --homedir $gpgHome --batch --import $ffmpegSigningKey *> $null
-if ($LASTEXITCODE -ne 0) { Stop-Build 'Could not import the FFmpeg release signing key.' }
-$fingerprintLines = & $gpg.Source --homedir $gpgHome --batch --with-colons --fingerprint
-if ($LASTEXITCODE -ne 0) { Stop-Build 'Could not read the FFmpeg release signing key fingerprint.' }
-$primaryFingerprint = [string]($fingerprintLines | Where-Object { $_ -like 'fpr:*' } | Select-Object -First 1 | ForEach-Object { ($_ -split ':')[9] })
-if ($primaryFingerprint -ne $ffmpegReleaseFingerprint) {
-  Stop-Build 'FFmpeg signing key fingerprint does not match the fingerprint published by ffmpeg.org.'
+$msysCandidates = @()
+if ($env:MSYS2_ROOT) { $msysCandidates += $env:MSYS2_ROOT }
+$msysCandidates += @('C:\msys64', 'C:\tools\msys64')
+$msysRoot = $msysCandidates | Where-Object { Test-Path (Join-Path $_ 'usr\bin\bash.exe') } | Select-Object -First 1
+if (-not $msysRoot) { Stop-Build 'MSYS2 UCRT64 with GnuPG is required to verify the FFmpeg source signature.' }
+$bash = Join-Path $msysRoot 'usr\bin\bash.exe'
+$cygpath = Join-Path $msysRoot 'usr\bin\cygpath.exe'
+$verifyScript = Join-Path $PSScriptRoot 'verify-ffmpeg-source.sh'
+if (-not (Test-Path $cygpath -PathType Leaf) -or -not (Test-Path $verifyScript -PathType Leaf)) {
+  Stop-Build 'MSYS2 cygpath or the pinned FFmpeg source verification script is missing.'
 }
-& $gpg.Source --homedir $gpgHome --batch --verify $ffmpegSourceSignature $ffmpegSourceArchive *> $null
-if ($LASTEXITCODE -ne 0) { Stop-Build 'FFmpeg source signature verification failed.' }
+function ConvertTo-MsysPath([string]$WindowsPath) {
+  $converted = & $cygpath -u $WindowsPath
+  if ($LASTEXITCODE -ne 0 -or -not $converted) { Stop-Build ('Could not convert a source verification path for MSYS2: ' + $WindowsPath) }
+  return ([string]$converted).Trim()
+}
+$verifyScriptArg = ConvertTo-MsysPath $verifyScript
+$ffmpegSourceArchiveArg = ConvertTo-MsysPath $ffmpegSourceArchive
+$ffmpegSourceSignatureArg = ConvertTo-MsysPath $ffmpegSourceSignature
+$ffmpegSigningKeyArg = ConvertTo-MsysPath $ffmpegSigningKey
+$oldSystem = $env:MSYSTEM
+$oldPathType = $env:MSYS2_PATH_TYPE
+$oldChere = $env:CHERE_INVOKING
+$oldErrorActionPreference = $ErrorActionPreference
+try {
+  $env:MSYSTEM = 'UCRT64'
+  $env:MSYS2_PATH_TYPE = 'minimal'
+  $env:CHERE_INVOKING = '1'
+  $ErrorActionPreference = 'Continue'
+  $signatureOutput = & $bash --login -c 'bash "$1" "$2" "$3" "$4"' 'medlog-verify-ffmpeg' `
+    $verifyScriptArg $ffmpegSourceArchiveArg $ffmpegSourceSignatureArg $ffmpegSigningKeyArg 2>&1
+  $signatureExitCode = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $oldErrorActionPreference
+  if ($null -eq $oldSystem) { Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue } else { $env:MSYSTEM = $oldSystem }
+  if ($null -eq $oldPathType) { Remove-Item Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue } else { $env:MSYS2_PATH_TYPE = $oldPathType }
+  if ($null -eq $oldChere) { Remove-Item Env:CHERE_INVOKING -ErrorAction SilentlyContinue } else { $env:CHERE_INVOKING = $oldChere }
+}
+if ($signatureExitCode -ne 0) { Stop-Build ('FFmpeg source signature verification failed: ' + [string]($signatureOutput -join ' ')) }
+$verifiedSourceHash = [string]($signatureOutput | Where-Object { $_ -match '^FFMPEG_SOURCE_SHA256=' } | Select-Object -Last 1)
+if (-not $verifiedSourceHash -or $verifiedSourceHash -notmatch '^FFMPEG_SOURCE_SHA256=[0-9a-f]{64}$') {
+  Stop-Build 'The FFmpeg source verifier did not return a valid SHA-256 after checking the signature.'
+}
+$verifiedSourceHash = $verifiedSourceHash.Substring('FFMPEG_SOURCE_SHA256='.Length)
+if (-not [StringComparer]::OrdinalIgnoreCase.Equals($ffmpegSourceHash, $verifiedSourceHash)) {
+  Stop-Build 'The signed FFmpeg source verifier returned a different archive SHA-256.'
+}
 $ffmpegConfigureArgs = @($ffmpegBuildInfo.configureArgs | ForEach-Object { [string]$_ })
 $requiredFfmpegArgs = @('--disable-autodetect', '--disable-shared', '--enable-static', '--disable-ffplay', '--disable-ffprobe', '--disable-doc', '--disable-debug', '--extra-ldflags=-static')
 foreach ($requiredArg in $requiredFfmpegArgs) {
@@ -153,8 +205,12 @@ foreach ($requiredArg in $requiredFfmpegArgs) {
 if (($ffmpegConfigureArgs -join ' ') -match '--enable-(gpl|nonfree)(\s|$)') {
   Stop-Build 'FFmpeg build receipt enables GPL or nonfree components.'
 }
-$ffmpegVersionOutput = & $FfmpegPath -version 2>&1
-$ffmpegExitCode = $LASTEXITCODE
+$previousPreference = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'
+  $ffmpegVersionOutput = & $FfmpegPath -version 2>&1
+  $ffmpegExitCode = $LASTEXITCODE
+} finally { $ErrorActionPreference = $previousPreference }
 $ffmpegVersion = [string]($ffmpegVersionOutput | Select-Object -First 1)
 if ($ffmpegExitCode -ne 0 -or $ffmpegVersion -notmatch '^ffmpeg version\s+9\.0\.2(?:\s|$)') {
   Stop-Build 'The staged FFmpeg executable failed its pinned version check (expected 9.0.2).'
@@ -168,8 +224,12 @@ foreach ($requiredArg in $requiredFfmpegArgs) {
     Stop-Build ('The staged FFmpeg configuration does not match its receipt; missing ' + $requiredArg + '.')
   }
 }
-$ffmpegLicenseOutput = & $FfmpegPath -L 2>&1
-$ffmpegLicenseExitCode = $LASTEXITCODE
+$previousPreference = $ErrorActionPreference
+try {
+  $ErrorActionPreference = 'Continue'
+  $ffmpegLicenseOutput = & $FfmpegPath -L 2>&1
+  $ffmpegLicenseExitCode = $LASTEXITCODE
+} finally { $ErrorActionPreference = $previousPreference }
 $ffmpegLicenseText = ([string]($ffmpegLicenseOutput -join ' ')) -replace '\s+', ' '
 if ($ffmpegLicenseExitCode -ne 0 -or $ffmpegLicenseText -notmatch 'GNU Lesser General Public License|LGPL') {
   Stop-Build 'The staged FFmpeg executable does not report an LGPL license.'
@@ -194,7 +254,6 @@ if (-not (Test-Path $builtWorker -PathType Leaf)) {
 }
 Copy-Item -Force $builtWorker $workerPath
 
-function Get-Sha256([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
 $workerHash = Get-Sha256 $workerPath
 $modelHash = Get-Sha256 $modelPath
 $ffmpegHash = Get-Sha256 $FfmpegPath
@@ -203,15 +262,27 @@ $compilerId = 'MSVC'
 $compilerVersion = 'unknown'
 $windowsSdkVersion = ''
 $platformToolset = ''
+$compilerInfoFile = Get-ChildItem -LiteralPath (Join-Path $buildDir 'CMakeFiles') -Filter 'CMakeCXXCompiler.cmake' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($compilerInfoFile) {
+  $compilerInfo = Get-Content -Raw -LiteralPath $compilerInfoFile.FullName
+  $compilerIdMatch = [regex]::Match($compilerInfo, 'set\(CMAKE_CXX_COMPILER_ID "([^"]+)"\)')
+  $compilerVersionMatch = [regex]::Match($compilerInfo, 'set\(CMAKE_CXX_COMPILER_VERSION "([^"]+)"\)')
+  if ($compilerIdMatch.Success) { $compilerId = $compilerIdMatch.Groups[1].Value }
+  if ($compilerVersionMatch.Success) { $compilerVersion = $compilerVersionMatch.Groups[1].Value }
+}
 if (Test-Path $cachePath) {
-  $cacheCompilerId = Select-String -Path $cachePath -Pattern '^CMAKE_CXX_COMPILER_ID:[^=]+=(.+)$' | Select-Object -First 1
-  $cacheCompilerVersion = Select-String -Path $cachePath -Pattern '^CMAKE_CXX_COMPILER_VERSION:[^=]+=(.+)$' | Select-Object -First 1
-  if ($cacheCompilerId) { $compilerId = $cacheCompilerId.Matches[0].Groups[1].Value }
-  if ($cacheCompilerVersion) { $compilerVersion = $cacheCompilerVersion.Matches[0].Groups[1].Value }
   $cacheSdk = Select-String -Path $cachePath -Pattern '^CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION[^=]*=(.+)$' | Select-Object -First 1
   $cacheToolset = Select-String -Path $cachePath -Pattern '^CMAKE_GENERATOR_TOOLSET[^=]*=(.+)$' | Select-Object -First 1
   if ($cacheSdk) { $windowsSdkVersion = $cacheSdk.Matches[0].Groups[1].Value }
   if ($cacheToolset) { $platformToolset = $cacheToolset.Matches[0].Groups[1].Value }
+}
+if (-not $windowsSdkVersion) {
+  $workerProject = Join-Path $buildDir 'medilog-whisper-worker.vcxproj'
+  if (Test-Path $workerProject -PathType Leaf) {
+    $projectText = Get-Content -Raw -LiteralPath $workerProject
+    $sdkMatch = [regex]::Match($projectText, '<WindowsTargetPlatformVersion>([^<]+)</WindowsTargetPlatformVersion>')
+    if ($sdkMatch.Success) { $windowsSdkVersion = $sdkMatch.Groups[1].Value }
+  }
 }
 if ($compilerId -ne 'MSVC' -or $compilerVersion -notmatch '^[0-9]+\.[0-9]+') {
   Stop-Build 'CMake did not report the Visual Studio C++ compiler version; the asset manifest cannot be reproduced.'

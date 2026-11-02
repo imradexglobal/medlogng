@@ -1,0 +1,33 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper.cpp-v1.9.5\src\whisper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper.cpp-v1.9.5\src\aneforge\whisper-aneforge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper.cpp-v1.9.5\include\whisper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper.cpp-v1.9.5\src\whisper-arch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper.cpp-v1.9.5\src\aneforge\whisper-aneforge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\User\Documents\GitHub\medlogng\.cache\whisper.cpp-v1.9.5\src\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{5D6F0AE1-2B5B-3DA7-9960-B3E161CCE108}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4B47DF0E-3CCA-3709-94D8-ACE1AAD53D66}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

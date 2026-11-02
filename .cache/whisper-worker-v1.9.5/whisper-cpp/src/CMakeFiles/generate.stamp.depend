@@ -1,0 +1,8 @@
+# CMake generation dependency list for this directory.
+C:/Program Files/CMake/share/cmake-4.5/Modules/CheckCSourceCompiles.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/CheckIncludeFile.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/CheckLibraryExists.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/FindPackageHandleStandardArgs.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/FindPackageMessage.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/FindThreads.cmake
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper.cpp-v1.9.5/src/CMakeLists.txt

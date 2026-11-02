@@ -1,0 +1,10 @@
+prefix=C:/Program Files/medilog_whisper_worker
+exec_prefix=${prefix}
+libdir=C:/Program Files/medilog_whisper_worker/lib
+includedir=C:/Program Files/medilog_whisper_worker/include
+
+Name: whisper
+Description: Port of OpenAI's Whisper model in C/C++
+Version: 1.9.5-dev
+Libs: -L${libdir} -lggml  -lggml-base -lwhisper
+Cflags: -I${includedir}

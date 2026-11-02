@@ -1,0 +1,10 @@
+# CMake generation dependency list for this directory.
+C:/Program Files/CMake/share/cmake-4.5/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/CheckCXXCompilerFlag.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/CheckCXXSourceCompiles.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/Internal/CheckCompilerFlag.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/Internal/CheckFlagCommonConfig.cmake
+C:/Program Files/CMake/share/cmake-4.5/Modules/Internal/CheckSourceCompiles.cmake
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper.cpp-v1.9.5/ggml/cmake/common.cmake
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper.cpp-v1.9.5/ggml/src/CMakeLists.txt
+C:/Users/User/Documents/GitHub/medlogng/.cache/whisper.cpp-v1.9.5/ggml/src/ggml-version.h.in

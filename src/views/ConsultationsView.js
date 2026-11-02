@@ -216,6 +216,9 @@ export async function ConsultationsView(app, params = {}) {
   let unsubs = []
   let watchedOrg = activeOrg
   let tick = null
+  // IDs covered by the bounded live query. Reconcile this slice on every
+  // snapshot while retaining older rows loaded by pagination.
+  let liveEncounterIds = new Set()
 
   shell(app, {
     active: '/consultations',
@@ -281,6 +284,7 @@ export async function ConsultationsView(app, params = {}) {
           '<button type="button" class="enc-plan-tool" data-plan-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>' +
           '<button type="button" class="enc-plan-tool" data-plan-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>' +
           '<button type="button" class="enc-plan-tool enc-plan-color-toggle" id="planColorToggle" title="Text color" aria-label="Text color"><strong>A</strong><span class="enc-plan-color-swatch" id="planColorSwatch"></span></button>' +
+          '<span id="planSpeechSlot" class="enc-plan-speech-slot" aria-label="Dictate treatment plan"></span>' +
           '<span class="enc-plan-toolbar-spacer"></span>' +
           '<span class="mut enc-plan-state" id="planState"></span>' +
           '<button type="button" class="enc-plan-tool enc-plan-expand" id="planExpandB" title="Expand editor" aria-label="Expand editor">⛶</button>' +
@@ -300,10 +304,11 @@ export async function ConsultationsView(app, params = {}) {
       '<div data-wp="labs" hidden><div id="encLabs"></div></div>' +
       '</div>' +
       // Fixed action bar: never scrolls away, whatever tab is showing.
-      '<div class="toolbar enc-ws-bar"><button class="btn ghost sm" id="vitalsB">+ Vitals</button><button class="btn ghost sm" id="dxB">+ Diagnosis</button><button class="btn ghost sm" id="rxB">+ Prescription</button><button class="btn ghost sm" id="labB">+ Lab order</button><button class="btn ghost sm" id="planB">+ Plan</button><button class="btn ghost sm" id="billB">+ Bill item</button>' +
-      (caps.canEdit ? '<button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm" id="closeEncB">Close encounter →</button>' : '') +
+      '<div class="enc-ws-bar"><div class="enc-action-group enc-action-add" aria-label="Add to encounter"><span class="enc-action-label">Add to encounter</span>' +
+      '<button class="btn ghost sm" id="vitalsB">Vitals</button><button class="btn ghost sm" id="dxB">Diagnosis</button><button class="btn ghost sm" id="rxB">Prescription</button><button class="btn ghost sm" id="labB">Lab order</button><button class="btn ghost sm" id="planB">Plan</button><button class="btn ghost sm" id="billB">Bill item</button></div>' +
+      (caps.canEdit ? '<div class="enc-action-group enc-action-flow" aria-label="Encounter workflow"><span class="enc-action-label">Workflow</span><button class="btn ghost sm" id="advB">Advance →</button><button class="btn sm enc-close-action" id="closeEncB">Close encounter</button></div>' : '') +
       '<span id="delEncSlot"></span>' +
-      (bedCaps.canAdmit ? '<button class="btn sm" id="admitFromEncB">Admit patient</button>' : '') + '</div>' +
+      (bedCaps.canAdmit ? '<button class="btn sm enc-admit-action" id="admitFromEncB">Admit patient</button>' : '') + '</div>' +
       '</div></div>',
   })
 
@@ -376,6 +381,30 @@ export async function ConsultationsView(app, params = {}) {
     }
   }
 
+  function applyLiveEncounters(rows) {
+    const nextLiveIds = new Set(rows.map((e) => e.id))
+    const byId = new Map()
+    // Keep paginated rows outside the live window, replace every row inside
+    // it with the newest snapshot value, and naturally drop deleted IDs.
+    for (const e of encounters) {
+      if (!liveEncounterIds.has(e.id)) byId.set(e.id, e)
+    }
+    for (const e of rows) byId.set(e.id, e)
+    encounters = [...byId.values()].sort((a, b) => b.createdAt - a.createdAt)
+    liveEncounterIds = nextLiveIds
+    refreshSelectedEncounter()
+    renderQueue()
+    renderWorkspace()
+  }
+
+  function removeEncounterLocally(id) {
+    encounters = encounters.filter((e) => e.id !== id)
+    liveEncounterIds.delete(id)
+    if (selectedEncounter?.id === id) selectedEncounter = null
+    renderQueue()
+    renderWorkspace()
+  }
+
   const more = createLoadMore(loadMore)
 
   // Append the next chunk of the queue. The first call has no cursor and
@@ -425,6 +454,7 @@ export async function ConsultationsView(app, params = {}) {
   // A fresh read of the whole queue, keeping the open encounter selected.
   function reload() {
     encounters = []
+    liveEncounterIds = new Set()
     cursor = null
     hasMore = false
     fillIndex.reset()
@@ -483,7 +513,7 @@ function visibleEncounters() {
     const openN = encounters.filter((e) => e.status !== 'closed').length
     if (cnt) cnt.textContent = openN + ' open'
     if (!tbl) return
-    const head = '<thead><tr><th>Patient</th><th>Dr</th><th>Waited</th><th>Status</th></tr></thead>'
+    const head = '<thead><tr><th>Patient</th><th>Dr</th><th>Waited</th><th>Status</th><th class="enc-queue-actions" aria-label="Actions"></th></tr></thead>'
     const shown = visibleEncounters()
     const rows = shown.map((e) => {
       const m = patientMeta(e)
@@ -496,9 +526,10 @@ function visibleEncounters() {
         '<td><strong>' + esc(m.name) + '</strong></td>' +
         '<td>' + dr + '</td>' +
         '<td class="mut ' + (waited ? waitTone(waited) : '') + '">' + esc(waitedFor(e.createdAt, e.status === 'closed' ? e.updatedAt : 0)) + '</td>' +
-        '<td>' + kebabCell({ rowId: e.id, items: [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] }) + '</td></tr>'
+        '<td>' + encBadge(e.status) + '</td>' +
+        '<td class="enc-queue-actions">' + kebabCell({ rowId: e.id, items: [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] }) + '</td></tr>'
     }).join('')
-    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
+    tbl.innerHTML = head + '<tbody>' + (rows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No encounters match this filter. Try adjusting the search or status filter.</td></tr>') + '</tbody>'
     more.mount(tbl.closest('.tblwrap'))
     // Wire kebab menus for queue rows (matching PatientsView pattern)
 wireKebabs(tbl, async (rowId, action) => {
@@ -508,14 +539,37 @@ wireKebabs(tbl, async (rowId, action) => {
         if (window.confirm('Delete this closed encounter?')) {
           try {
             await deleteEncounter(rowId)
+            removeEncounterLocally(rowId)
             toast('Encounter deleted')
-            renderQueue()
           } catch (e) {
             toast(friendlyWriteError(e))
           }
         }
       }
     })
+    tbl.onclick = (ev) => {
+      if (ev.target.closest('button')) return
+      const row = ev.target.closest('tr[data-id]')
+      if (row) selectEncounter(row.getAttribute('data-id'))
+    }
+    tbl.onkeydown = (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return
+      const row = ev.target.closest('tr[data-id]')
+      if (!row || ev.target.closest('button')) return
+      ev.preventDefault()
+      selectEncounter(row.getAttribute('data-id'))
+    }
+    ensureVisibleMeta()
+  }
+
+  function selectEncounter(id) {
+    const encounter = encounters.find((e) => e.id === id)
+    if (!encounter) return
+    selectedEncounter = encounter
+    document.querySelectorAll('#enc-tbl tr[data-id]').forEach((row) => {
+      row.classList.toggle('sel', row.getAttribute('data-id') === id)
+    })
+    renderWorkspace()
     ensureVisibleMeta()
   }
 
@@ -679,10 +733,7 @@ wireKebabs(tbl, async (rowId, action) => {
         ? kebabCell({ rowId: e.id, items: [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] }) : ''
       wireKebabs(delSlot, async (rowId, action) => {
         if (action === 'delete') {
-          confirmDelete('this closed encounter', () => deleteEncounter(rowId), () => {
-            selectedEncounter = null
-            reload()
-          })
+          confirmDelete('this closed encounter', () => deleteEncounter(rowId), () => removeEncounterLocally(rowId))
         }
       })
     }
@@ -1446,7 +1497,16 @@ wireKebabs(tbl, async (rowId, action) => {
       if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg }))
     })
     const planSpeechField = document.getElementById('planEditor')
-    if (planSpeechField) speechCleanups.push(attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg }))
+    if (planSpeechField) {
+      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg })
+      const speechControl = planSpeechField.nextElementSibling
+      const speechSlot = document.getElementById('planSpeechSlot')
+      if (speechControl && speechSlot) {
+        speechControl.classList.add('speech-plan-control')
+        speechSlot.append(speechControl)
+      }
+      speechCleanups.push(cleanup)
+    }
   }
   const qSearch = document.getElementById('qSearch')
   if (qSearch) {
@@ -1487,67 +1547,18 @@ wireKebabs(tbl, async (rowId, action) => {
   function subscribeLive() {
     teardownListeners()
     if (!watchedOrg) return
-    // The live feed only ever knows about the newest slice of the queue.
-    // Process live updates regardless of cursor state — remove encounters
-    // that are deleted/add new ones, but leave the accumulated list intact
-    // so the user's scroll position is not disrupted.
-    if (cursor != null) {
-      // Still subscribe but only process changes that add/remove from the
-      // front of the list; the bulk of the queue remains as the user left it.
-      unsubs.push(
-        subscribeOrgEncounters(watchedOrg,
-          (rows) => {
-            const seen = new Set(encounters.map((e) => e.id))
-            const newRows = rows.filter((e) => !seen.has(e.id))
-            if (newRows.length) {
-              encounters = newRows.concat(encounters)
-              refreshSelectedEncounter()
-              renderQueue()
-              renderWorkspace()
-            }
-          },
-          (e) => {
-            console.warn('[consultations] live update failed; refreshing once:', e?.message || e)
-            listOrgEncountersPage(watchedOrg)
-              .then((r) => {
-                const seen = new Set(encounters.map((e) => e.id))
-                const newRows = r.rows.filter((e) => !seen.has(e.id))
-                if (newRows.length) {
-                  encounters = newRows.concat(encounters)
-                  refreshSelectedEncounter()
-                  renderQueue()
-                  renderWorkspace()
-                }
-              })
-              .catch(() => {})
-          })
-      )
-    } else {
-      unsubs.push(
-        subscribeOrgEncounters(watchedOrg,
-          (rows) => {
-            if (cursor != null) return
-            const seen = new Set(encounters.map((e) => e.id))
-            encounters = rows.filter((e) => !seen.has(e.id)).concat(encounters)
-            refreshSelectedEncounter()
-            renderQueue()
-            renderWorkspace()
-          },
-          (e) => {
-            console.warn('[consultations] live update failed; refreshing once:', e?.message || e)
-            listOrgEncountersPage(watchedOrg)
-              .then((r) => {
-                if (cursor != null) return
-                const seen = new Set(encounters.map((e) => e.id))
-                encounters = r.rows.filter((e) => !seen.has(e.id)).concat(encounters)
-                refreshSelectedEncounter()
-                renderQueue()
-                renderWorkspace()
-              })
-              .catch(() => {})
-          })
-      )
-    }
+    // The live feed covers the newest 100 encounters. Reconcile that slice
+    // while preserving older rows already loaded by pagination.
+    unsubs.push(
+      subscribeOrgEncounters(watchedOrg,
+        applyLiveEncounters,
+        (e) => {
+          console.warn('[consultations] live update failed; refreshing once:', e?.message || e)
+          listOrgEncountersPage(watchedOrg, { pageSize: 100 })
+            .then((r) => applyLiveEncounters(r.rows))
+            .catch(() => {})
+        })
+    )
   }
 
   onCleanup(() => {

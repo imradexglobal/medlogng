@@ -8,7 +8,6 @@ cache_dir="$repo_root/.cache/ffmpeg-source"
 source_url='https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz'
 signature_url="$source_url.asc"
 key_url='https://ffmpeg.org/ffmpeg-devel.asc'
-fingerprint='FCF986EA15E6E293A5644F10B4322F04D67658D8'
 archive="$source_dir/ffmpeg-9.0.2.tar.xz"
 signature="$source_dir/ffmpeg-9.0.2.tar.xz.asc"
 key="$source_dir/ffmpeg-devel.asc"
@@ -44,15 +43,9 @@ download_if_missing "$source_url" "$archive"
 download_if_missing "$signature_url" "$signature"
 download_if_missing "$key_url" "$key"
 
-gpg_home="$(mktemp -d "$cache_dir/gpg.XXXXXX")"
-chmod 700 "$gpg_home"
-trap 'rm -rf "$gpg_home"' EXIT
-gpg --homedir "$gpg_home" --batch --import "$key" >/dev/null 2>&1 || fail 'Could not import the official FFmpeg release key.'
-actual_fingerprint="$(gpg --homedir "$gpg_home" --batch --with-colons --fingerprint | awk -F: '$1 == "fpr" { print $10; exit }')"
-[[ "$actual_fingerprint" == "$fingerprint" ]] || fail "FFmpeg release key fingerprint mismatch (found ${actual_fingerprint:-none})."
-gpg --homedir "$gpg_home" --batch --verify "$signature" "$archive" || fail 'Official FFmpeg source signature verification failed; source will not be extracted or built.'
-
-source_sha="$(sha256sum "$archive" | awk '{print tolower($1)}')"
+verification_output="$(bash "$repo_root/scripts/verify-ffmpeg-source.sh" "$archive" "$signature" "$key")" || fail 'Official FFmpeg source signature verification failed; source will not be extracted or built.'
+source_sha="${verification_output#FFMPEG_SOURCE_SHA256=}"
+[[ "$source_sha" =~ ^[0-9a-f]{64}$ ]] || fail 'FFmpeg source verifier did not return a valid SHA-256.'
 if [[ -d "$build_dir" && -f "$build_dir/.medlog-source-sha256" && "$(cat "$build_dir/.medlog-source-sha256")" == "$source_sha" ]]; then
   echo 'Refreshing source files from the verified FFmpeg archive while retaining incremental build outputs.'
   tar -xf "$archive" --strip-components=1 -C "$build_dir"

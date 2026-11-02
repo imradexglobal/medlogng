@@ -168,6 +168,8 @@
    +Vitals / +Diagnosis / Advance never scroll out of reach. Below 861px the
    grid collapses to one column and everything falls back to normal page flow. */
 .consult-grid { align-items: stretch; min-width: 0; }
+.enc-queue-actions { width: 38px; min-width: 38px; padding-right: 8px !important; text-align: right; }
+.enc-queue-actions .kebab-cell { display: flex; justify-content: flex-end; }
 .enc-ws { display: flex; flex-direction: column; min-height: 0; }
 .enc-ws .enc-ws-head { flex: none; margin: -16px -16px 0; padding: 12px 16px 10px; border-bottom: 1px solid var(--emr-line); border-radius: var(--r) var(--r) 0 0; background: #f2f7fc; }
 .enc-ws-head .card-head { margin-bottom: 4px; }
@@ -220,12 +222,19 @@
 .enc-diagnoses .pill { margin: 0; }
 .enc-overview-empty { margin: 7px 0 0; color: var(--emr-muted); font-size: .78rem; }
 .soap-note-grid { display: grid; gap: 8px !important; }
-.soap-note-field { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 7px; min-width: 0; margin: 0 !important; padding: 0; border: 0; background: transparent; }
+.soap-note-field { display: grid; grid-template-columns: 28px minmax(0, 1fr) 34px; align-items: start; gap: 7px; min-width: 0; margin: 0 !important; padding: 0; border: 0; background: transparent; }
 .soap-note-heading { display: flex; align-items: flex-start; justify-content: center; margin: 9px 0 0; color: var(--emr-ink); font-size: .8rem; font-weight: 700; }
 .soap-note-letter { display: inline-flex; align-items: center; justify-content: center; color: var(--emr-info); font-weight: 800; cursor: help; }
 .soap-note-letter:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
 .soap-note-field textarea.input { box-sizing: border-box; width: 100%; height: 34px; min-height: 34px; margin: 0 !important; overflow-y: hidden; overflow-wrap: anywhere; padding: 6px 8px; line-height: 1.25; resize: none; }
-.soap-note-field .speech-control { grid-column: 2; margin-top: -3px; }
+.soap-note-field .speech-control { grid-column: 3; grid-row: 1; align-self: stretch; position: relative; margin: 0; }
+.soap-note-field .speech-control-row { min-height: 34px; height: 34px; justify-content: center; gap: 0; }
+.soap-note-field .speech-record { width: 32px; height: 32px; min-height: 32px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
+.soap-note-field .speech-record:hover { background: #eff6ff; border-color: #bfdbfe; }
+.soap-note-field .speech-record-label { display: none; }
+.soap-note-field .speech-status { position: absolute; top: calc(100% + 2px); right: 0; z-index: 3; width: max-content; max-width: min(50vw, 240px); padding: 2px 5px; border-radius: 4px; background: #fff; }
+.soap-note-field .speech-review { grid-column: 2 / 4; }
+.soap-note-field:has(.speech-review:not([hidden])) .speech-control { grid-column: 2 / 4; grid-row: 2; }
 .speech-control { min-width: 0; margin-top: 4px; color: var(--emr-muted); }
 .speech-control-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
 .speech-record, .speech-cancel, .speech-retry { min-height: 30px; padding: 4px 9px; border: 1px solid #cbd5e1; border-radius: 7px; background: #f8fafc; color: #1e3a5f; font: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
@@ -260,6 +269,15 @@
 .enc-plan-color-toggle { color: #b91c1c; font-size: .98rem; }
 .enc-plan-color-swatch { width: 13px; height: 3px; margin: 0 0 -8px -10px; border-radius: 2px; background: #111827; }
 .enc-plan-toolbar-spacer { flex: 1; min-width: 2px; }
+.enc-plan-speech-slot { display: inline-flex; flex: none; align-items: center; }
+.enc-plan-speech-slot .speech-control { position: relative; width: 30px; margin: 0; }
+.enc-plan-speech-slot .speech-control-row { width: 30px; height: 30px; min-height: 30px; justify-content: center; gap: 0; }
+.enc-plan-speech-slot .speech-record { width: 30px; height: 30px; min-height: 30px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
+.enc-plan-speech-slot .speech-record:hover { background: #eaf1f7; border-color: transparent; }
+.enc-plan-speech-slot .speech-record-label { display: none; }
+.enc-plan-speech-slot .speech-status { position: absolute; top: 31px; left: 0; z-index: 6; width: max-content; max-width: 220px; padding: 2px 5px; border-radius: 4px; background: #fff; box-shadow: 0 1px 4px rgba(15,30,46,.12); }
+.enc-plan-speech-slot .speech-cancel { position: absolute; top: 31px; left: 0; z-index: 7; }
+.enc-plan-speech-slot .speech-review { position: absolute; top: 35px; left: 0; z-index: 6; width: min(420px, calc(100vw - 48px)); box-sizing: border-box; border: 1px solid var(--emr-line); box-shadow: 0 8px 24px rgba(15,30,46,.16); }
 .enc-plan-state { max-width: 80px; overflow: hidden; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .enc-plan-expand { font-size: 1.1rem; }
 .enc-plan-save { flex: none; padding: 5px 10px; }
@@ -290,10 +308,20 @@
   flex: none; position: sticky; bottom: 0; z-index: 2;
   /* Beats the shared `.toolbar` margin declared further down, so the bar
      bleeds to the card's edges instead of floating above its bottom. */
-  margin: 8px -16px -16px !important; padding: 10px 16px;
+  margin: 8px -16px -16px !important; padding: 9px 16px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--emr-card); border-top: 1px solid var(--emr-line);
   border-radius: 0 0 var(--r) var(--r);
 }
+.enc-action-group { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; min-width: 0; }
+.enc-action-add { flex: 1 1 420px; }
+.enc-action-flow { flex: 0 1 auto; padding-left: 10px; border-left: 1px solid var(--emr-line); }
+.enc-action-label { flex: 0 0 100%; color: var(--emr-muted); font-size: .64rem; font-weight: 750; letter-spacing: .055em; line-height: 1; text-transform: uppercase; }
+.enc-ws .enc-ws-bar .btn { min-height: 32px; }
+.enc-ws .enc-ws-bar .enc-close-action { background: #9f2d28; border-color: #9f2d28; }
+.enc-ws .enc-ws-bar .enc-close-action:hover { background: #84231f; border-color: #84231f; }
+.enc-ws .enc-ws-bar #delEncSlot { margin-left: auto; }
+.enc-ws .enc-ws-bar .enc-admit-action { flex: none; }
 @media (min-width: 861px) {
   .consult-grid { height: calc(100dvh - var(--sticky-top, 60px) - 52px); }
   .consult-grid > .card {
@@ -312,6 +340,10 @@
 @media (max-width: 640px) {
   .enc-ws .enc-ws-head { margin: -14px -14px 0; padding-right: 14px; padding-left: 14px; background: #f2f7fc; }
   .enc-ws .enc-tabs { margin-right: -14px; margin-left: -14px; }
+  .enc-ws .enc-ws-bar { margin-right: -14px !important; margin-left: -14px !important; padding: 9px 14px calc(9px + env(safe-area-inset-bottom)); gap: 8px; }
+  .enc-action-add { flex-basis: 100%; }
+  .enc-action-flow { flex: 1 1 100%; padding: 8px 0 0; border-left: 0; border-top: 1px solid var(--emr-line); }
+  .enc-ws .enc-ws-bar #delEncSlot { margin-left: auto; }
 }
 @media (max-width: 400px) {
   .enc-progress-section .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
