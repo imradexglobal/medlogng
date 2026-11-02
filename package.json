@@ -12,6 +12,7 @@
     "test": "node scripts/smoke.mjs && npm run test:services && npm run test:clinical-drafts && npm run test:clinical-ai",
     "test:clinical-drafts": "node scripts/test/clinical-drafts.test.mjs",
     "test:clinical-ai": "node scripts/test/clinical-ai.local.test.mjs",
+    "test:clinical-ai:emulator": "node scripts/test/run-clinical-ai-emulator.mjs",
     "test:hub": "node scripts/test/hub.smoke.mjs",
     "test:speech": "node scripts/test/speech.worker.test.mjs && node scripts/test/speech.jobs.test.mjs && node scripts/test/speech.sessions.test.mjs && node scripts/test/speech.assets.test.mjs && node scripts/test/speech.transport.test.mjs",
     "test:speech:listeners": "node scripts/test/speech.listeners.test.mjs",

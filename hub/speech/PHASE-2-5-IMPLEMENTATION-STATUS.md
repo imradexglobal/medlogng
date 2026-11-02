@@ -17,7 +17,7 @@ This status supplements `PHASES-2-5-ROADMAP.md`. The roadmap remains the accepta
 - Windows Host backend now has a server-side Ollama-compatible adapter restricted to loopback, with no browser credentials or remote-provider fallback. Host verifies online identity, active membership, `encounter.edit`, and authoritative encounter/patient/hospital binding before generation. Generated and review actions are audit-written without transcript text.
 - Firebase Hosting now has callable Function entry points with Firebase-authenticated identity, live membership/capability checks, encounter binding, evidence validation and audit events. Its provider interface is deliberately unconfigured; it returns a clear unavailable status until an approved adapter is supplied. Firebase Hosting has no Hub and the client calls the callable backend rather than `/clinical-drafts`.
 - Synthetic adapter tests verify structured output, exact evidence spans, absent fabricated citation rejection, remote endpoint denial and fail-closed behavior. This is a deterministic mock-provider test, not a real model run.
-- No Ollama runtime/model is installed, so real AI-generated content, clinician browser demonstration and clinical accuracy are not validated. A citation match cannot prove semantic entailment; the UI explicitly tells clinicians to verify each claim. The Firebase Functions dependency lock/build/deploy could not be completed in this environment, and no provider is approved/configured.
+- No Ollama runtime/model is installed, so real AI-generated content, clinician browser demonstration and clinical accuracy are not validated. A citation match cannot prove semantic entailment; the UI explicitly tells clinicians to verify each claim. Firebase Functions dependencies and a lockfile are now installed; policy/auth tests pass with an injected test store. The Firebase emulator and deployed integration were not run because free RAM fell below 1 GB, and no cloud provider is approved/configured.
 
 ## Phase 3 — clinical intelligence
 
@@ -51,6 +51,8 @@ These published facts are insufficient to approve processing identifiable clinic
 - `npm run test:clinical-drafts` — PASS (synthetic evidence, tampering, binding, explicit review and capability checks).
 - `npm run test:speech` — PASS (existing speech worker/job/session/assets suites plus Hub-vs-Hosting deployment detection).
 - `npm run test:clinical-ai` — PASS (synthetic mock adapter: draft structure, exact quote spans, citation fabrication rejection, non-loopback denial and unconfigured-model fail-closed behavior). It does not invoke Ollama or an external model.
+- `npm --prefix functions test` — PASS (injected-store callable policy tests: authenticated identity, active membership/capability, patient/encounter binding, evidence validation, audit record and fail-closed provider).
+- Host AI and Whisper inference share a single scheduling lane; automated tests confirm a mock AI call does not overlap a mock Whisper call, bound queue capacity and worker unloading request. No actual model/Whisper performance was measured.
 - `npm run build` — PASS after the consultation UI and backend client changes.
 
 These tests do not demonstrate clinical AI quality, Firebase-only speech, provider privacy, production security, or Phase 2–5 acceptance.

@@ -3,8 +3,8 @@ import {
   normalizeBedId, normalizeWardId, validateAdmissionInput, occupancySummary,
 } from '../../src/features/admissions/domain.js'
 
-assert.equal(normalizeBedId('1'), '1')
-assert.equal(normalizeBedId('Bed 01'), '1')
+assert.equal(normalizeBedId('1'), 'Bed 1')
+assert.equal(normalizeBedId('Bed 01'), 'Bed 1')
 assert.equal(normalizeWardId(' Female Ward '), 'female ward')
 
 const wards = [{ id: 'w1', name: 'Female Ward', totalBeds: 2 }, { id: 'w2', name: 'Overflow', totalBeds: 0 }]

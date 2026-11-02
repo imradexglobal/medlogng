@@ -10,10 +10,11 @@ export function kebabTrigger({ rowId, label = '⋮', ariaLabel = 'More actions' 
 }
 
 export function kebabMenu({ rowId, items }) {
-  // items: [{ label, tone: 'default'|'danger', dataAction }]
+  // items: [{ label, tone: 'default'|'danger', dataAction, description }]
   const itemsHtml = items.map((it) => {
-    const cls = it.tone === 'danger' ? 'kebab-item danger' : 'kebab-item'
-    return `<button type="button" class="${cls}" data-kebab-action="${esc(String(it.dataAction))}" data-kebab-row="${esc(String(rowId))}">${esc(it.label)}</button>`
+    const toneClass = it.tone === 'danger' ? 'kebab-item danger' : 'kebab-item'
+    const tooltip = it.description ? ` title="${esc(it.description)}"` : ''
+    return `<button type="button" class="${toneClass}" data-kebab-action="${esc(String(it.dataAction))}" data-kebab-row="${esc(String(rowId))}"${tooltip}>${esc(it.label)}</button>`
   }).join('')
   return `<div class="kebab-menu" data-kebab-menu="${esc(String(rowId))}" hidden>${itemsHtml}</div>`
 }
@@ -44,6 +45,9 @@ export function wireKebabs(root, onAction) {
       if (menu) menu.hidden = true
       if (onAction) onAction(rowId, action)
     }
+    // Add keyboard accessibility: activate on Enter/Space, focus management
+    btn.setAttribute('role', 'menuitem')
+    btn.setAttribute('tabindex', '0')
   })
 
   if (!_outsideWired) {

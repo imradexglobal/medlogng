@@ -47,7 +47,9 @@ import { initFoundation, foundationSummary } from './foundation.js'
 import { createAuthenticator } from './auth.js'
 import { createAuditor } from './audit.js'
 import { createLocalClinicalAi } from './clinical-ai/ollama.js'
+import { createInferenceScheduler } from './clinical-ai/inferenceScheduler.js'
 import { listLanAddresses, startupLines, describeListenError } from './netinfo.js'
+import { checkDeepgram, transcribeWithDeepgram } from '../functions/speechProvider.js'
 
 const VERSION = 'hub-2.0.0'
 const MAX_BODY = 2 * 1024 * 1024 // 2 MB: enough for a bounded, compressed offline result PDF
@@ -292,13 +294,20 @@ function makeStaticHandler(staticDir) {
 // ---- request handler -------------------------------------------------------
 
 export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
-  speechJobs = null, speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, clinicalAi = null, verifiedHttpsAddresses = new Set() }) {
-  async function recordClinicalAiAudit(action, uid, orgId, patientId, encounterId) {
+  speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, clinicalAi = null, verifiedHttpsAddresses = new Set(), speechProvider = transcribeWithDeepgram }) {
+  async function recordClinicalAiAudit(action, uid, orgId, patientId, encounterId, decisions = {}, metadata = null) {
     if (!db) throw new Error('Clinical audit storage is unavailable.')
     await db.collection('audit_events').add({
       action: 'clinical_draft.' + action, actor_user_id: uid, organization_id: orgId,
       actor_organization_id: orgId, source: 'clinical-ai', operation: action,
       patient_id: patientId, record_id: encounterId, occurredAt: new Date(),
+      ...(action === 'approved' || action === 'rejected' ? {
+        accepted_suggestions: decisions.accepted || [], rejected_suggestions: decisions.rejected || [],
+      } : {}),
+      ...(action === 'generated' && metadata ? {
+        model_name: String(metadata.model || '').slice(0, 160), model_digest: String(metadata.modelDigest || '').slice(0, 160),
+        generation_ms: Number.isFinite(metadata.totalDurationMs) ? metadata.totalDurationMs : null,
+      } : {}),
     })
   }
   async function authorizeClinicalDraftRequest(req, orgId, patientId, encounterId) {
@@ -331,13 +340,56 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
         json(res, 400, { ok: false, error: 'Organization, patient, encounter and a bounded transcript are required.' }); return
       }
       const identity = await authorizeClinicalDraftRequest(req, orgId, patientId, encounterId)
-      const draft = await clinicalAi.generate(transcript)
-      await recordClinicalAiAudit('generated', identity.uid, orgId, patientId, encounterId)
-      json(res, 200, { ok: true, draft, binding: { uid: identity.uid, organizationId: orgId, patientId, encounterId } })
+      const generated = clinicalAi.generateDetailed ? await clinicalAi.generateDetailed(transcript) : { draft: await clinicalAi.generate(transcript), metadata: null }
+      const draft = generated?.draft || generated
+      const metadata = generated?.draft ? generated.metadata || null : null
+      await recordClinicalAiAudit('generated', identity.uid, orgId, patientId, encounterId, {}, metadata)
+      json(res, 200, { ok: true, draft, metadata, binding: { uid: identity.uid, organizationId: orgId, patientId, encounterId } })
       log.info('[hub] clinical draft generated', { uid: identity.uid, orgId, encounterId })
     } catch (error) {
       const status = Number(error?.status) || (error?.expose ? Number(error.status) || 400 : 503)
       json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Clinical draft generation failed. Check local AI service status.' })
+    }
+  }
+  async function handleSpeechTranscribe(req, res, url) {
+    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Speech transcription requires HTTPS.' }); return }
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) { req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return }
+    if (process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO !== 'true' || !process.env.DEEPGRAM_API_KEY || !process.env.DEEPGRAM_ENDPOINT) {
+      req.resume(); json(res, 503, { ok: false, error: 'Online clinical transcription is not configured for this Host.' }); return
+    }
+    const ip = String(req.socket.remoteAddress || 'unknown')
+    if (!rateLimit('speech-online:' + ip, 12).ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many transcription requests. Wait and retry.' }); return }
+    const orgId = String(url.searchParams.get('orgId') || '')
+    const patientId = String(url.searchParams.get('patientId') || '')
+    const encounterId = String(url.searchParams.get('encounterId') || '')
+    const requestId = String(req.headers['x-speech-request-id'] || '')
+    if (![orgId, patientId, encounterId].every(Boolean) || !/^[A-Za-z0-9_-]{8,100}$/.test(requestId)) { req.resume(); json(res, 400, { ok: false, error: 'Hospital, patient, consultation and request id are required.' }); return }
+    try {
+      const identity = await authenticator.verifyOnline(req)
+      await authenticator.authorize(identity, orgId, 'encounter.edit')
+      if (!db) throw Object.assign(new Error('Authoritative consultation access is unavailable.'), { status: 503, expose: true })
+      const encounterSnapshot = await db.collection('encounters').doc(encounterId).get()
+      const encounter = encounterSnapshot.exists ? encounterSnapshot.data() || {} : null
+      if (!encounter || encounter.organization_id !== orgId || encounter.patient_id !== patientId) throw Object.assign(new Error('Consultation does not belong to this patient and hospital.'), { status: 403, expose: true })
+      const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+      if (!contentType.startsWith('audio/')) { req.resume(); json(res, 415, { ok: false, error: 'Send a supported audio recording.' }); return }
+      const chunks = []; let size = 0
+      for await (const chunk of req) {
+        size += chunk.length
+        if (size > 25 * 1024 * 1024) throw Object.assign(new Error('Audio exceeds the 25 MB limit.'), { status: 413, expose: true })
+        chunks.push(chunk)
+      }
+      const audio = Buffer.concat(chunks)
+      const result = await speechProvider({ audio, contentType, apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT })
+      const record = { action: 'speech.transcription-complete', uid: identity.uid, orgId, patientId, encounterId, requestId, model: result.model, at: new Date().toISOString() }
+      await db.collection('audit_events').add({ action: record.action, actor_user_id: identity.uid, organization_id: orgId,
+        patient_id: patientId, record_id: encounterId, request_id: requestId, model: result.model, source: 'host-deepgram-stt', occurredAt: new Date() })
+      await auditSpeech(record)
+      json(res, 200, { ok: true, text: result.text, model: result.model, requestId })
+    } catch (error) {
+      const status = Number(error?.status) || (error?.code === 'invalid-argument' ? 400 : error?.code === 'failed-precondition' ? 503 : 503)
+      json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Online transcription could not be completed.' })
     }
   }
   async function handleClinicalDraftReview(req, res) {
@@ -349,12 +401,16 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) { req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return }
     try {
       const body = await readJson(req, 16 * 1024)
-      const { orgId, patientId, encounterId, action } = body || {}
+      const { orgId, patientId, encounterId, action, acceptedSuggestions = [], rejectedSuggestions = [] } = body || {}
       if (![orgId, patientId, encounterId].every((v) => typeof v === 'string' && v) || !['approved', 'rejected'].includes(action)) {
         json(res, 400, { ok: false, error: 'A consultation binding and approve/reject decision are required.' }); return
       }
+      const validSuggestionIds = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => /^(S|O|A|P):\d{1,3}$/.test(item))
+      if (!validSuggestionIds(acceptedSuggestions) || !validSuggestionIds(rejectedSuggestions)) {
+        json(res, 400, { ok: false, error: 'Reviewed suggestion references are invalid.' }); return
+      }
       const identity = await authorizeClinicalDraftRequest(req, orgId, patientId, encounterId)
-      await recordClinicalAiAudit(action, identity.uid, orgId, patientId, encounterId)
+      await recordClinicalAiAudit(action, identity.uid, orgId, patientId, encounterId, { accepted: acceptedSuggestions, rejected: rejectedSuggestions })
       json(res, 200, { ok: true })
     } catch (error) {
       const status = Number(error?.status) || 503
@@ -590,7 +646,7 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       lastContact: status.lastContact,
       lastProbeError: status.lastError || undefined,
       queue: queue.counts(),
-      speech: speechJobs?.status() || { enabled: false },
+      speech: { enabled: process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true' && !!process.env.DEEPGRAM_API_KEY && !!process.env.DEEPGRAM_ENDPOINT },
       servesApp: !!staticDir,
     })
   }
@@ -1241,164 +1297,6 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     json(res, 200, { ok: true, source: 'host-cache', ...cached.docs[0] })
   }
 
-  async function speechSessionRoute(req, res, url, action) {
-    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Speech sessions require HTTPS.' }); return }
-    if (!speechSessions) { req.resume(); json(res, 503, { ok: false, error: 'Host speech session service is unavailable.' }); return }
-    const origin = checkOrigin(req, cfg)
-    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
-      req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return
-    }
-    const orgId = url.searchParams.get('orgId') || ''
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    if (!rateLimit('speech-session-ip:' + ip, action === 'offline' ? 120 : 30).ok) {
-      req.resume(); json(res, 429, { ok: false, error: 'Too many speech session requests. Wait and retry.' }); return
-    }
-    let verifiedIdentity = null
-    let newlyRegisteredDevice = ''
-    let registeringPublicKey = null
-    try {
-      if (action === 'register') {
-        const body = await readJson(req, 16 * 1024)
-        registeringPublicKey = body.publicKey
-        const identity = verifiedIdentity = typeof authenticator.verifyOnline === 'function' ? await authenticator.verifyOnline(req) : await authenticator.verify(req)
-        const authorization = typeof authenticator.authorizeSpeech === 'function'
-          ? await authenticator.authorizeSpeech(identity, orgId, 'encounter.edit')
-          : await authenticator.authorize(identity, orgId, 'encounter.edit')
-        if (authorization.authorizationSource === 'cached-offline') throw Object.assign(new Error('Connect to the hospital network to verify access before enabling offline speech.'), { status: 503, expose: true })
-        const session = await speechSessions.register({ identity, authorization, orgId, publicKey: registeringPublicKey })
-        newlyRegisteredDevice = session.deviceId
-        await auditSpeech({ action: 'session-online-verified', uid: identity.uid, orgId, deviceId: session.deviceId,
-          permission: 'encounter.edit', at: new Date().toISOString() })
-        json(res, 200, { ok: true, session }); return
-      }
-      const deviceId = String(req.headers['x-speech-device'] || '')
-      const current = speechSessions.authenticate(req, orgId)
-      if (action === 'offline') {
-        json(res, 200, { ok: true, session: { uid: current.uid, orgId: current.orgId, email: current.email,
-          displayName: current.displayName, membership: current.membership, permissions: current.permissions } }); return
-      }
-      if (action === 'revalidate') {
-        const identity = typeof authenticator.verifyOnline === 'function' ? await authenticator.verifyOnline(req) : await authenticator.verify(req)
-        if (identity.uid !== current.uid) throw Object.assign(new Error('Signed-in clinician does not match this Host session.'), { status: 401, expose: true })
-        const authorization = typeof authenticator.authorizeSpeech === 'function'
-          ? await authenticator.authorizeSpeech(identity, orgId, 'encounter.edit')
-          : await authenticator.authorize(identity, orgId, 'encounter.edit')
-        if (authorization.authorizationSource === 'cached-offline') throw Object.assign(new Error('Online authorization is temporarily unavailable.'), { status: 503, expose: true })
-        const session = await speechSessions.updateAuthorization(deviceId, { identity, authorization })
-        if (!session) throw Object.assign(new Error('Speech permission was revoked.'), { status: 403, expose: true })
-        await auditSpeech({ action: 'session-revalidated', uid: identity.uid, orgId, deviceId,
-          permission: 'encounter.edit', at: new Date().toISOString() })
-        json(res, 200, { ok: true, session }); return
-      }
-      if (action === 'revoke') {
-        await speechSessions.revoke(deviceId)
-        await auditSpeech({ action: 'session-signout', uid: current.uid, orgId, deviceId, at: new Date().toISOString() })
-        json(res, 200, { ok: true }); return
-      }
-    } catch (error) {
-      if (newlyRegisteredDevice) await speechSessions.revoke(newlyRegisteredDevice)
-      if (action === 'register' && verifiedIdentity?.uid && Number(error?.status) === 403) {
-        await speechSessions.invalidateUserOrg(verifiedIdentity.uid, orgId)
-      }
-      if (action === 'register' && [401, 403].includes(Number(error?.status))) {
-        const deviceId = String(req.headers['x-speech-device'] || '')
-        const current = speechSessions.matchesDeviceKey(deviceId, registeringPublicKey) ? speechSessions.get(deviceId) : null
-        if (current) await speechSessions.invalidateUserOrg(current.uid, current.orgId)
-      }
-      if (action === 'revalidate' && [401, 403].includes(Number(error?.status))) {
-        const current = speechSessions.get(String(req.headers['x-speech-device'] || ''))
-        if (current) await speechSessions.invalidateUserOrg(current.uid, orgId)
-      }
-      json(res, error?.expose ? error.status || 401 : 503, { ok: false, error: error?.expose ? error.message : 'Speech session could not be verified.' })
-    }
-  }
-
-  async function handleSpeechCreate(req, res, url) {
-    if (!req.socket.encrypted) {
-      req.resume()
-      json(res, 403, { ok: false, error: 'Speech transcription requires the Host HTTPS address.' })
-      return
-    }
-    if (!speechJobs) {
-      json(res, 503, { ok: false, error: 'Host speech service is unavailable. Check HTTPS and speech service status.' })
-      return
-    }
-    const orgId = url.searchParams.get('orgId') || ''
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    if (!rateLimit('speech-ip:' + ip, 30).ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many speech requests from this device. Wait and retry.' }); return }
-    const requestId = String(req.headers['x-speech-request-id'] || '')
-    if (!/^[0-9a-f]{64}$/i.test(String(req.headers['x-speech-body-sha256'] || ''))) {
-      req.resume(); json(res, 400, { ok: false, error: 'Missing recording integrity proof.' }); return
-    }
-    let identity
-    try { identity = speechSessions?.authenticate(req, orgId) }
-    catch (error) { json(res, error?.status || 401, { ok: false, error: error.message }); return }
-    if (!identity) { json(res, 503, { ok: false, error: 'Host speech session service is unavailable.' }); return }
-    if (!rateLimit('speech-uid:' + identity.uid, 30).ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many speech requests for this account. Wait and retry.' }); return }
-    if (String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE || !checkOrigin(req, cfg).ok) { req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return }
-    const type = String(req.headers['content-type'] || '').toLowerCase()
-    if (!(type.startsWith('audio/') || type.startsWith('application/octet-stream'))) {
-      req.resume()
-      json(res, 415, { ok: false, error: 'Send a supported audio recording.' })
-      return
-    }
-    try {
-      const duplicate = await speechJobs.findRequest(identity.uid, orgId, requestId)
-      if (duplicate) {
-        req.resume()
-        json(res, 200, { ok: true, job: duplicate, duplicate: true })
-        return
-      }
-      const encounterId = String(url.searchParams.get('encounterId') || '')
-      if (!encounterId) { req.resume(); json(res, 400, { ok: false, error: 'A consultation is required for the audit record.' }); return }
-      await auditSpeech({ action: 'transcription-submit', uid: identity.uid, orgId, deviceId: identity.deviceId,
-        encounterId, requestId, permission: 'encounter.edit', at: new Date().toISOString() })
-      const job = await speechJobs.createFromRequest(req, {
-        owner: identity.uid, orgId, requestId, contentType: type, encounterId,
-        expectedBodyHash: String(req.headers['x-speech-body-sha256'] || ''),
-      })
-      log.info('[speech] accepted job=' + job.id + ' uid=' + identity.uid)
-      json(res, 202, { ok: true, job })
-    } catch (error) {
-      const status = Number(error?.status) || 500
-      if (status !== 413) req.resume()
-      json(res, status, { ok: false, error: status < 500 ? error.message : 'Speech request could not be processed.' },
-        status === 413 ? { connection: 'close' } : {})
-    }
-  }
-
-  async function handleSpeechJob(req, res, url, id, cancel = false) {
-    if (!req.socket.encrypted) {
-      json(res, 403, { ok: false, error: 'Speech transcription requires the Host HTTPS address.' })
-      return
-    }
-    if (!speechJobs) {
-      json(res, 503, { ok: false, error: 'Host speech service is unavailable.' })
-      return
-    }
-    if (String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE || !checkOrigin(req, cfg).ok) {
-      req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return
-    }
-    const orgId = url.searchParams.get('orgId') || ''
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    if (!rateLimit('speech-ip:' + ip, 120).ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many speech requests from this device. Wait and retry.' }); return }
-    let identity
-    try { identity = speechSessions?.authenticate(req, orgId) }
-    catch (error) { json(res, error?.status || 401, { ok: false, error: error.message }); return }
-    if (!identity) { json(res, 503, { ok: false, error: 'Host speech session service is unavailable.' }); return }
-    if (!rateLimit('speech-uid:' + identity.uid, 120).ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many speech requests for this account. Wait and retry.' }); return }
-    const job = cancel
-      ? await speechJobs.cancel(id, identity.uid, orgId)
-      : await speechJobs.get(id, identity.uid, orgId)
-    if (!job) {
-      json(res, 404, { ok: false, error: 'Speech job not found.' })
-      return
-    }
-    await auditSpeech({ action: cancel ? 'transcription-cancel' : 'transcription-result-access', uid: identity.uid,
-      orgId, deviceId: identity.deviceId, encounterId: job.encounterId || '', jobId: job.id, at: new Date().toISOString() })
-    json(res, 200, { ok: true, job })
-  }
-
   return async function handle(req, res) {
     securityHeaders(res)
     applyCors(req, res, cfg)
@@ -1428,9 +1326,20 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       return
     }
 
-    const sessionAction = path === '/speech/session' ? 'register' : path === '/speech/session/offline' ? 'offline'
-      : path === '/speech/session/revalidate' ? 'revalidate' : path === '/speech/session/revoke' ? 'revoke' : ''
-    if (sessionAction && req.method === 'POST') { await speechSessionRoute(req, res, url, sessionAction); return }
+    if (req.method === 'GET' && path === '/speech/health') {
+      const orgId = String(url.searchParams.get('orgId') || '')
+      if (!req.socket.encrypted || !checkOrigin(req, cfg).ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
+        json(res, 403, { ok: false, available: false }); return
+      }
+      try {
+        const identity = await authenticator.verifyOnline(req)
+        await authenticator.authorize(identity, orgId, 'encounter.edit')
+        const enabled = process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true' && !!process.env.DEEPGRAM_API_KEY && !!process.env.DEEPGRAM_ENDPOINT
+        const available = enabled && await checkDeepgram({ apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT })
+        json(res, 200, { ok: true, available, provider: available ? 'deepgram' : '' })
+      } catch (error) { json(res, Number(error?.status) || 503, { ok: false, available: false, error: error?.expose ? error.message : 'Online access could not be verified.' }) }
+      return
+    }
 
     const deviceSessionAction = path === '/device/session/register' ? 'register' : path === '/device/session/offline' ? 'offline'
       : path === '/device/session/revalidate' ? 'revalidate' : path === '/device/session/revoke' ? 'revoke' : ''
@@ -1459,19 +1368,11 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       return
     }
 
-    if (req.method === 'POST' && path === '/speech/jobs') {
-      await handleSpeechCreate(req, res, url)
+    if (req.method === 'POST' && path === '/speech/transcribe') {
+      await handleSpeechTranscribe(req, res, url)
       return
     }
-    const speechJobPath = /^\/speech\/jobs\/([0-9a-f-]{36})(\/cancel)?$/i.exec(path)
-    if (speechJobPath && req.method === 'GET' && !speechJobPath[2]) {
-      await handleSpeechJob(req, res, url, speechJobPath[1])
-      return
-    }
-    if (speechJobPath && req.method === 'POST' && speechJobPath[2]) {
-      await handleSpeechJob(req, res, url, speechJobPath[1], true)
-      return
-    }
+
 
     if (req.method === 'GET' && serveStatic) {
       serveStatic(req, res, path)
@@ -1505,6 +1406,8 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
 export async function startHub(overrides = {}) {
   const cfg = { ...loadConfig(), ...overrides }
   const log = overrides.log || console
+  const inferenceScheduler = overrides.inferenceScheduler || createInferenceScheduler()
+  const clinicalAi = overrides.clinicalAi || createLocalClinicalAi({ schedule: inferenceScheduler.run })
   if (typeof cfg.allowedOrigins === 'string') cfg.allowedOrigins = parseOrigins(cfg.allowedOrigins)
   if (!Array.isArray(cfg.allowedOrigins)) cfg.allowedOrigins = []
 
@@ -1551,12 +1454,7 @@ export async function startHub(overrides = {}) {
   }
   const serveStatic = makeStaticHandler(staticDir)
 
-  const authenticator = overrides.authenticator
-    || createAuthenticator({
-      auth: foundation.auth, db, log,
-      loadSpeechAuthCache: overrides.loadSpeechAuthCache,
-      saveSpeechAuthCache: overrides.saveSpeechAuthCache,
-    })
+  const authenticator = overrides.authenticator || createAuthenticator({ auth: foundation.auth, db, log })
   const auditor = overrides.auditor || createAuditor({ db, log })
   const relay = createRelay({
     db,
@@ -1567,7 +1465,6 @@ export async function startHub(overrides = {}) {
     audit: auditor,
   })
 
-  let speechJobs = null
   let speechSessions = null
   if (typeof overrides.loadSpeechSessions === 'function' && typeof overrides.saveSpeechSessions === 'function') {
     try {
@@ -1579,31 +1476,11 @@ export async function startHub(overrides = {}) {
       speechSessions = null
     }
   }
-  if (overrides.tls && overrides.speechWorker && overrides.speechDir) {
-    try {
-      const { createSpeechJobs } = await import('./speech/jobs.js')
-      speechJobs = createSpeechJobs({
-        directory: overrides.speechDir,
-        worker: overrides.speechWorker,
-        ffmpeg: overrides.ffmpeg && existsSync(overrides.ffmpeg) ? overrides.ffmpeg : '',
-        getFreeMemory: overrides.speechGetFreeMemory,
-        protectResult: overrides.protectSpeechResult,
-        unprotectResult: overrides.unprotectSpeechResult,
-        log,
-      })
-      await speechJobs.initialize()
-      if (!speechSessions) throw new Error('Encrypted Host speech-session storage is unavailable.')
-    } catch (error) {
-      log.error('[speech] job service could not initialize; Host API remains available:', error?.message || error)
-      try { await speechJobs?.close() } catch {}
-      speechJobs = null
-    }
-  }
 
   const verifiedHttpsAddresses = new Set()
   const handler = makeHandler({
-    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, speechJobs, speechSessions, offlineQueryCache,
-    clinicalAi: overrides.clinicalAi || createLocalClinicalAi(),
+    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, speechSessions, offlineQueryCache,
+    clinicalAi,
     auditSpeech: overrides.auditSpeech,
     verifiedHttpsAddresses,
   })
@@ -1686,7 +1563,6 @@ export async function startHub(overrides = {}) {
     lanAddresses,
     verifiedHttpsAddresses: [...verifiedHttpsAddresses],
     queue,
-    speechJobs,
     speechSessions,
     offlineQueryCache,
     relay,
@@ -1701,7 +1577,6 @@ export async function startHub(overrides = {}) {
     httpsLocalUrl,
     httpsLanUrl,
     close: async () => {
-      await speechJobs?.close()
       relay.stop()
       const closeListener = async (listener) => {
         if (!listener?.listening) return

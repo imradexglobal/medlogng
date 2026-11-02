@@ -234,7 +234,8 @@ export async function AdmitView(app, params = {}) {
     const free = Array.from({ length: ward.totalBeds }, (_, i) => String(i + 1)).filter((bed) => !occupied.has(bed))
     if (!free.length) return '<select class="input" id="fld-bed_number" required disabled><option value="">No beds available in this ward</option></select><small class="mut">' + esc(wardName) + ' is at configured capacity.</small>'
     const requested = String(params.bed || '')
-    return '<select class="input" id="fld-bed_number" required>' + free.map((bed) => '<option value="Bed ' + bed + '"' + (normalizeBedId(requested) === bed ? ' selected' : '') + '>Bed ' + bed + '</option>').join('') + '</select><small class="mut">' + free.length + ' available of ' + ward.totalBeds + ' configured beds.</small>'
+    const normalizedRequested = normalizeBedId(requested)
+    return '<select class="input" id="fld-bed_number" required>' + free.map((bed) => '<option value="' + bed + '"' + (bed === normalizedRequested ? ' selected' : '') + '>' + bed + '</option>').join('') + '</select><small class="mut">' + free.length + ' available of ' + ward.totalBeds + ' configured beds.</small>'
   }
 
   load()

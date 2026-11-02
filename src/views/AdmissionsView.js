@@ -29,6 +29,7 @@ import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteAdmission } from '../services/deleteService.js'
 import { DISCHARGE_TYPES, normalizeBedId as normalizeBed } from '../features/admissions/domain.js'
+import { staffLabel } from '../lib/staffName.js'
 
 // Admission types come from the domain module so this form cannot drift from
 // the list the service and tests agree on.
@@ -332,14 +333,14 @@ export async function AdmissionsView(app, params = {}) {
         : '<span class="mut">—</span>'
       const items = []
       if (a.status === 'active') {
-        items.push({ label: 'Workspace', dataAction: 'workspace' })
+        items.push({ label: 'Workspace', dataAction: 'workspace', description: 'Open clinical plan workspace for this admission' })
         if (caps.canAdmit) {
-          items.push({ label: 'Transfer', dataAction: 'transfer' })
-          items.push({ label: 'Discharge', dataAction: 'discharge' })
+          items.push({ label: 'Transfer', dataAction: 'transfer', description: 'Transfer patient to another ward and bed' })
+          items.push({ label: 'Discharge', dataAction: 'discharge', description: 'Discharge this patient' })
         }
       }
       if (a.status === 'discharged' && canDeleteRecords()) {
-        items.push({ label: 'Delete', tone: 'danger', dataAction: 'delete' })
+        items.push({ label: 'Delete', tone: 'danger', dataAction: 'delete', description: 'Permanently delete this discharged admission (audit trail kept)' })
       }
       return '<tr>' +
         '<td>' + patientCell + historyPill + '</td>' +
@@ -347,7 +348,7 @@ export async function AdmissionsView(app, params = {}) {
         '<td>' + (when ? fmtDate(when) : '—') +
         (a.status === 'discharged' && a.dischargeDate
           ? '<div class="mut">out ' + fmtDate(a.dischargeDate) + '</div>' : '') + '</td>' +
-        '<td>' + esc(a.attendingProvider || '—') + '</td>' +
+        '<td>' + esc(staffLabel(a.attendingProvider) || '—') + '</td>' +
         '<td>' + encCell + '</td>' +
         '<td>' + kebabCell({ rowId: a.id, items }) + '</td></tr>'
     }).join('')
@@ -435,12 +436,13 @@ export async function AdmissionsView(app, params = {}) {
         const ward = wards.find((w) => w.name === vals.ward_name)
         if (ward && ward.totalBeds && ward.totalBeds > 0) {
           const n = Number(String(vals.bed_number || '').replace(/\D/g, ''))
+          const normalizedBed = normalizeBed(vals.bed_number)
           if (!n || n < 1 || n > ward.totalBeds) {
             hint.textContent = 'Valid beds for ' + ward.name + ': 1 – ' + ward.totalBeds
             hint.className = 'fldhint bad'
             hint.hidden = false
           } else {
-            hint.textContent = 'Bed ' + n + ' of ' + ward.totalBeds + ' in ' + ward.name
+            hint.textContent = 'Bed ' + normalizedBed + ' of ' + ward.totalBeds + ' in ' + ward.name
             hint.className = 'fldhint ok'
             hint.hidden = false
           }

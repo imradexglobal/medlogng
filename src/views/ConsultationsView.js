@@ -1556,13 +1556,15 @@ wireKebabs(tbl, async (rowId, action) => {
     aiGenerate.disabled = true
     if (aiStatus) aiStatus.textContent = 'Generating a local draft…'
     try {
-      const draft = await generateClinicalDraft({ transcript, organizationId: authStore.getState().activeOrg, patientId: selectedEncounter.patientId, encounterId: selectedEncounter.id })
+      const generated = await generateClinicalDraft({ transcript, organizationId: authStore.getState().activeOrg, patientId: selectedEncounter.patientId, encounterId: selectedEncounter.id })
+      const draft = generated.draft
       const user = authStore.getState().user
       if (!user?.uid) throw new Error('Clinician identity is unavailable.')
       clinicalDraftReview = createClinicalDraftReview({ draft, transcript, uid: user.uid, organizationId: authStore.getState().activeOrg, patientId: selectedEncounter.patientId, encounterId: selectedEncounter.id })
       clinicalDraftDecisions.clear()
       paintClinicalDraft()
-      if (aiStatus) aiStatus.textContent = 'Draft ready. Verify every suggestion and its transcript evidence.'
+      const meta = generated.metadata
+      if (aiStatus) aiStatus.textContent = 'Draft ready' + (meta?.model ? ' · ' + meta.model + (meta.totalDurationMs ? ' · ' + (meta.totalDurationMs / 1000).toFixed(1) + 's' : '') : '') + '. Verify every suggestion and its transcript evidence.'
     } catch (error) { if (aiStatus) aiStatus.textContent = error?.message || 'Draft generation failed.' }
     finally { aiGenerate.disabled = false }
   }
@@ -1587,7 +1589,9 @@ wireKebabs(tbl, async (rowId, action) => {
         const user = authStore.getState().user
         const action = [...clinicalDraftDecisions.values()].some((value) => value === 'accepted') ? 'approved' : 'rejected'
         button.disabled = true
-        await auditClinicalDraftDecision({ organizationId: authStore.getState().activeOrg, patientId: selectedEncounter?.patientId, encounterId: selectedEncounter?.id, action })
+        const acceptedSuggestions = [...clinicalDraftDecisions].filter(([, value]) => value === 'accepted').map(([key]) => key)
+        const rejectedSuggestions = [...clinicalDraftDecisions].filter(([, value]) => value === 'rejected').map(([key]) => key)
+        await auditClinicalDraftDecision({ organizationId: authStore.getState().activeOrg, patientId: selectedEncounter?.patientId, encounterId: selectedEncounter?.id, action, acceptedSuggestions, rejectedSuggestions })
         clinicalDraftReview = decideClinicalDraft(clinicalDraftReview, {
           decision: action,
           reviewerUid: user?.uid, activeEncounterId: selectedEncounter?.id, canEditEncounter: myEncounterCaps().canEdit,

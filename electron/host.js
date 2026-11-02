@@ -30,7 +30,6 @@ const { createSecureContext } = require('node:tls')
 const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
-const { pathToFileURL } = require('node:url')
 
 const HOST_PORT_DEFAULT = 8787
 
@@ -327,74 +326,6 @@ async function openFirewall(ports) {
 // ---- hub lifecycle ---------------------------------------------------------
 
 let hubHandle = null
-let speechWorkerRuntime = null
-
-function speechAssets() {
-  const base = app.isPackaged
-    ? path.join(process.resourcesPath, 'speech')
-    : path.join(projectRoot(), 'vendor', 'speech')
-  return {
-    executable: path.join(base, 'medilog-whisper-worker.exe'),
-    model: path.join(base, 'ggml-tiny.en-q5_1.bin'),
-  }
-}
-
-async function startSpeechRuntime() {
-  const cfg = loadHostConfig() || {}
-  if (cfg.speech?.enabled === false) return null
-  if (!activeHttpsPort) {
-    console.info('[speech] waiting for HTTPS certificate; browser microphone access requires a secure Host origin.')
-    return null
-  }
-  if (os.freemem() < 900 * 1024 * 1024) {
-    console.warn('[speech] startup deferred because available memory is below the 900 MB safety threshold.')
-    return null
-  }
-  if (speechWorkerRuntime?.status().ready) return speechWorkerRuntime.status()
-
-  const assets = speechAssets()
-  if (!fs.existsSync(assets.executable) || !fs.existsSync(assets.model)) {
-    console.warn('[speech] enabled but engine/model files are not installed; Host will continue without speech service.')
-    return null
-  }
-  const audioDir = path.join(dataDir(), 'speech', 'audio')
-  fs.mkdirSync(audioDir, { recursive: true })
-  const moduleUrl = pathToFileURL(path.join(projectRoot(), 'hub', 'speech', 'worker.js')).href
-  const { createSpeechWorker } = await import(moduleUrl)
-  const threads = Math.max(1, Math.min(2, Number(cfg.speech?.threads) || 1))
-  const runtime = createSpeechWorker({ ...assets, audioDir, threads })
-  speechWorkerRuntime = runtime
-  try {
-    const state = await runtime.start()
-    console.info('[speech] CPU worker ready; model loaded once.')
-    return state
-  } catch (error) {
-    console.error('[speech] could not start; Host remains available:', error?.message || error)
-    // Keep the supervisor alive: it retries the worker independently, while
-    // the Hub can retain authenticated jobs durably until the engine recovers.
-    return runtime.status()
-  }
-}
-
-async function stopSpeechRuntime() {
-  const runtime = speechWorkerRuntime
-  speechWorkerRuntime = null
-  if (runtime) {
-    try { await runtime.stop() } catch (error) {
-      console.warn('[speech] worker shutdown issue:', error?.message || error)
-    }
-  }
-}
-
-async function restartSpeechRuntime() {
-  await stopSpeechRuntime()
-  return startSpeechRuntime()
-}
-
-function speechStatus() {
-  return speechWorkerRuntime ? speechWorkerRuntime.status() : { enabled: false, ready: false }
-}
-
 async function startHubRuntime() {
   if (hubHandle) return hubHandle
   const cfg = loadHostConfig() || {}
@@ -428,10 +359,6 @@ async function startHubRuntime() {
   }
 
   const { startHub } = await import(pathToFileURL(path.join(root, 'hub', 'server.js')).href)
-
-  // Start the local engine first so the HTTPS hub can expose speech routes
-  // only when the authenticated worker is actually ready.
-  await startSpeechRuntime()
 
   // startHub rejects with an operator-friendly message for EADDRINUSE / EACCES
   // / EADDRNOTAVAIL (see hub/netinfo.js describeListenError), so the wizard can
@@ -478,30 +405,6 @@ async function startHubRuntime() {
     staticDir: path.join(root, 'dist'),
     tls,
     httpsPort: activeHttpsPort,
-    speechWorker: speechWorkerRuntime,
-    speechDir: path.join(dataDir(), 'speech'),
-    ffmpeg: path.join(app.isPackaged ? process.resourcesPath : path.join(root, 'vendor', 'speech'), 'ffmpeg.exe'),
-    protectSpeechResult: (text) => safeStorage.encryptString(String(text)).toString('base64'),
-    unprotectSpeechResult: (text) => safeStorage.decryptString(Buffer.from(text, 'base64')),
-    loadSpeechAuthCache: async () => {
-      const file = path.join(dataDir(), 'speech', 'authorization-cache.bin')
-      try {
-        const encrypted = await fs.promises.readFile(file, 'utf8')
-        return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
-      } catch (error) {
-        if (error?.code === 'ENOENT') return '[]'
-        throw error
-      }
-    },
-    saveSpeechAuthCache: async (json) => {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
-      const dir = path.join(dataDir(), 'speech')
-      const file = path.join(dir, 'authorization-cache.bin')
-      const tmp = file + '.tmp'
-      await fs.promises.mkdir(dir, { recursive: true })
-      await fs.promises.writeFile(tmp, safeStorage.encryptString(json).toString('base64'), { mode: 0o600 })
-      await fs.promises.rename(tmp, file)
-    },
     loadSpeechSessions: async () => {
       const file = path.join(dataDir(), 'speech', 'sessions.bin')
       try { return safeStorage.decryptString(await fs.promises.readFile(file)) }
@@ -533,8 +436,6 @@ async function startHubRuntime() {
 }
 
 async function stopHubRuntime() {
-  if (hubHandle?.speechJobs) { try { await hubHandle.speechJobs.close() } catch {} }
-  await stopSpeechRuntime()
   if (hubHandle) { try { await hubHandle.close() } catch { /* closing anyway */ } hubHandle = null }
   activeHttpsPort = 0
   activeHttpsLanUrl = ''
@@ -822,10 +723,6 @@ module.exports = {
   startHubRuntime,
   stopHubRuntime,
   importHostTlsCertificate,
-  startSpeechRuntime,
-  stopSpeechRuntime,
-  restartSpeechRuntime,
-  speechStatus,
   createTray,
   destroyTray,
   startStatusPoll,

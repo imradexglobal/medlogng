@@ -86,7 +86,7 @@ function convertToWav(ffmpeg, input, output) {
   })
 }
 
-export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console, maxPending = 10, perUserPending = 2,
+export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console, schedule = (_kind, work) => work(), maxPending = 10, perUserPending = 2,
   getFreeMemory = freemem, protectResult = (text) => text, unprotectResult = (text) => text }) {
   const audioDir = path.join(directory, 'audio')
   const indexFile = path.join(directory, 'jobs.json')
@@ -181,7 +181,7 @@ export function createSpeechJobs({ directory, worker, ffmpeg = '', log = console
         job.updatedAt = Date.now()
         await persist()
         try {
-          const text = await worker.transcribe({ id: job.id, wavPath: job.audioPath })
+          const text = await schedule('whisper', () => worker.transcribe({ id: job.id, wavPath: job.audioPath }))
           await finish(job, job.cancelRequested ? 'cancelled' : 'complete', {
             text: job.cancelRequested ? '' : text,
             fileToRemove: job.audioPath,

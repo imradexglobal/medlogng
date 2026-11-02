@@ -1,29 +1,59 @@
-// Identify the local MediLogNG Hub before sending any recording bytes. Firebase
-// Hosting rewrites unknown routes to index.html, so a successful HTTP status
-// alone must never be treated as a transcription backend.
-export async function hasLocalSpeechHost({
-  origin = globalThis.location?.origin,
-  fetchImpl = globalThis.fetch,
-  timeoutMs = 2500,
-} = {}) {
-  if (typeof origin !== 'string' || !origin || typeof fetchImpl !== 'function') return false
+const FUNCTION_REGION = 'us-central1'
+
+async function hostedSpeechEndpoint(name, app) {
+  const projectId = app?.options?.projectId
+  if (!projectId) throw new Error('Online transcription backend is unavailable.')
+  return `https://${FUNCTION_REGION}-${projectId}.cloudfunctions.net/${name}`
+}
+
+async function authenticatedHeaders(user, extra = {}) {
+  if (!user) throw new Error('Sign in to transcribe this recording.')
+  const token = await user.getIdToken()
+  return { Authorization: 'Bearer ' + token, 'x-medilog-client': 'medilogng-web', ...extra }
+}
+
+export async function getSpeechBackend({ orgId, user, origin = globalThis.location?.origin, fetchImpl = globalThis.fetch } = {}) {
+  if (!orgId || !user || !origin || !fetchImpl) return null
+  const headers = await authenticatedHeaders(user)
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const timeout = setTimeout(() => controller.abort(), 6000)
   try {
-    const response = await fetchImpl(new URL('/health', origin).toString(), {
-      method: 'GET',
-      cache: 'no-store',
-      credentials: 'same-origin',
-      redirect: 'error',
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
+    const hostResponse = await fetchImpl(new URL('/speech/health?orgId=' + encodeURIComponent(orgId), origin), {
+      method: 'GET', headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,
     })
-    if (!response?.ok || !String(response.headers?.get?.('content-type') || '').toLowerCase().includes('application/json')) return false
-    const body = await response.json()
-    return body?.ok === true && body?.hub === true && typeof body?.version === 'string' && body.version.length > 0
-  } catch {
-    return false
-  } finally {
-    clearTimeout(timer)
-  }
+    const type = String(hostResponse.headers?.get?.('content-type') || '').toLowerCase()
+    if (hostResponse.ok && type.includes('application/json')) {
+      const data = await hostResponse.json()
+      if (data?.ok === true && data?.available === true) return { kind: 'host', url: new URL('/speech/transcribe', origin).toString(), headers }
+      if (data?.ok === true) return null
+    }
+  } catch { /* Firebase-hosted apps use the secured callable HTTP function below. */ }
+  clearTimeout(timeout)
+  try {
+    const { app } = await import('../firebase.js')
+    const url = await hostedSpeechEndpoint('speechHealth', app)
+    const cloudResponse = await fetchImpl(url + '?orgId=' + encodeURIComponent(orgId), {
+      method: 'GET', headers, cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(7000),
+    })
+    if (!cloudResponse.ok || !String(cloudResponse.headers?.get?.('content-type') || '').toLowerCase().includes('application/json')) return null
+    const data = await cloudResponse.json()
+    return data?.ok === true && data?.available === true
+      ? { kind: 'firebase', url: await hostedSpeechEndpoint('transcribeConsultation', app), headers }
+      : null
+  } catch { return null } finally { clearTimeout(timeout) }
+}
+
+export async function transcribeRecording({ backend, blob, orgId, patientId, encounterId, requestId = crypto.randomUUID(), fetchImpl = globalThis.fetch }) {
+  if (!backend || !blob?.size || !orgId || !patientId || !encounterId) throw new Error('A ready transcription service and open consultation are required.')
+  const url = new URL(backend.url)
+  url.searchParams.set('orgId', orgId)
+  url.searchParams.set('patientId', patientId)
+  url.searchParams.set('encounterId', encounterId)
+  const response = await fetchImpl(url, {
+    method: 'POST', headers: { ...backend.headers, 'Content-Type': blob.type || 'audio/webm', 'X-Speech-Request-Id': requestId },
+    body: blob, cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(240_000),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || data?.ok !== true || typeof data.text !== 'string') throw new Error(data.error || 'Online transcription failed. The recording remains on this device.')
+  return { text: data.text, model: data.model || 'nova-3-medical' }
 }
