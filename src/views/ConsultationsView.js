@@ -534,7 +534,7 @@ function visibleEncounters() {
       const bedBadge = patientBed(e)
         ? '<span class="pill ok" title="Admitted to ' + esc(patientBed(e).wardName) + ' · ' + esc(patientBed(e).bedNumber) + '">🛏 </span>'
         : ''
-      const dr = m.clinician ? '<span class="mut" title="Attending: ' + esc(m.clinician) + '">' + esc(m.clinician.slice(0, 12)) + '</span>' : ''
+      const dr = m.clinician ? '<span class="mut" title="Attending: ' + esc(staffLabel(m.clinician)) + '">' + esc(staffLabel(m.clinician).slice(0, 12)) + '</span>' : ''
       return '<tr class="clickable' + (selectedEncounter && selectedEncounter.id === e.id ? ' sel' : '') + '" data-id="' + esc(e.id) + '" role="button" aria-label="Encounter for ' + esc(m.name) + ', status: ' + encLabel(e.status) + '" tabindex="0">' +
         '<td><strong>' + esc(m.name) + '</strong></td>' +
         '<td class="enc-queue-clinician">' + dr + '</td>' +
@@ -686,7 +686,7 @@ wireKebabs(tbl, async (rowId, action) => {
           : '') +
         '<div class="toolbar" style="margin:10px 0 12px">' +
         '<span class="mut" title="Encounter ID: ' + esc(e.id) + '">' +
-        [e.type, e.clinician ? 'Clinician: ' + e.clinician : ''].filter(Boolean).map((value) => esc(value)).join(' · ') + '</span>' +
+        [e.type, e.clinician ? 'Clinician: ' + staffLabel(e.clinician) : ''].filter(Boolean).map((value) => esc(value)).join(' · ') + '</span>' +
         '</div>'
     }
     if (titleEl) {

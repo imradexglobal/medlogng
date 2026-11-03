@@ -38,7 +38,7 @@ nsis:
   shortcutName: MediLog NG
   menuCategory: Imradex Global
   deleteAppDataOnUninstall: true
-  differentialPackage: false
+  differentialPackage: true
 
 publish:
   provider: github

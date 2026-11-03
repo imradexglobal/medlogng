@@ -8,7 +8,7 @@ export function friendlyWriteError(e, fallback = 'Something went wrong. Please r
     code === 'permission-denied' ||
     /missing or insufficient permissions|insufficient permissions|permission-denied|permission_denied/i.test(msg)
   ) {
-    return 'Not allowed by security rules — your membership may be inactive, saved with an older role, or missing the capability. Ask an administrator to re-save your role in Administration → Staff & roles, then retry.'
+    return 'You don\u2019t have permission to do this. Ask an administrator to update your role in Administration \u2192 Staff & roles, then try again.'
   }
   if (code === 'failed-precondition' || /index/i.test(msg)) {
     return 'This query needs a Firestore index — open the browser console link to create it, then retry.'

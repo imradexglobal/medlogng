@@ -48,6 +48,7 @@ import { createAuthenticator } from './auth.js'
 import { createAuditor } from './audit.js'
 import { createLocalClinicalAi } from './clinical-ai/ollama.js'
 import { createInferenceScheduler } from './clinical-ai/inferenceScheduler.js'
+import { seedOfflineCache } from './seed.js'
 import { listLanAddresses, startupLines, describeListenError } from './netinfo.js'
 import { checkDeepgram, transcribeWithDeepgram } from '../functions/speechProvider.js'
 
@@ -742,6 +743,46 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
   // Read-through Host cache for organization-scoped queries. Online results
   // come from Firestore and are saved on the Host; during an internet outage,
   // the exact previously authorized query can be served to another LAN PC.
+  async function handleOfflineSeed(req, res) {
+    if (!req.socket.encrypted && !isLoopbackAddress(req.socket.remoteAddress)) {
+      req.resume(); json(res, 403, { ok: false, error: 'Cache seeding requires HTTPS.' }); return
+    }
+    if (!offlineQueryCache) { req.resume(); json(res, 503, { ok: false, error: 'Host offline data cache is unavailable.' }); return }
+    const origin = checkOrigin(req, cfg)
+    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
+      req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to seed Host data.' }); return
+    }
+    const ip = String(req.socket.remoteAddress || 'unknown')
+    if (!rateLimit('seed-ip:' + ip, 6).ok) { req.resume(); json(res, 429, { ok: false, error: 'Cache seeding is in progress. Wait and retry.' }); return }
+    let body
+    try { body = await readJson(req, 4 * 1024) }
+    catch (error) { json(res, error?.status || 400, { ok: false, error: error?.expose ? error.message : 'Could not read seed request.' }); return }
+    const orgId = String(body?.orgId || '')
+    if (!/^[A-Za-z0-9_-]{1,100}$/.test(orgId)) {
+      json(res, 400, { ok: false, error: 'A valid hospital id is required to seed the offline cache.' }); return
+    }
+
+    let identity
+    try { identity = await authenticator.verify(req) }
+    catch (error) {
+      json(res, error?.expose ? error.status || 401 : 503, { ok: false, error: error?.expose ? error.message : 'Host authentication is unavailable.' }); return
+    }
+    // Seeding writes to durable storage, so it needs an explicit grant — the
+    // same admin gate that lets a user manage the hospital's data.
+    try { await authenticator.authorize(identity, orgId, 'admin.roles.manage') }
+    catch (error) {
+      json(res, error?.expose ? error.status || 403 : 503, { ok: false, error: error?.expose ? error.message : 'Host authorisation is unavailable.' }); return
+    }
+    if (!db) { json(res, 503, { ok: false, error: 'Firestore is not ready on this Host.' }); return }
+
+    log.info('[hub] offline cache seed requested by', identity.uid, 'for', orgId)
+    const summary = await seedOfflineCache(db, offlineQueryCache, orgId, log)
+    json(res, 200, { ok: true, ...summary })
+  }
+
+  // Read-through Host cache for organization-scoped queries. Online results
+  // come from Firestore and are saved on the Host; during an internet outage,
+  // the exact previously authorized query can be served to another LAN PC.
   async function offlineDataQueryRoute(req, res) {
     if (!req.socket.encrypted && !isLoopbackAddress(req.socket.remoteAddress)) {
       req.resume(); json(res, 403, { ok: false, error: 'Shared clinical data reads require HTTPS.' }); return
@@ -1331,6 +1372,10 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     }
     if (req.method === 'POST' && path === '/device/data/document') {
       await offlineDataDocumentRoute(req, res)
+      return
+    }
+    if (req.method === 'POST' && path === '/device/data/seed') {
+      await handleOfflineSeed(req, res)
       return
     }
 

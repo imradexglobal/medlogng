@@ -79,6 +79,12 @@ service cloud.firestore {
     allow read, write: if false;
   }
 
+  // Last-login stamp (login screen convenience). Doc id is the user's email;
+  // a signed-in user may read/write only their own row. Best-effort, never a gate.
+  match /users/{email} {
+    allow read, write: if signedIn() && request.auth.token.email == email;
+  }
+
   match /organizations/{orgId} {
     allow read: if signedIn();
     // New hospitals activate immediately: the creator may create with

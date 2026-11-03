@@ -1,5 +1,5 @@
 // Admit page — full-page admission form (replaces the modal popup).
-// Route: #/admissions/new?enc=<id>&ward=<wardId>
+// Route: #/admissions/new?enc=<id>&ward=<wardId>&bed=<n>
 // When `enc` is supplied (deep-link from Consultations), the patient and
 // encounter are pre-selected and linked. When admitted directly without an
 // encounter, the user picks a patient and an encounter is auto-created so
@@ -48,6 +48,7 @@ export async function AdmitView(app, params = {}) {
 
   const encId = String(params.enc || '')
   const preselectWardId = String(params.ward || '')
+  const preselectBed = String(params.bed || '')
 
   let wards = []
   let admissions = []
@@ -95,12 +96,45 @@ export async function AdmitView(app, params = {}) {
     render()
   }
 
+  function freeBedsFor(wardName) {
+    const ward = wards.find((w) => w.name === wardName)
+    if (!ward || !ward.totalBeds) return { free: [], total: 0, occupied: 0 }
+    const occupied = new Set(
+      admissions
+        .filter((a) => a.status === 'active' && String(a.wardName).trim().toLowerCase() === wardName.trim().toLowerCase() && a.bedNumber)
+        .map((a) => normalizeBedId(a.bedNumber))
+    )
+    const allBeds = Array.from({ length: ward.totalBeds }, (_, i) => normalizeBedId(String(i + 1)))
+    const free = allBeds.filter((bed) => !occupied.has(bed))
+    return { free, total: ward.totalBeds, occupied: occupied.size }
+  }
+
+  function bedField(wardName) {
+    const { free, total, occupied } = freeBedsFor(wardName)
+    if (!total) {
+      return '<input class="input" id="fld-bed_number" required placeholder="Enter bed label; ward capacity is not configured" />' +
+        '<small class="mut">Capacity is not configured for this ward — type any bed label.</small>'
+    }
+    if (!free.length) {
+      return '<select class="input" id="fld-bed_number" required disabled><option value="">No beds available in this ward</option></select>' +
+        '<small class="mut" style="color:#b91c1c">' + esc(wardName) + ' is at configured capacity (' + occupied + '/' + total + ').</small>'
+    }
+    const normalizedRequested = normalizeBedId(preselectBed)
+    return '<select class="input" id="fld-bed_number" required>' +
+      free.map((bed) =>
+        '<option value="' + bed + '"' + (bed === normalizedRequested ? ' selected' : '') + '>' + bed + '</option>'
+      ).join('') +
+      '</select>' +
+      '<small class="mut"><strong style="color:#047857">' + free.length + ' available</strong> of ' + total + ' configured beds · ' + occupied + ' occupied.</small>'
+  }
+
   function render() {
     const root = document.getElementById('admit-page')
     if (!root) return
 
     const preselectWard = preselectWardId ? wards.find((w) => w.id === preselectWardId) : null
     const fixedPatient = encounter && encounter.patientId ? preselectPatient : null
+    const defaultReason = encounter?.chiefComplaint || encounter?.chief_complaint || ''
 
     const patientOpts = fixedPatient
       ? [{ value: fixedPatient.pid, label: (fixedPatient.name || fixedPatient.pid) + ' · ' + (fixedPatient.mrn || fixedPatient.pid) }]
@@ -114,11 +148,14 @@ export async function AdmitView(app, params = {}) {
       wardFieldHtml = '<select class="input" id="fld-ward_name" required>' +
         wards.map((w) => {
           const selected = preselectWard && preselectWard.name === w.name ? ' selected' : ''
-          return '<option value="' + esc(w.name) + '"' + selected + '>' + esc(w.name) + '</option>'
+          const { free, total } = freeBedsFor(w.name)
+          const avail = total ? ' (' + free.length + '/' + total + ' free)' : ''
+          return '<option value="' + esc(w.name) + '"' + selected + '>' + esc(w.name) + avail + '</option>'
         }).join('') +
         '</select>'
     } else {
-      wardFieldHtml = '<input class="input" id="fld-ward_name" required placeholder="e.g. Ward A" />'
+      wardFieldHtml = '<input class="input" id="fld-ward_name" disabled placeholder="No wards created yet" />' +
+        '<small class="mut" style="color:#b91c1c">Create a ward in Administration → Wards before admitting.</small>'
     }
 
     let providerFieldHtml
@@ -130,28 +167,39 @@ export async function AdmitView(app, params = {}) {
       providerFieldHtml = '<input class="input" id="fld-attending_provider" placeholder="e.g. Dr. N. Eze" />'
     }
 
+    const contextCard = encounter
+      ? '<div class="card" style="margin-bottom:14px">' +
+          '<div class="card-head"><h3 style="margin:0">From encounter</h3>' +
+            '<a class="btn ghost sm" href="#/consultations?enc=' + encodeURIComponent(encounter.id) + '">Open encounter →</a></div>' +
+          '<p class="sub" style="margin:0"><strong>' + esc(encounter.patientName || preselectPatient?.name || '—') + '</strong> · ' +
+            esc(String(encounter.id).slice(0, 8)) + '… · ' + esc(encounter.status || 'open') +
+            (defaultReason ? ' · complaint: ' + esc(defaultReason) : '') +
+          '</p></div>'
+      : ''
+
     root.innerHTML =
+      contextCard +
       '<div class="card">' +
-      '<div class="card-head"><h3 style="margin:0">' + (encId ? 'Admit patient (from encounter)' : 'Admit patient') + '</h3></div>' +
-      '<div class="fgrid" id="admit-fields">' +
-      '<label>Patient<select class="input" id="fld-patient_id" required>' +
-      (fixedPatient
-        ? '<option value="' + esc(fixedPatient.pid) + '" selected>' + esc((fixedPatient.name || fixedPatient.pid) + ' · ' + (fixedPatient.mrn || fixedPatient.pid)) + '</option>'
-        : '<option value="">— select patient —</option>' + patientOpts.map((o) => '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join('')) +
-      '</select></label>' +
-      '<label>Ward' + wardFieldHtml + '</label>' +
-      '<label>Available bed' + bedField(preselectWard?.name || document.getElementById('fld-ward_name')?.value || wards[0]?.name || '') + '</label>' +
-      '<label>Admission type<select class="input" id="fld-admission_type">' +
-      ADMISSION_TYPES.map((t) => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('') +
-      '</select></label>' +
-      '<label>Attending doctor' + providerFieldHtml + '</label>' +
-      '<label>Reason<textarea class="input" id="fld-admission_reason" rows="2" placeholder="e.g. Observation"></textarea></label>' +
-      '</div>' +
-      '<div class="mrow" style="margin-top:14px">' +
-      '<button class="btn ghost" id="admitCancel">Cancel</button>' +
-      '<button class="btn" id="admitSave">Confirm admission</button>' +
-      '</div>' +
-      '<div id="admitErr" class="err" style="margin-top:10px"></div>' +
+        '<div class="card-head"><h3 style="margin:0">' + (encId ? 'Admit patient (from encounter)' : 'Admit patient') + '</h3></div>' +
+        '<div class="fgrid" id="admit-fields">' +
+          '<label>Patient<select class="input" id="fld-patient_id" required>' +
+            (fixedPatient
+              ? '<option value="' + esc(fixedPatient.pid) + '" selected>' + esc((fixedPatient.name || fixedPatient.pid) + ' · ' + (fixedPatient.mrn || fixedPatient.pid)) + '</option>'
+              : '<option value="">— select patient —</option>' + patientOpts.map((o) => '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>').join('')) +
+          '</select></label>' +
+          '<label>Ward' + wardFieldHtml + '</label>' +
+          '<label>Available bed' + bedField(preselectWard?.name || (wards[0] && wards[0].name) || '') + '</label>' +
+          '<label>Admission type<select class="input" id="fld-admission_type">' +
+            ADMISSION_TYPES.map((t) => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('') +
+          '</select></label>' +
+          '<label>Attending doctor' + providerFieldHtml + '</label>' +
+          '<label>Reason<textarea class="input" id="fld-admission_reason" rows="2" placeholder="e.g. Observation">' + esc(defaultReason) + '</textarea></label>' +
+        '</div>' +
+        '<div class="mrow" style="margin-top:14px">' +
+          '<button class="btn ghost" id="admitCancel">Cancel</button>' +
+          '<button class="btn" id="admitSave">Confirm admission</button>' +
+        '</div>' +
+        '<div id="admitErr" class="err" style="margin-top:10px"></div>' +
       '</div>'
 
     const patientSelect = document.getElementById('fld-patient_id')
@@ -164,11 +212,13 @@ export async function AdmitView(app, params = {}) {
       const label = document.querySelector('label:has(#fld-bed_number)')
       if (label) label.innerHTML = 'Available bed' + bedField(document.getElementById('fld-ward_name').value)
     })
+
     document.getElementById('admitSave').onclick = async () => {
       const errEl = document.getElementById('admitErr')
       errEl.textContent = ''
       const btn = document.getElementById('admitSave')
       btn.disabled = true
+      btn.textContent = 'Admitting…'
       try {
         const v = {
           patient_id: document.getElementById('fld-patient_id').value,
@@ -178,7 +228,7 @@ export async function AdmitView(app, params = {}) {
           attending_provider: document.getElementById('fld-attending_provider').value,
           admission_reason: document.getElementById('fld-admission_reason').value,
         }
-        const invalid = validateAdmissionInput(v, { wards, admissions: [], encounter })
+        const invalid = validateAdmissionInput(v, { wards, admissions, encounter })
         if (invalid) { throw new Error(invalid) }
 
         const pid = v.patient_id
@@ -219,24 +269,19 @@ export async function AdmitView(app, params = {}) {
         toast(saved.pendingSync || encToLink?.pendingSync
           ? 'Admission saved on this device; it will sync when connected.'
           : 'Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
-        window.location.hash = '#/admissions'
+
+        // Prefer workspace so care can start immediately
+        if (saved?.id) {
+          window.location.hash = '#/admissions/' + encodeURIComponent(saved.id)
+        } else {
+          window.location.hash = '#/admissions'
+        }
       } catch (e) {
         errEl.textContent = friendlyWriteError(e, 'Admission failed.')
         btn.disabled = false
+        btn.textContent = 'Confirm admission'
       }
     }
-  }
-
-  function bedField(wardName) {
-    const ward = wards.find((w) => w.name === wardName)
-    if (!ward || !ward.totalBeds) return '<input class="input" id="fld-bed_number" required placeholder="Enter bed label; ward capacity is not configured" />'
-    const occupied = new Set(admissions.filter((a) => a.status === 'active' && String(a.wardName).trim().toLowerCase() === wardName.trim().toLowerCase() && a.bedNumber).map((a) => normalizeBedId(a.bedNumber)))
-    const allBeds = Array.from({ length: ward.totalBeds }, (_, i) => normalizeBedId(String(i + 1)))
-    const free = allBeds.filter((bed) => !occupied.has(bed))
-    if (!free.length) return '<select class="input" id="fld-bed_number" required disabled><option value="">No beds available in this ward</option></select><small class="mut">' + esc(wardName) + ' is at configured capacity.</small>'
-    const requested = String(params.bed || '')
-    const normalizedRequested = normalizeBedId(requested)
-    return '<select class="input" id="fld-bed_number" required>' + free.map((bed) => '<option value="' + bed + '"' + (bed === normalizedRequested ? ' selected' : '') + '>' + bed + '</option>').join('') + '</select><small class="mut">' + free.length + ' available of ' + ward.totalBeds + ' configured beds.</small>'
   }
 
   load()

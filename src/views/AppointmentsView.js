@@ -19,11 +19,14 @@ const APPOINTMENT_TYPES = ['Review', 'Follow-up', 'Initial consultation', 'Emerg
 const DOCTORS = ['Dr. A. Balogun', 'Dr. N. Eze', 'Dr. K. Adamu', 'Dr. O. Adeyemo']
 
 function todayISO() {
-  return new Date().toISOString().slice(0, 10)
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })
 }
 
 function nowMin() {
-  return new Date().toISOString().slice(0, 16)
+  const d = new Date()
+  const date = d.toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })
+  const time = d.toLocaleTimeString('en-GB', { timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit' })
+  return date + 'T' + time
 }
 
 export async function AppointmentsView(app) {

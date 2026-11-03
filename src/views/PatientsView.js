@@ -410,7 +410,7 @@ export async function PatientsView(app) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'medilog-patients-' + new Date().toISOString().slice(0, 10) + '.csv'
+    a.download = 'medilog-patients-' + new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' }) + '.csv'
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)

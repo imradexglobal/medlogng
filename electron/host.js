@@ -30,6 +30,7 @@ const { createSecureContext } = require('node:tls')
 const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
+const { pathToFileURL } = require('node:url')
 
 const HOST_PORT_DEFAULT = 8787
 

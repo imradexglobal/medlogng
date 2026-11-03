@@ -18,29 +18,32 @@ export function statusBadge(status) {
   return '<span class="pill ' + cls + '">' + String(status || '—') + '</span>'
 }
 
-// Format a timestamp/millis to DD/MM/YYYY (e.g. 20/10/2026).
+// Format a timestamp/millis to "dd mmm, yyyy" in Nigerian time (Africa/Lagos).
 export function fmtDate(ts) {
   if (!ts) return '—'
   const d = new Date(typeof ts.toMillis === 'function' ? ts.toMillis() : ts)
   if (isNaN(d.getTime())) return '—'
-  const day = String(d.getDate()).padStart(2, '0')
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const year = d.getFullYear()
-  return day + '/' + month + '/' + year
+  return d.toLocaleDateString('en-GB', { timeZone: 'Africa/Lagos', day: '2-digit', month: 'short', year: 'numeric' }).replace(/ (\d{4})$/, ', $1')
 }
 
-// Format a timestamp/millis to DD/MM/YYYY HH:MM:SSAM/PM (e.g. 20/10/2026 02:30:45PM).
+// Format a timestamp/millis to "dd mmm, yyyy HH:MM:SSAM/PM" in Nigerian time (Africa/Lagos).
 export function fmtDateTime(ts) {
   if (!ts) return '—'
   const d = new Date(typeof ts.toMillis === 'function' ? ts.toMillis() : ts)
   if (isNaN(d.getTime())) return '—'
-  const day = String(d.getDate()).padStart(2, '0')
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  const month = monthNames[d.getMonth()]
-  const year = d.getFullYear()
-  const hh = d.getHours % 12 || 12
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  const ss = String(d.getSeconds()).padStart(2, '0')
-  const ampm = d.getHours >= 12 ? 'PM' : 'AM'
-  return day + ' ' + month + ', ' + year + ' ' + hh + ':' + mm + ':' + ss + ampm
+  const date = d.toLocaleDateString('en-GB', { timeZone: 'Africa/Lagos', day: '2-digit', month: 'short', year: 'numeric' })
+  const time = d.toLocaleTimeString('en-GB', { timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  return date + ' ' + time
+}
+
+// Return YYYY-MM-DD for "today" in Nigerian time (Africa/Lagos).
+export function lagosDateISO() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })
+}
+
+// Return YYYY-MM for a timestamp in Nigerian time (Africa/Lagos).
+export function lagosMonthISO(ts) {
+  const d = new Date(typeof ts?.toMillis === 'function' ? ts.toMillis() : (ts || Date.now()))
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' }).slice(0, 7)
 }

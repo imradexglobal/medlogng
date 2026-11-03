@@ -8,7 +8,7 @@ import { shell, toast, wireToast, skeletonCard } from '../components/shell.js'
 import { printDocument } from '../lib/print.js'
 import { authStore } from '../store/authStore.js'
 import { esc } from '../utils/sanitize.js'
-import { fmtDate } from '../utils/format.js'
+import { fmtDate, lagosMonthISO } from '../utils/format.js'
 
 import { listOrgPatientsPage } from '../services/patientService.js'
 import { listOrgAppointmentsPage } from '../services/appointmentService.js'
@@ -210,7 +210,7 @@ function renderFinancial(data) {
   months.forEach((m) => { monthly[m] = { billed: 0, collected: 0 } })
   invoices.forEach((inv) => {
     const ms = inv.createdAt || 0
-    const ym = new Date(ms).toISOString().slice(0, 7)
+    const ym = lagosMonthISO(ms)
     if (monthly[ym]) { monthly[ym].billed += Number(inv.total || 0); monthly[ym].collected += Number(inv.paid || 0) }
   })
   const monthRows = months.map((m) => [m, naira(monthly[m].billed), naira(monthly[m].collected), naira(monthly[m].billed - monthly[m].collected)])
@@ -493,7 +493,7 @@ function renderLaboratory(data) {
   labs.forEach((l) => {
     const ts = l.orderedAt || l.createdAt
     if (!ts) return
-    const ym = new Date(ts).toISOString().slice(0, 7)
+    const ym = lagosMonthISO(ts)
     if (monthly6[ym]) { monthly6[ym].count++; monthly6[ym].kobo += (l.totalKobo || 0) }
   })
 
@@ -853,7 +853,7 @@ function printableReport(title, orgName, subtitle, bodyHtml) {
     '</div>' +
     '<table class="p-meta"><tr><td class="k">Report</td><td>' + esc(title) + '</td>' +
     '<td class="k">Period</td><td>' + esc(subtitle) + '</td></tr>' +
-    '<tr><td class="k">Generated</td><td>' + new Date().toLocaleString('en-NG') + '</td>' +
+    '<tr><td class="k">Generated</td><td>' + new Date().toLocaleString('en-NG', { timeZone: 'Africa/Lagos' }) + '</td>' +
     '<td class="k">Hospital</td><td>' + esc(orgName) + '</td></tr></table>' +
     bodyHtml +
     '</div>'
@@ -1091,7 +1091,7 @@ export async function ReportsView(app) {
       data = await loadAllData(activeOrg, startMs, endMs)
       renderCurrent()
       const rangeTxt = (startMs != null || endMs != null)
-        ? ' · ' + (startMs != null ? new Date(startMs).toLocaleDateString('en-NG') : '…') + ' → ' + (endMs != null ? new Date(endMs).toLocaleDateString('en-NG') : '…')
+        ? ' · ' + (startMs != null ? new Date(startMs).toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos' }) : '…') + ' → ' + (endMs != null ? new Date(endMs).toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos' }) : '…')
         : ' · all time'
       if (statusEl) statusEl.textContent = 'Live data' + rangeTxt
     } catch (e) {
@@ -1112,7 +1112,7 @@ export async function ReportsView(app) {
     const printBtn = document.getElementById('rep-print-' + kind)
     const csvBtn = document.getElementById('rep-csv-' + kind)
     const rangeLabel = (startMs != null || endMs != null)
-      ? (startMs != null ? new Date(startMs).toLocaleDateString('en-NG') : '…') + ' → ' + (endMs != null ? new Date(endMs).toLocaleDateString('en-NG') : '…')
+      ? (startMs != null ? new Date(startMs).toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos' }) : '…') + ' → ' + (endMs != null ? new Date(endMs).toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos' }) : '…')
       : 'All time'
 
     if (printBtn) {
@@ -1177,7 +1177,7 @@ export async function ReportsView(app) {
             for (let m = 11; m >= 0; m--) { const dd = new Date(now); dd.setMonth(dd.getMonth() - m); months.push(dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0')) }
             const monthly = {}
             months.forEach((m) => { monthly[m] = { b: 0, c: 0 } })
-            invoices.forEach((inv) => { const ym = new Date(inv.createdAt || 0).toISOString().slice(0, 7); if (monthly[ym]) { monthly[ym].b += Number(inv.total || 0); monthly[ym].c += Number(inv.paid || 0) } })
+            invoices.forEach((inv) => { const ym = lagosMonthISO(inv.createdAt || 0); if (monthly[ym]) { monthly[ym].b += Number(inv.total || 0); monthly[ym].c += Number(inv.paid || 0) } })
             const monthRows = months.map((m) => [m, String(monthly[m].b), String(monthly[m].c), String(monthly[m].b - monthly[m].c)])
             const outstanding = invoices.filter((inv) => (inv.status || 'unpaid') !== 'paid').sort((a, b) => b.createdAt - a.createdAt)
             const outRows = outstanding.map((inv) => [inv.invoiceId || inv.id, inv.patientName, inv.payer, inv.date || fmtDate(inv.createdAt), inv.status, String(inv.total), String(inv.paid), String(inv.outstanding)])

@@ -49,7 +49,8 @@ export function staffLabel(value) {
   if (value == null) return value
   const s = String(value).trim()
   if (!s) return value
-  const known = byId.get(s) || staffNameForId(s) || byEmail.get(s.toLowerCase())
+  const uid = s.includes('_') ? s.split('_').slice(1).join('_') : s
+  const known = byId.get(s) || byId.get(uid) || staffNameForId(s) || staffNameForId(uid) || byEmail.get(s.toLowerCase())
   if (known) return known
   if (/^[A-Z0-9_-]{20,}$/i.test(s)) return 'Staff member'
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) return emailLabel(s)
@@ -69,9 +70,16 @@ export function staffNameForId(userId) {
   if (!userId) return ''
   const cached = byId.get(userId)
   if (cached) return cached
-  const membership = authStore.getState().memberships?.find((m) => m.user_id === userId && m.staff_name)
+  // Membership ids are stored as `${orgId}_${uid}`; unwrap to the uid.
+  const uid = String(userId).includes('_') ? String(userId).split('_').slice(1).join('_') : userId
+  if (uid !== userId) {
+    const cached2 = byId.get(uid)
+    if (cached2) { rememberStaffName({ userId, name: cached2 }); return cached2 }
+  }
+  const membership = authStore.getState().memberships?.find((m) => (m.user_id === userId || m.user_id === uid) && m.staff_name)
   if (membership?.staff_name) {
     rememberStaffName({ userId, email: membership.email, name: membership.staff_name })
+    if (uid !== userId) rememberStaffName({ userId: uid, email: membership.email, name: membership.staff_name })
     return String(membership.staff_name).trim()
   }
   return ''

@@ -191,9 +191,43 @@ async function enrollHostSession() {
   }
 }
 authStore.subscribe(() => { void enrollHostSession() })
-window.addEventListener('online', () => { enrolledHostKey = ''; void enrollHostSession() })
-void enrollHostSession()
-handleRoute()
+  window.addEventListener('online', () => { enrolledHostKey = ''; void enrollHostSession() })
+  void enrollHostSession()
+
+  // Warm the Host's offline cache the first time a user lands on a hospital,
+  // so ward tablets can work with no prior online session. Best-effort: a
+  // failure is logged and the app keeps working normally.
+  let seededKey = ''
+  let seedInFlight = false
+  async function warmHostOfflineCache() {
+    const s = authStore.getState()
+    const key = s.user?.uid && s.activeOrg ? `${s.user.uid}:${s.activeOrg}` : ''
+    if (!key || key === seededKey || seedInFlight) return
+    if (!navigator.onLine) return
+    seedInFlight = true
+    try {
+      const { seedHostOfflineCache } = await import('./services/hostSeed.js')
+      const result = await seedHostOfflineCache(s.user, s.activeOrg)
+      if (result?.ok) {
+        seededKey = key
+        const count = Number(result.docs || 0)
+        toast('Offline cache ready — ' + count + ' record(s) saved for when the connection drops.')
+      } else {
+        console.info('[offline seed] skipped — Host not available or not authorised.')
+      }
+    } catch (error) {
+      console.info('[offline seed] deferred:', error?.message || '')
+    } finally {
+      seedInFlight = false
+      const latest = authStore.getState()
+      const nextKey = latest.user?.uid && latest.activeOrg ? `${latest.user.uid}:${latest.activeOrg}` : ''
+      if (nextKey && nextKey !== key && navigator.onLine) queueMicrotask(() => { void warmHostOfflineCache() })
+    }
+  }
+  authStore.subscribe(() => { void warmHostOfflineCache() })
+  window.addEventListener('online', () => { void warmHostOfflineCache() })
+  void warmHostOfflineCache()
+  handleRoute()
 
 // Register the app-shell service worker (web only, production only). Skipped
 // in Electron (loads from file://, no SW support) and dev (no caching during

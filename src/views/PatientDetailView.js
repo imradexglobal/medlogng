@@ -1788,7 +1788,7 @@ export async function PatientDetailView(app, params = {}) {
       submitLabel: 'Save consent',
       fields: [
         { name: 'consent_type', label: 'Consent type', type: 'select', required: true, options: ['Treatment', 'Procedure', 'Data sharing', 'Photography', 'Full record'] },
-        { name: 'consent_date', label: 'Date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) },
+        { name: 'consent_date', label: 'Date', type: 'date', required: true, value: new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' }), },
         { name: 'witness', label: 'Witness', required: true, placeholder: 'Full name of witness' },
         { name: 'note', label: 'Note', full: true, placeholder: 'Optional' },
       ],

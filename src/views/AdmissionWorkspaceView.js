@@ -99,6 +99,35 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     return typeof t === 'number' ? t : 0
   }
 
+  function daysOnStay() {
+    const when = admission.admissionDate || admission.createdAt
+    if (!when) return null
+    const t = typeof when === 'number' ? when : (when?.toMillis ? when.toMillis() : new Date(when).getTime())
+    if (!t || Number.isNaN(t)) return null
+    return Math.max(0, Math.floor((Date.now() - t) / 86400000))
+  }
+
+  function outstandingBalanceNaira() {
+    return (invoices || []).reduce((sum, inv) => {
+      const tot = Number(inv.total_kobo || 0)
+      const pd = Number(inv.paid_kobo || 0)
+      return sum + Math.max(0, tot - pd)
+    }, 0) / 100
+  }
+
+  function pendingLabsCount() {
+    return (labs || []).filter((l) => !['completed', 'verified', 'cancelled'].includes(l.status)).length
+  }
+
+  function dosesRemainingCount() {
+    let n = 0
+    for (const m of (meds || [])) {
+      const r = R.normalizeRequest(m)
+      for (const l of r.items) n += A.lineRemainingToGive(l)
+    }
+    return n
+  }
+
   // Status badge HTML (uses app's .pill class)
   function badge(s) {
     const map = { active: 'info', discharged: 'ok', removed: 'bad', order: 'neutral', completed: 'ok',
@@ -139,6 +168,23 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     const canBill = billingCaps.canInvoice
 
     // --- Overview card ---
+    const los = daysOnStay()
+    const bal = outstandingBalanceNaira()
+    const pendingLabs = pendingLabsCount()
+    const dosesLeft = dosesRemainingCount()
+
+    const alerts = []
+    if (isActive && pendingLabs > 0) alerts.push({ tone: 'info', text: pendingLabs + ' lab order' + (pendingLabs === 1 ? '' : 's') + ' still open' })
+    if (isActive && dosesLeft > 0) alerts.push({ tone: 'warn', text: dosesLeft + ' dose' + (dosesLeft === 1 ? '' : 's') + ' still to give' })
+    if (bal > 0) alerts.push({ tone: 'bad', text: '₦' + bal.toLocaleString('en-NG') + ' outstanding on this stay' })
+
+    const alertStrip = alerts.length
+      ? '<div class="card" style="margin-bottom:12px;padding:10px 14px">' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
+            alerts.map((a) => '<span class="pill ' + a.tone + '">' + esc(a.text) + '</span>').join('') +
+          '</div></div>'
+      : ''
+
     const overviewHTML =
       '<div class="card">' +
         '<div class="card-head"><h3>Patient overview</h3>' +
@@ -147,8 +193,10 @@ export async function AdmissionWorkspaceView(app, params = {}) {
           '<div><em>Patient</em><strong>' + esc(admission.patientName || '—') + '</strong></div>' +
           '<div><em>Ward · Bed</em><strong>' + esc(admission.wardName || '—') + ' · ' + esc(admission.bedNumber || '—') + '</strong></div>' +
           '<div><em>Admission type</em><strong>' + esc(admission.admissionType || '—') + '</strong></div>' +
-          '<div><em>Admitted</em><strong>' + fmtDate(admission.admissionDate) + '</strong></div>' +
-          '<div><em>Attending</em><strong>' + esc(admission.attendingProvider || '—') + '</strong></div>' +
+          '<div><em>Admitted</em><strong>' + fmtDate(admission.admissionDate) +
+            (los != null && isActive ? ' <span class="pill info">Day ' + (los + 1) + '</span>' : '') +
+          '</strong></div>' +
+          '<div><em>Attending</em><strong>' + esc(staffLabel(admission.attendingProvider) || '—') + '</strong></div>' +
           '<div><em>Reason</em><strong>' + esc(admission.admissionReason || '—') + '</strong></div>' +
           (admission.dischargeDate
             ? '<div><em>Discharged</em><strong>' + fmtDate(admission.dischargeDate) + '</strong></div>' +
@@ -197,7 +245,10 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<div class="card-head"><h3>Clinical plan</h3>' +
           (canEditPlan ? '<button class="btn sm" id="addPlanBtn">+ Add plan item</button>' : '') + '</div>' +
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>Type · Round</th><th>Item</th><th>Status</th><th></th></tr></thead><tbody>' +
-          (planRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">No plan items yet.</td></tr>') + '</tbody></table></div>' +
+          (planRows || '<tr><td colspan="4" class="mut" style="text-align:center;padding:22px 8px">' +
+            'No plan items yet.' +
+            (canEditPlan ? ' <button class="btn ghost sm" id="addPlanBtnEmpty">Add the first plan item</button>' : '') +
+          '</td></tr>') + '</tbody></table></div>' +
       '</div>'
 
     // --- Labs card ---
@@ -221,7 +272,12 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<div class="card-head"><h3>Laboratory</h3>' +
           (canOrderLabs ? '<button class="btn sm" id="addLabBtn">+ Order lab</button>' : '') + '</div>' +
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>Tests</th><th>Priority</th><th>Status</th><th>Ordered</th><th></th></tr></thead><tbody>' +
-          (labsRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No lab orders.</td></tr>') + '</tbody></table></div>' +
+          (labsRows ||
+            '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">' +
+              'No lab orders yet.' +
+              (canOrderLabs ? ' <button class="btn ghost sm" id="addLabBtnEmpty">Order the first lab</button>' : '') +
+            '</td></tr>') +
+        '</tbody></table></div>' +
       '</div>'
 
     // --- Imaging card ---
@@ -247,7 +303,10 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<div class="card-head"><h3>Imaging</h3>' +
           (canOrderImaging ? '<button class="btn sm" id="addImagingBtn">+ Order imaging</button>' : '') + '</div>' +
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>Modality · Study</th><th>Priority</th><th>Status</th><th>Ordered</th><th></th></tr></thead><tbody>' +
-          (imagingRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">No imaging orders.</td></tr>') + '</tbody></table></div>' +
+          (imagingRows || '<tr><td colspan="5" class="mut" style="text-align:center;padding:22px 8px">' +
+            'No imaging orders.' +
+            (canOrderImaging ? ' <button class="btn ghost sm" id="addImagingBtnEmpty">Order the first imaging</button>' : '') +
+          '</td></tr>') + '</tbody></table></div>' +
       '</div>'
 
     // --- Medications card ---
@@ -299,7 +358,10 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         '<div class="card-head"><h3>Medications</h3>' +
           (canPrescribe ? '<button class="btn sm" id="addMedBtn">+ Prescribe</button>' : '') + '</div>' +
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>Medicine</th><th>Status</th><th>Requested</th></tr></thead><tbody>' +
-          (medsRows || '<tr><td colspan="3" class="mut" style="text-align:center;padding:22px 8px">No prescriptions.</td></tr>') + '</tbody></table></div>' +
+          (medsRows || '<tr><td colspan="3" class="mut" style="text-align:center;padding:22px 8px">' +
+            'No prescriptions.' +
+            (canPrescribe ? ' <button class="btn ghost sm" id="addMedBtnEmpty">Prescribe the first medicine</button>' : '') +
+          '</td></tr>') + '</tbody></table></div>' +
         (doses && doses.length
           ? '<div class="card-head" style="margin-top:14px"><h3>Doses given</h3>' +
               '<span class="pill info">' + esc(String(doses.length)) + '</span></div>' +
@@ -385,6 +447,7 @@ export async function AdmissionWorkspaceView(app, params = {}) {
         (unavailableSections.length
           ? '<div class="card"><p class="sub"><strong>Some workspace sections could not be loaded.</strong> Your role may not have access to: ' + esc(unavailableSections.join(', ')) + '.</p></div>'
           : '') +
+        alertStrip +
         overviewHTML +
         planCard +
         labsCard +
@@ -408,6 +471,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     // Add plan item
     const addPlanBtn = document.getElementById('addPlanBtn')
     if (addPlanBtn) addPlanBtn.onclick = openAddPlanForm
+    const addPlanBtnEmpty = document.getElementById('addPlanBtnEmpty')
+    if (addPlanBtnEmpty) addPlanBtnEmpty.onclick = openAddPlanForm
 
     // Edit / remove plan items (delegated)
     document.querySelectorAll('[data-edit-plan]').forEach((b) => {
@@ -428,6 +493,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     })
     const addLabBtn = document.getElementById('addLabBtn')
     if (addLabBtn) addLabBtn.onclick = openAddLabForm
+    const addLabBtnEmpty = document.getElementById('addLabBtnEmpty')
+    if (addLabBtnEmpty) addLabBtnEmpty.onclick = openAddLabForm
 
     // Imaging status change (delegated)
     document.querySelectorAll('[data-imaging-status]').forEach((sel) => {
@@ -435,6 +502,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
     })
     const addImagingBtn = document.getElementById('addImagingBtn')
     if (addImagingBtn) addImagingBtn.onclick = openAddImagingForm
+    const addImagingBtnEmpty = document.getElementById('addImagingBtnEmpty')
+    if (addImagingBtnEmpty) addImagingBtnEmpty.onclick = openAddImagingForm
 
     // Detail / print modals (delegated)
     document.querySelectorAll('[data-lab-detail]').forEach((b) => {
@@ -446,6 +515,8 @@ export async function AdmissionWorkspaceView(app, params = {}) {
 
     const addMedBtn = document.getElementById('addMedBtn')
     if (addMedBtn) addMedBtn.onclick = openAddMedForm
+    const addMedBtnEmpty = document.getElementById('addMedBtnEmpty')
+    if (addMedBtnEmpty) addMedBtnEmpty.onclick = openAddMedForm
 
     // Give a dose against a script line (the bedside half of the chain).
     document.querySelectorAll('[data-give-dose]').forEach((b) => {

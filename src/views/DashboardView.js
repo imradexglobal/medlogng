@@ -35,14 +35,14 @@ function capabilityGroups(me) {
 
 function todayLabel() {
   const d = new Date()
-  return d.toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+  return d.toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
 }
 
 function shortTime(ts) {
   if (!ts) return '—'
   const d = new Date(typeof ts.toMillis === 'function' ? ts.toMillis() : ts)
   if (isNaN(d.getTime())) return '—'
-  return d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleTimeString('en-NG', { timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit' })
 }
 
 // ---- view ------------------------------------------------------------------
@@ -104,7 +104,7 @@ export async function DashboardView(app) {
   }
 
   function scheduledToday() {
-    const today = new Date().toISOString().slice(0, 10)
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })
     return appts.filter((a) => String(a.time || '').slice(0, 10) === today)
   }
 

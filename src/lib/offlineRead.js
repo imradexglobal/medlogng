@@ -42,7 +42,7 @@ export async function getDocsTolerant(q, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}
     return await withTimeout(pending, timeoutMs)
   } catch (e) {
     if (e?.code === 'offline/timeout') {
-      const cached = await getDocsFromCache(q).catch(() => null)
+      const cached = await withTimeout(getDocsFromCache(q), timeoutMs).catch(() => null)
       // A valid empty cached query is still useful offline. Waiting for the
       // network after the timeout leaves screens stuck when a LAN is up but
       // the internet is down.
@@ -60,7 +60,7 @@ export async function getDocTolerant(ref, { timeoutMs = DEFAULT_TIMEOUT_MS } = {
     return await withTimeout(pending, timeoutMs)
   } catch (e) {
     if (e?.code === 'offline/timeout') {
-      const cached = await getDocFromCache(ref).catch(() => null)
+      const cached = await withTimeout(getDocFromCache(ref), timeoutMs).catch(() => null)
       if (cached && cached.exists()) return cached
     }
     throw e
@@ -79,7 +79,7 @@ export async function withServerCount(q, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}
     } catch { /* fall through to cache */ }
   }
   try {
-    const snap = await getDocsFromCache(q)
+    const snap = await withTimeout(getDocsFromCache(q), timeoutMs)
     return snap.size
   } catch {
     return null

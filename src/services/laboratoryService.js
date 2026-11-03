@@ -52,7 +52,6 @@ export async function orderHasPayment(orderId) {
   if (raw) {
     // 1) Denormalised stamp on the order itself — works for every role.
     if (raw.payment_recorded_at || (Number(raw.paid_kobo) || 0) > 0) return true
-    if (raw.billing_status === 'invoiced' && raw.invoice_total_kobo != null && Number(raw.invoice_total_kobo) <= 0) return true
     // 2) Invoice read — requires billing.invoice; also backfills the stamp for
     //    invoices paid/zero-valued before payment stamping existed.
     if (raw.invoice_id) {

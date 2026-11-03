@@ -18,17 +18,13 @@ function renderInfo() {
   $('btnFinish').disabled = !info.keyImported
 }
 
-function showAddresses({ lanUrl, localUrl, httpsLanUrl, httpsLocalUrl, diagnostics } = {}) {
+function showAddresses({ lanUrl, localUrl, diagnostics } = {}) {
   $('addrWrap').hidden = false
 
   $('lanAddr').textContent = lanUrl || 'Not available yet'
   $('lanAddr').classList.toggle('missing', !lanUrl)
 
   $('localAddr').textContent = localUrl || ''
-  $('httpsLanAddr').textContent = httpsLanUrl || 'Unavailable — use a trusted certificate that matches the Host address.'
-  $('httpsLanAddr').classList.toggle('missing', !httpsLanUrl)
-  $('httpsLocalAddr').textContent = httpsLocalUrl || 'Unavailable — check the certificate name for 127.0.0.1.'
-  $('httpsLocalAddr').classList.toggle('missing', !httpsLocalUrl)
 
   const lines = Array.isArray(diagnostics) ? diagnostics.filter(Boolean) : []
   $('diag').hidden = lines.length === 0
@@ -40,9 +36,6 @@ async function refresh() {
     info = await api.hostGetInfo()
     if (info.keyImported) {
       $('keyMsg').innerHTML = '<div class="ok">✓ Key already imported.</div>'
-    }
-    if (info.tlsImported) {
-      $('tlsMsg').innerHTML = '<div class="ok">✓ HTTPS certificate imported. HTTP access remains unchanged. HTTPS will use a separately selected, available port.</div>'
     }
     if (info.firewallOpen) {
       $('fwMsg').innerHTML = '<div class="ok">✓ Firewall rule active for the Domain and Private network profiles.</div>'
@@ -57,18 +50,6 @@ async function refresh() {
 }
 
 $('btnTls').onclick = async () => {
-  $('tlsMsg').innerHTML = ''
-  const r = await api.hostImportTlsCertificate($('tlsPassword').value)
-  $('tlsPassword').value = ''
-  if (r?.cancelled) return
-  if (r?.ok) {
-    info.tlsImported = true
-    $('tlsMsg').innerHTML = '<div class="ok">✓ HTTPS certificate imported. The Host uses it after restart. Have IT deploy the issuing CA root certificate to client PCs.</div>'
-  } else {
-    $('tlsMsg').innerHTML = '<div class="err">' + (r?.error || 'Certificate import failed.') + '</div>'
-  }
-}
-
 $('btnKey').onclick = async () => {
   $('keyMsg').innerHTML = ''
   const r = await api.hostImportKey()
@@ -85,9 +66,8 @@ $('btnFw').onclick = async () => {
   $('fwMsg').innerHTML = '<div class="ok">Waiting for the Windows permission prompt… (Click YES if prompted)</div>'
   const r = await api.hostOpenFirewall()
   const ports = Array.isArray(r?.ports) ? r.ports.join(', ') : String(r?.port || 8787)
-  if (r?.ok) {
-    $('fwMsg').innerHTML = '<div class="ok">✓ Firewall rule active for port(s) ' + ports + ' on Domain and Private network profiles.' +
-      (r.httpsPort ? ' HTTPS selected port: ' + r.httpsPort + '.' : '') + '</div>'
+    if (r?.ok) {
+      $('fwMsg').innerHTML = '<div class="ok">✓ Firewall rule active for port(s) ' + ports + ' on Domain and Private network profiles.</div>'
   } else {
     $('fwMsg').innerHTML =
       '<div class="err">Could not add rule automatically (' + (r?.message || 'permission declined') + ').<br>' +
@@ -108,8 +88,7 @@ $('btnFinish').onclick = async () => {
   }
   showAddresses(r)
   $('finMsg').innerHTML = r.lanUrl
-    ? '<div class="ok">✓ Host is running. Existing clients can continue using the HTTP address above.' +
-      (r.https ? ' Use the separate HTTPS address above for microphone recording.' : ' HTTPS microphone access is unavailable. ' + (r.httpsError || 'Import a trusted certificate valid for the Host address.')) + '</div>'
+    ? '<div class="ok">✓ Host is running. Existing clients can continue using the HTTP address above.</div>'
     : '<div class="err">Host is running for this PC only — no usable LAN address was found. See the notes below.</div>'
   setTimeout(() => api.hostSetupDone(), r.lanUrl ? 1400 : 4000)
 }

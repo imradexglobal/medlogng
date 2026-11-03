@@ -29,6 +29,8 @@ asarUnpack:
   - dist/**/*
   - public/**/*
   - src/features/pharmacy/requests.js
+  - src/features/pharmacy/administration.js
+  - src/features/clinicalDocumentation/**/*
   - functions/speechProvider.js
   - node_modules/**/*
   - package.json
@@ -45,6 +47,8 @@ files:
   - '!**/.env'
   - '!**/.env.*'
   - src/features/pharmacy/requests.js
+  - src/features/pharmacy/administration.js
+  - src/features/clinicalDocumentation/**/*
   - package.json
   # firebase-admin is REQUIRED here (unlike the normal build): the relay
   # writes to Firestore with the service-account key.
@@ -74,7 +78,7 @@ nsis:
   # live in Electron userData. Uninstall removes the program but must preserve
   # this clinical operational data for a later reinstall/upgrade.
   deleteAppDataOnUninstall: false
-  differentialPackage: false
+  differentialPackage: true
 
 # Auto-update channel for Host builds
 publish:

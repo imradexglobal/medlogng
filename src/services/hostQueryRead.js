@@ -17,7 +17,11 @@ async function getHubBase() {
   try {
     const origin = new URL(window.location.origin)
     if (origin.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]', '::1'].includes(origin.hostname)) return hubBase = ''
-    const response = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(1200) })
+    const fetchPromise = fetch(window.location.origin + '/health')
+    const response = await Promise.race([
+      fetchPromise,
+      new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('hub health check timed out'), { code: 'hub/timeout' })), 1200)),
+    ])
     if (!response.ok) return hubBase = ''
     const data = await response.json()
     return hubBase = data?.ok && String(data.version || '').startsWith('hub-') ? window.location.origin : ''
@@ -96,9 +100,13 @@ async function signedHostRequest(baseUrl, path, body, user, orgId, signal) {
       headers: token ? { authorization: 'Bearer ' + token } : {}, signal }, device)
   }
   if (!token) return null
-  return fetch(baseUrl + path, { method: 'POST', headers: {
+  const fetchPromise = fetch(baseUrl + path, { method: 'POST', headers: {
     authorization: 'Bearer ' + token, 'content-type': 'application/json', 'x-medilog-client': 'medilogng-web',
   }, body: payload, signal, cache: 'no-store' })
+  return Promise.race([
+    fetchPromise,
+    new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error('host request timed out'), { code: 'host/timeout' })), 5000)),
+  ])
 }
 
 export async function readQueryFromHost(db, query) {

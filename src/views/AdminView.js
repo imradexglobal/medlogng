@@ -531,7 +531,7 @@ export async function AdminView(app) {
         ? '<div class="tblwrap"><table class="tbl"><thead><tr><th>Device</th><th>User</th><th>Last seen</th><th>Status</th><th></th></tr></thead><tbody>' +
           devs.map((d) => '<tr><td><strong>' + esc(d.device_name || d.id) + '</strong><div class="mut">' + esc(d.platform || '') + ' · ' + esc(d.id) + '</div></td>' +
             '<td class="mut">' + esc(staffDisplayName({ user_id: d.user_id, user_name: d.user_name, email: d.user_email })) + '</td>' +
-            '<td class="mut">' + esc(d.last_seen?.toDate ? d.last_seen.toDate().toLocaleString() : '—') + '</td>' +
+            '<td class="mut">' + esc(d.last_seen?.toDate ? d.last_seen.toDate().toLocaleString('en-NG', { timeZone: 'Africa/Lagos' }) : '—') + '</td>' +
             '<td>' + statusPill(d.status || 'active') + '</td>' +
             '<td>' + (canManageDevices
               ? (d.status === 'revoked'
