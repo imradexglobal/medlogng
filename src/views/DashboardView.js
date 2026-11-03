@@ -172,7 +172,7 @@ export async function DashboardView(app) {
 
     const actions =
       registerBtn +
-      '<a class="btn ghost" href="#/appointments">Day schedule</a>'
+      '<a class="btn ghost" href="#/consultations">Day schedule</a>'
 
     // Build sections
     const items = attentionItems()

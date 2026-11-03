@@ -230,8 +230,9 @@ export async function AdmitView(app, params = {}) {
   function bedField(wardName) {
     const ward = wards.find((w) => w.name === wardName)
     if (!ward || !ward.totalBeds) return '<input class="input" id="fld-bed_number" required placeholder="Enter bed label; ward capacity is not configured" />'
-    const occupied = new Set(admissions.filter((a) => a.status === 'active' && String(a.wardName).trim().toLowerCase() === wardName.trim().toLowerCase()).map((a) => normalizeBedId(a.bedNumber)))
-    const free = Array.from({ length: ward.totalBeds }, (_, i) => String(i + 1)).filter((bed) => !occupied.has(bed))
+    const occupied = new Set(admissions.filter((a) => a.status === 'active' && String(a.wardName).trim().toLowerCase() === wardName.trim().toLowerCase() && a.bedNumber).map((a) => normalizeBedId(a.bedNumber)))
+    const allBeds = Array.from({ length: ward.totalBeds }, (_, i) => normalizeBedId(String(i + 1)))
+    const free = allBeds.filter((bed) => !occupied.has(bed))
     if (!free.length) return '<select class="input" id="fld-bed_number" required disabled><option value="">No beds available in this ward</option></select><small class="mut">' + esc(wardName) + ' is at configured capacity.</small>'
     const requested = String(params.bed || '')
     const normalizedRequested = normalizeBedId(requested)

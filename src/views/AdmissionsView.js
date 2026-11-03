@@ -22,14 +22,14 @@ import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
 import { esc } from '../utils/sanitize.js'
-import { fmtDate } from '../utils/format.js'
+import { fmtDate, fmtDateTime } from '../utils/format.js'
 import { navigate } from '../router.js'
 import { confirmDelete } from './deleteUi.js'
 import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteAdmission } from '../services/deleteService.js'
 import { DISCHARGE_TYPES, normalizeBedId as normalizeBed } from '../features/admissions/domain.js'
-import { staffLabel } from '../lib/staffName.js'
+import { ensureStaffDirectory } from '../lib/staffName.js'
 
 // Admission types come from the domain module so this form cannot drift from
 // the list the service and tests agree on.
@@ -86,19 +86,28 @@ export async function AdmissionsView(app, params = {}) {
       '<button class="btn ghost" id="refreshBtn" aria-label="Refresh admissions list">↻ Refresh</button>' +
       (caps.canAdmit ? '<button class="btn ghost" id="wardsBtn" aria-label="Manage ward and bed settings">Manage wards</button><button class="btn" id="admitBtn" aria-label="Admit a new patient">+ Admit patient</button>' : ''),
     body:
-      '<div id="adm-context"></div>' +
+      '<div class="tabs">' +
+      '<button class="tab-link active" data-tab="wards">Wards</button>' +
+      '<button class="tab-link" data-tab="admissions">Current admissions</button>' +
+      '</div>' +
+      '<div class="tab-content">' +
+      '<div class="tab-pane active" id="tab-wards">' +
       '<div class="grid4"><div class="stat"><em>Occupied</em><strong id="adm-occupied">0</strong><span id="adm-occ-sub">active admissions</span></div>' +
       '<div class="stat"><em>Available</em><strong id="adm-available">0</strong><span>free beds</span></div>' +
       '<div class="stat"><em>Total beds</em><strong id="adm-total-beds">0</strong><span>ward master</span></div>' +
       '<div class="stat"><em>Discharged</em><strong id="adm-discharged">0</strong><span>audited history kept</span></div></div>' +
       '<div class="card"><div class="card-head"><h3>Wards</h3><span class="pill" id="adm-ward-count">0 wards</span></div>' +
       '<div class="wardgrid" id="adm-wards"><p class="sub">Loading…</p></div></div>' +
+      '</div>' +
+      '<div class="tab-pane" id="tab-admissions">' +
       '<div class="card"><div class="card-head"><h3 id="adm-tbl-title">Current admissions</h3></div>' +
       '<div class="toolbar" style="margin:0 0 8px"><input class="input" id="admSearch" aria-label="Search admissions by patient, ward, bed or doctor" placeholder="Search patient, ward, bed, doctor or MRN…" style="max-width:240px">' +
       '<select class="input" id="admStatus" style="max-width:170px"><option value="active" selected>Active</option><option value="discharged">Discharged</option><option value="all">All admissions</option></select></div>' +
       '<div class="tblwrap"><table class="tbl" id="adm-tbl"><thead><tr><th>Patient</th><th>Ward · Bed</th><th>Admitted</th><th>Doctor</th><th>From encounter</th><th style="width:120px">Actions</th></tr></thead><tbody>' +
       '<tr><td colspan="6" class="mut" style="text-align:center;padding:22px 8px">Loading…</td></tr>' +
-      '</tbody></table><div class="loadmore" data-loadmore="1"></div></div></div>',
+      '</tbody></table><div class="loadmore" data-loadmore="1"></div></div></div>' +
+      '</div>' +
+      '</div>',
   })
 
   const more = createLoadMore(loadMore)
@@ -333,7 +342,6 @@ export async function AdmissionsView(app, params = {}) {
         : '<span class="mut">—</span>'
       const items = []
       if (a.status === 'active') {
-        items.push({ label: 'Workspace', dataAction: 'workspace', description: 'Open clinical plan workspace for this admission' })
         if (caps.canAdmit) {
           items.push({ label: 'Transfer', dataAction: 'transfer', description: 'Transfer patient to another ward and bed' })
           items.push({ label: 'Discharge', dataAction: 'discharge', description: 'Discharge this patient' })
@@ -342,10 +350,10 @@ export async function AdmissionsView(app, params = {}) {
       if (a.status === 'discharged' && canDeleteRecords()) {
         items.push({ label: 'Delete', tone: 'danger', dataAction: 'delete', description: 'Permanently delete this discharged admission (audit trail kept)' })
       }
-      return '<tr>' +
+      return '<tr data-row-id="' + a.id + '">' +
         '<td>' + patientCell + historyPill + '</td>' +
         '<td>' + esc(a.wardName) + ' · ' + esc(a.bedNumber) + '</td>' +
-        '<td>' + (when ? fmtDate(when) : '—') +
+        '<td>' + (when ? fmtDateTime(when) : '—') +
         (a.status === 'discharged' && a.dischargeDate
           ? '<div class="mut">out ' + fmtDate(a.dischargeDate) + '</div>' : '') + '</td>' +
         '<td>' + esc(staffLabel(a.attendingProvider) || '—') + '</td>' +
@@ -380,11 +388,21 @@ export async function AdmissionsView(app, params = {}) {
           confirmDelete('discharged admission of ' + admissionName(adm), () => deleteAdmission(rowId), () => {
             lastDeletedAdm = rowId
             if (lastDeletedAdm) admissions = admissions.filter((a) => a.id !== lastDeletedAdm)
-            render()
-          })
-        }
-      })
-    }
+render()
+})
+    // The current admission row is clickable to open workspace.
+    // Patient name clicking to patient page is maintained via the existing patient link.
+    document.getElementById('adm-tbl')?.addEventListener('click', (e) => {
+      const row = e.target.closest('tr')
+      if (!row) return
+      const id = row.getAttribute('data-row-id')
+      if (!id || e.target.tagName === 'A') return
+      const adm = admissions.find((a) => a.id === id)
+      if (adm && adm.status === 'active') {
+        window.location.hash = '#/admissions/' + esc(id)
+      }
+    })
+  }
     ensureVisibleMeta()
 
     // The bed itself is the action: vacant beds open admission; occupied beds open the encounter.
@@ -633,7 +651,7 @@ export async function AdmissionsView(app, params = {}) {
   if (admitBtn) admitBtn.onclick = () => navigate('/admissions/new')
   const wardsBtn = document.getElementById('wardsBtn')
   if (wardsBtn) wardsBtn.onclick = openWardsManager
-  const admSearch = document.getElementById('admSearch')
+const admSearch = document.getElementById('admSearch')
   if (admSearch) {
     admSearch.addEventListener('input', (e) => {
       const term = e.target.value.trim().toLowerCase()
@@ -643,6 +661,18 @@ export async function AdmissionsView(app, params = {}) {
       searchDebounce = setTimeout(() => render(), 500)
     })
   }
+  const admStatus = document.getElementById('admStatus')
+  if (admStatus) admStatus.addEventListener('change', render)
+  // Tab switching
+  document.querySelectorAll('.tab-link').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-link').forEach((b) => b.classList.remove('active'))
+      btn.classList.add('active')
+      document.querySelectorAll('.tab-pane').forEach((p) => p.classList.remove('active'))
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active')
+    })
+  })
+}
   const admStatus = document.getElementById('admStatus')
   if (admStatus) admStatus.addEventListener('change', render)
   wireToast(app)
@@ -687,9 +717,7 @@ export async function AdmissionsView(app, params = {}) {
             .then((r) => { wards = r; render() })
             .catch(() => {})
         }),
-    )
-  }
-
+)
   onCleanup(() => {
     teardownListeners()
     unsubAuth()
@@ -708,4 +736,5 @@ export async function AdmissionsView(app, params = {}) {
 
   await loadMore()
   subscribeLive()
+  ensureStaffDirectory(activeOrg)
 }

@@ -13,7 +13,6 @@ import { staffDisplayName } from '../lib/staffName.js'
 export const NAV = [
   { path: '/', label: 'Dashboard', icon: '▦', cap: null },
   { path: '/patients', label: 'Patients', icon: '◉', cap: ['patient.create', 'patient.demographics.update'] },
-  { path: '/appointments', label: 'Appointments', icon: '◷', cap: ['appointment.create', 'appointment.update'] },
   { path: '/consultations', label: 'Consultations', icon: '✚', cap: ['encounter.create', 'encounter.edit', 'encounter.status.advance'] },
   { path: '/admissions', label: 'Admissions', icon: '▤', cap: ['beds.manage'] },
   { path: '/laboratory', label: 'Laboratory', icon: '♳', cap: ['lab.order', 'lab.sample.collect', 'lab.result.enter', 'lab.result.verify', 'lab.catalogue.manage'] },

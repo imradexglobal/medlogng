@@ -29,15 +29,18 @@ export function fmtDate(ts) {
   return day + '/' + month + '/' + year
 }
 
-// Format a timestamp/millis to DD/MM/YYYY HH:MM (e.g. 20/10/2026 14:30).
+// Format a timestamp/millis to DD/MM/YYYY HH:MM:SSAM/PM (e.g. 20/10/2026 02:30:45PM).
 export function fmtDateTime(ts) {
   if (!ts) return '—'
   const d = new Date(typeof ts.toMillis === 'function' ? ts.toMillis() : ts)
   if (isNaN(d.getTime())) return '—'
   const day = String(d.getDate()).padStart(2, '0')
-  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const month = monthNames[d.getMonth()]
   const year = d.getFullYear()
-  const hh = String(d.getHours()).padStart(2, '0')
+  const hh = d.getHours % 12 || 12
   const mm = String(d.getMinutes()).padStart(2, '0')
-  return day + '/' + month + '/' + year + ' ' + hh + ':' + mm
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  const ampm = d.getHours >= 12 ? 'PM' : 'AM'
+  return day + ' ' + month + ', ' + year + ' ' + hh + ':' + mm + ':' + ss + ampm
 }
