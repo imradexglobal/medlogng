@@ -61,6 +61,18 @@ service cloud.firestore {
     ));
   }
 
+  // A bed claim is stale when the admission that owns it no longer occupies
+  // that ward/bed (discharged, transferred elsewhere, or deleted). Stale claims
+  // must not block a bed forever: the next admission may take the bed over.
+  // `exists()` is checked first because `get()` errors on a missing document.
+  function claimHolderReleased(claim) {
+    let holder = /databases/$(database)/documents/admissions/$(claim.admission_id);
+    return !exists(holder)
+      || get(holder).data.status != 'active'
+      || get(holder).data.ward_name != claim.ward_name
+      || get(holder).data.bed_number != claim.bed_number;
+  }
+
   // ---- Org metadata & memberships ----
 
   match /platform_admins/{id} {
@@ -496,23 +508,31 @@ match /wards/{id} {
 // Bed claims serialize concurrent assignment attempts. Keep them scoped to
 // the same beds.manage capability as admissions and pin the owning hospital.
 match /bed_claims/{id} {
-  allow read: if hasCap(resource.data.organization_id, 'beds.manage');
+  // Allow a get of a missing claim: checking whether a bed is free reads the
+  // claim document, and `resource` is null when nothing holds the bed.
+  allow read: if resource == null || hasCap(resource.data.organization_id, 'beds.manage');
   allow create: if hasCap(request.resource.data.organization_id, 'beds.manage')
     && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.organization_id == request.resource.data.organization_id
     && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.status == 'active'
     && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.ward_name == request.resource.data.ward_name
     && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.bed_number == request.resource.data.bed_number;
+  // Updating a claim is only allowed for the same admission, or to replace a
+  // stale claim left behind by a stay that no longer occupies this bed. A live
+  // claim (same bed, still active) can never be overwritten.
   allow update: if resource.data.organization_id == request.resource.data.organization_id
-    && resource.data.admission_id == request.resource.data.admission_id
     && hasCap(resource.data.organization_id, 'beds.manage')
     && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.status == 'active'
     && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.ward_name == request.resource.data.ward_name
-    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.bed_number == request.resource.data.bed_number;
+    && getAfter(/databases/$(database)/documents/admissions/$(request.resource.data.admission_id)).data.bed_number == request.resource.data.bed_number
+    && (resource.data.admission_id == request.resource.data.admission_id
+      || claimHolderReleased(resource.data));
   // Deleting a missing claim is a no-op, so it is safe to allow. Existing
   // claims can only be released atomically with their admission discharge or
   // move; the referenced stay must no longer occupy this bed after the batch.
+  // `exists()` guards getAfter() when the referenced admission was removed.
   allow delete: if resource == null || (hasCap(resource.data.organization_id, 'beds.manage')
-    && (getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.status != 'active'
+    && (!exists(/databases/$(database)/documents/admissions/$(resource.data.admission_id))
+      || getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.status != 'active'
       || getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.ward_name != resource.data.ward_name
       || getAfter(/databases/$(database)/documents/admissions/$(resource.data.admission_id)).data.bed_number != resource.data.bed_number));
 }

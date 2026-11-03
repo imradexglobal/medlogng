@@ -56,7 +56,6 @@ registerRoute('/patients', PatientsView, { auth: true })
 registerRoute('/patients/new', RegisterPatientView, { auth: true })
 registerRoute('/patients/:id', PatientDetailView, { auth: true })
 registerRoute('/patients/:id/edit', EditPatientView, { auth: true })
-registerRoute('/appointments', AppointmentsView, { auth: true })
 registerRoute('/consultations', ConsultationsView, { auth: true })
 // Full-page Start-encounter form (not a nav entry — reached from the queue,
 // patient list and patient chart, which pass the patient via ?pid=).

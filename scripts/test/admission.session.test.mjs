@@ -94,11 +94,13 @@ async function main() {
   // Transfer preserves the stay and records its origin/destination atomically.
   await transferAdmission(sid2, { ward_name: 'Female Ward A', bed_number: 'Bed 2', reason: 'Clinical review' })
   const moved = docData('admissions/' + sid2)
-  if (moved.ward_name !== 'Female Ward A' || moved.bed_number !== '2' || moved.transfer_history?.length !== 1) {
+  // normalizeBedId() stores the canonical `Bed N` label, so the claim keys keep
+  // that label too.
+  if (moved.ward_name !== 'Female Ward A' || moved.bed_number !== 'Bed 2' || moved.transfer_history?.length !== 1) {
     throw new Error('Transfer did not update location and history together')
   }
-  if (docData('bed_claims/ATL-YRM-ZLS_male ward b_1')) throw new Error('Old transfer claim was not released')
-  if (docData('bed_claims/ATL-YRM-ZLS_female ward a_2')?.admission_id !== sid2) throw new Error('New transfer claim was not acquired')
+  if (docData('bed_claims/ATL-YRM-ZLS_male ward b_Bed 1')) throw new Error('Old transfer claim was not released')
+  if (docData('bed_claims/ATL-YRM-ZLS_female ward a_Bed 2')?.admission_id !== sid2) throw new Error('New transfer claim was not acquired')
 
   // Verify session 2 is isolated
   const labs2 = await listSessionLabs(sid2)

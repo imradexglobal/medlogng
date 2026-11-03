@@ -221,7 +221,7 @@ export async function AdmitView(app, params = {}) {
           : 'Patient admitted to ' + v.ward_name + ' · ' + v.bed_number)
         window.location.hash = '#/admissions'
       } catch (e) {
-        errEl.textContent = e?.message || 'Admission failed.'
+        errEl.textContent = friendlyWriteError(e, 'Admission failed.')
         btn.disabled = false
       }
     }

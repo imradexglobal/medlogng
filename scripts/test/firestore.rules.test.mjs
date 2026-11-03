@@ -310,6 +310,94 @@ await test('audit read: plain member cannot read audit', async () => {
   await e.cleanup()
 })
 
+// ---- bed_claims (stale claim takeover) --------------------------------------
+
+async function bedClaimEnv(uid = 'nurse1') {
+  const e = await env({ uid })
+  await e.seed('organizations', 'org_1', { name: 'Org', status: 'active' })
+  await e.seed('organization_memberships', 'org_1_' + uid, {
+    user_id: uid, organization_id: 'org_1', status: 'active',
+    capabilities: ['beds.manage'],
+  })
+  return e
+}
+
+function admissionDoc(id, overrides = {}) {
+  return {
+    organization_id: 'org_1', patient_id: 'p_' + id, status: 'active',
+    ward_name: 'Ward A', bed_number: 'B1', ...overrides,
+  }
+}
+
+function claimDoc(admissionId, overrides = {}) {
+  return {
+    organization_id: 'org_1', admission_id: admissionId,
+    ward_name: 'Ward A', bed_number: 'B1', ...overrides,
+  }
+}
+
+await test('bed_claims read: missing claim is a free bed, not a permission error', async () => {
+  const e = await bedClaimEnv()
+  const db = e.firestore()
+
+  const snap = await db.collection('bed_claims').doc('org_1_ward-a_b1').get()
+  assert.equal(snap.exists, false)
+  await e.cleanup()
+})
+
+await test('bed_claims create: claiming a free bed for an active admission is allowed', async () => {
+  const e = await bedClaimEnv()
+  const db = e.firestore()
+
+  const batch = db.batch()
+  batch.set(db.collection('admissions').doc('adm_new'), admissionDoc('adm_new'))
+  batch.set(db.collection('bed_claims').doc('org_1_ward-a_b1'), claimDoc('adm_new'))
+  await batch.commit()
+
+  const snap = await db.collection('bed_claims').doc('org_1_ward-a_b1').get()
+  assert.equal(snap.data().admission_id, 'adm_new')
+  await e.cleanup()
+})
+
+await test('bed_claims update: stale claim from a discharged stay may be taken over', async () => {
+  const e = await bedClaimEnv()
+  const db = e.firestore()
+  // The previous stay still sits in Ward A / B1 but has been discharged, so
+  // its leftover claim must not lock the bed forever.
+  await e.seed('admissions', 'adm_old', admissionDoc('adm_old', { status: 'discharged' }))
+  await e.seed('bed_claims', 'org_1_ward-a_b1', claimDoc('adm_old'))
+
+  const batch = db.batch()
+  batch.set(db.collection('admissions').doc('adm_new'), admissionDoc('adm_new'))
+  batch.set(db.collection('bed_claims').doc('org_1_ward-a_b1'), claimDoc('adm_new'))
+  await batch.commit()
+
+  const snap = await db.collection('bed_claims').doc('org_1_ward-a_b1').get()
+  assert.equal(snap.data().admission_id, 'adm_new')
+  await e.cleanup()
+})
+
+await test('bed_claims update: live claim for the same bed cannot be overwritten', async () => {
+  const e = await bedClaimEnv()
+  const db = e.firestore()
+  await e.seed('admissions', 'adm_old', admissionDoc('adm_old'))
+  await e.seed('bed_claims', 'org_1_ward-a_b1', claimDoc('adm_old'))
+
+  const batch = db.batch()
+  batch.set(db.collection('admissions').doc('adm_new'), admissionDoc('adm_new'))
+  batch.set(db.collection('bed_claims').doc('org_1_ward-a_b1'), claimDoc('adm_new'))
+  await assert.rejects(batch.commit(), /permission-denied/)
+  await e.cleanup()
+})
+
+await test('bed_claims delete: orphan claim (holder removed) may be released', async () => {
+  const e = await bedClaimEnv()
+  await e.seed('bed_claims', 'org_1_ward-a_b1', claimDoc('adm_deleted'))
+
+  await e.firestore().collection('bed_claims').doc('org_1_ward-a_b1').delete()
+  await e.cleanup()
+})
+
 // ---- summary ----------------------------------------------------------------
 
 console.log('')

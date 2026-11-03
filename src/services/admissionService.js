@@ -276,6 +276,38 @@ export async function createAdmission(input) {
   // Rules reject a competing claim when offline writes reach Firestore.
   const bedClaimRef = doc(db, BED_CLAIMS, bedClaimKey(activeOrg, wardName, bedNumber))
   const admissionRef = doc(db, ADMISSIONS, admissionId)
+
+  // A claim left behind by a discharged/transferred/deleted stay is stale and
+  // may be replaced by the batch below (the rules check the old holder's
+  // current bed). But if the current holder is still active in this bed, stop
+  // with a clear message instead of letting the batch fail as "permission
+  // denied". A failed/denied probe is non-fatal: the batch stays authoritative.
+  try {
+    const claimSnap = await getDocTolerant(bedClaimRef)
+    if (claimSnap.exists()) {
+      const existingClaim = claimSnap.data() || {}
+      const holderId = String(existingClaim.admission_id || '')
+      if (holderId && holderId !== admissionId) {
+        const holder = await getAdmission(holderId).catch(() => null)
+        const stillHeld = holder && holder.status === ADMISSION_ACTIVE &&
+          normalizeWardId(holder.wardName) === normalizeWardId(wardName) &&
+          normalizeBedId(holder.bedNumber) === bedNumber
+        if (stillHeld) {
+          throw new Error('Bed ' + bedNumber + ' in ' + wardName +
+            ' was just taken by another admission. Please refresh and pick another bed.')
+        }
+      }
+    }
+  } catch (e) {
+    if (/was just taken/.test(String(e?.message || ''))) throw e
+    // Older rule sets deny reading a claim that does not exist yet; that is
+    // expected and must not block the admission. Only log unexpected failures.
+    if (e?.code !== 'permission-denied' &&
+        !/permission-denied|insufficient permissions/i.test(String(e?.message || ''))) {
+      console.warn('[admissions] bed claim check skipped:', e?.message || e)
+    }
+  }
+
   const batch = writeBatch(db)
   batch.set(admissionRef, admission)
   batch.set(bedClaimRef, {
@@ -286,7 +318,21 @@ export async function createAdmission(input) {
         patient_id: pid,
         created_at: now,
       })
-  const writeResult = await commitAdmissionBatch(batch)
+  let writeResult
+  try {
+    writeResult = await commitAdmissionBatch(batch)
+  } catch (e) {
+    // A batch that loses the race for a bed is reported by Firestore as a
+    // permission error (the claim update rule rejected it). Translate it so
+    // the admit form does not show the raw SDK message.
+    if (e?.code === 'permission-denied' ||
+        /missing or insufficient permissions|permission-denied/i.test(String(e?.message || ''))) {
+      throw new Error('Could not reserve bed ' + bedNumber + ' in ' + wardName +
+        '. It may have just been taken — refresh the admissions list and try again. ' +
+        'If the bed is still free, ask an administrator to check your "beds.manage" permission.')
+    }
+    throw e
+  }
 
   // Keep an independent durable handoff for the hospital LAN host. Firestore
   // owns its own local queue; this copy survives a closed browser and can be
