@@ -2,7 +2,16 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const host = require('./host');
-let autoUpdater = null;
+function compareVersions(a, b) {
+  const pa = String(a || '').split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || '').split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
 let updateAvailable = false;
 let updateProgress = 0;
 try {
@@ -323,17 +332,26 @@ app.whenReady().then(async () => {
       });
 
       autoUpdater.on('update-available', (info) => {
+        const latest = String(info?.version || '').trim();
+        const current = String(app.getVersion() || '').trim();
+        const cmp = compareVersions(latest, current);
+        if (cmp <= 0) {
+          updateAvailable = false;
+          updateProgress = 0;
+          sendToRenderer('auto-update-status', { checking: false, progress: 0, available: false, version: latest });
+          return;
+        }
         updateAvailable = true;
         updateProgress = 0;
         sendToRenderer('auto-update-status', {
           checking: false,
           progress: 0,
           available: true,
-          version: info?.version,
+          version: latest,
           releaseNotes: info?.releaseNotes,
         });
         if (isHost) {
-          host.updateTrayStatus('Downloading update v' + (info?.version || '') + '…');
+          host.updateTrayStatus('Downloading update v' + (latest || '') + '…');
         }
       });
 

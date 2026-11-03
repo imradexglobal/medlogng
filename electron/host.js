@@ -88,8 +88,10 @@ function saveHostConfig(cfg) {
 
 // Setup is complete when a config exists AND the key was imported.
 function needsSetup() {
+  if (process.env.MEDLOG_RESET_SETUP === '1') {
+    try { fs.rmSync(configPath(), { force: true }); } catch { /* ignore */ }
+  }
   if (!app.isPackaged && !fs.existsSync(keyFilePath())) {
-    try {
       const devKey = path.join(projectRoot(), 'hub', 'keys', 'service-account.json')
       if (fs.existsSync(devKey)) {
         importKeyFrom(devKey)
