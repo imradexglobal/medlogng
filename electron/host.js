@@ -92,6 +92,7 @@ function needsSetup() {
     try { fs.rmSync(configPath(), { force: true }); } catch { /* ignore */ }
   }
   if (!app.isPackaged && !fs.existsSync(keyFilePath())) {
+    try {
       const devKey = path.join(projectRoot(), 'hub', 'keys', 'service-account.json')
       if (fs.existsSync(devKey)) {
         importKeyFrom(devKey)
@@ -101,7 +102,6 @@ function needsSetup() {
   if (!loadHostConfig()) return true
   try { return !fs.existsSync(keyFilePath()) } catch { return true }
 }
-
 // The project root as it exists on real disk (hub + dist are asarUnpacked in
 // the host build; dev mode runs straight from the repo).
 function projectRoot() {

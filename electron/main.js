@@ -324,6 +324,8 @@ app.whenReady().then(async () => {
       // Automatically download updates
       autoUpdater.autoDownload = true;
       autoUpdater.autoInstallOnAppQuit = true;
+      autoUpdater.allowPrerelease = false;
+      autoUpdater.allowDowngrade = false;
 
       autoUpdater.on('checking-for-update', () => {
         updateAvailable = false;
@@ -412,11 +414,16 @@ app.whenReady().then(async () => {
       });
 
       autoUpdater.on('error', (err) => {
+        const msg = String(err && err.message || err || 'Update check failed');
+        let friendly = 'Update check failed.';
+        if (/releases\/latest/.test(msg) || /Unable to find latest version/.test(msg)) {
+          friendly = 'No updates are available right now.';
+        }
         sendToRenderer('auto-update-status', {
           checking: false,
           progress: updateProgress,
           available: updateAvailable,
-          error: (err && err.message) || String(err),
+          error: friendly,
         });
       });
 
