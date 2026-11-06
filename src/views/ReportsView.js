@@ -1074,14 +1074,13 @@ export async function ReportsView(app) {
       '<button class="btn ghost sm" id="rep-clear">Clear</button>' +
       '<button class="btn" id="rep-refresh">↻ Refresh</button>',
     body: '' +
-      '<div class="skeleton-card-div" style="padding:24px">' + skeletonCard(4) + '</div>' +
       '<div class="toolbar" style="margin-bottom:8px">' +
       '<p class="sub" id="rep-status">Loading…</p>' +
       '</div>' +
       '<div class="tabs" id="rep-tabs">' +
       TABS.map((t) => '<button class="' + (t.id === currentTab ? 'on' : '') + '" data-tab="' + t.id + '">' + esc(t.label) + '</button>').join('') +
       '</div>' +
-      '<div id="rep-body"></div>',
+      '<div id="rep-body"><div class="skeleton-card-div" style="padding:24px">' + skeletonCard(4) + '</div></div>',
   })
 
   async function reload() {

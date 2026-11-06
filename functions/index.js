@@ -183,5 +183,5 @@ const speechHealthHandler = createSpeechHealthHandler({
   secret: () => DEEPGRAM_API_KEY.value(), endpoint: () => process.env.DEEPGRAM_ENDPOINT || '',
   allowClinicalAudio: () => process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true',
 })
-export const transcribeConsultation = onRequest({ region: 'us-central1', timeoutSeconds: 240, memory: '1GiB', maxInstances: 5, concurrency: 2, secrets: [DEEPGRAM_API_KEY] }, speechHandler)
-export const speechHealth = onRequest({ region: 'us-central1', timeoutSeconds: 15, memory: '256MiB', maxInstances: 5, secrets: [DEEPGRAM_API_KEY] }, speechHealthHandler)
+export const transcribeConsultation = onRequest({ region: 'us-central1', timeoutSeconds: 240, memory: '1GiB', maxInstances: 5, concurrency: 2, secrets: [DEEPGRAM_API_KEY], cors: ['https://medlogng.web.app'] }, speechHandler)
+export const speechHealth = onRequest({ region: 'us-central1', timeoutSeconds: 15, memory: '256MiB', maxInstances: 5, secrets: [DEEPGRAM_API_KEY], cors: ['https://medlogng.web.app'] }, speechHealthHandler)
