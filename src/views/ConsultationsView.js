@@ -5,7 +5,7 @@ import {
   listOrgEncountersPage, subscribeOrgEncounters, updateEncounterStatus, addDiagnosis, addPrescriptions, setEncounterPrescription,
   myEncounterCaps, recordEncounterVitals, updateEncounterNote, addTreatmentPlan, ENCOUNTER_STATUS_FLOW_META, normalizeStatusKey, mapLegacyStatus,
 } from '../services/consultationService.js'
-import { listOrgPatientsPage, listPatientDocs, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
+import { listOrgPatientsAll, listPatientDocs, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
 import {
   listOrgAdmissions, listOrgAdmissionsPage, subscribeOrgAdmissions, myAdmissionCaps, indexAdmissionsByEncounter, activeAdmissionForEncounter,
 } from '../services/admissionService.js'
@@ -433,7 +433,10 @@ export async function ConsultationsView(app, params = {}) {
     try {
       const [pg, pats, adms] = await Promise.all([
         listOrgEncountersPage(activeOrg, { cursor }),
-        first ? listOrgPatientsPage(activeOrg, { pageSize: 100 }).then((r) => r.rows).catch(() => []) : Promise.resolve(patients),
+        // Full registry: the queue's search box joins through matchesPatient
+        // against this index, so a bounded page would hide every patient past
+        // it from a name/MRN/mobile search that '#/patients' would find.
+        first ? listOrgPatientsAll(activeOrg).catch(() => []) : Promise.resolve(patients),
         listOrgAdmissionsPage(activeOrg, { pageSize: 100 }).then((r) => r.rows).catch(() => []),
       ])
       // A row written between two chunk reads shifts the cursor stream and can

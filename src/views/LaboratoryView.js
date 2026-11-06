@@ -7,7 +7,7 @@ import { authStore } from '../store/authStore.js'
 import {
   listOrgLabsPage, subscribeOrgLabs, updateLabStatus, myLabCaps,
 } from '../services/laboratoryService.js'
-import { listOrgPatientsPage, matchesPatient } from '../services/patientService.js'
+import { listOrgPatientsAll, matchesPatient } from '../services/patientService.js'
 import { createInvoiceForLabOrder } from '../services/billingService.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
@@ -138,8 +138,9 @@ export async function LaboratoryView(app) {
 
   async function loadPatients() {
     try {
-      const r = await listOrgPatientsPage(activeOrg, { pageSize: 200 })
-      patients = r.rows
+      // Full registry: this index backs the free-text order filter (and its
+      // patient lock), which must reach the same patients '#/patients' does.
+      patients = await listOrgPatientsAll(activeOrg)
       patientIndex = new Map(patients.map((p) => [p.pid, p]))
       patientLoadError = null
     } catch (e) {
@@ -369,11 +370,16 @@ export async function LaboratoryView(app) {
         searchQuery = val
         const q = val.toLowerCase()
         patientFilter = 'All'
-        // If the value matches a patient MRN/name, lock the patient filter.
-        for (const p of patients) {
-          if ((p.name || '').toLowerCase().includes(q) || (p.mrn || '').toLowerCase().includes(q)) {
-            patientFilter = p.pid
-            break
+        // If the value resolves to a patient, lock the filter to them — the
+        // registry's matcher, so mobile numbers and either-order names lock
+        // exactly as they do on #/patients. An empty box must NOT lock to the
+        // first row (matchesPatient treats '' as "match everything").
+        if (q) {
+          for (const p of patients) {
+            if (matchesPatient(p, q)) {
+              patientFilter = p.pid
+              break
+            }
           }
         }
         render()

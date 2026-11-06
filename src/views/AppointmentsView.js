@@ -4,7 +4,8 @@ import { authStore } from '../store/authStore.js'
 import {
   listOrgAppointments, listOrgAppointmentsPage, subscribeOrgAppointments, createAppointment, updateAppointmentStatus, myAppointmentCaps,
 } from '../services/appointmentService.js'
-import { listOrgPatientsPage, formatPhone } from '../services/patientService.js'
+import { listOrgPatientsAll, formatPhone, matchesPatient } from '../services/patientService.js'
+import { patientSelectMatcher } from '../components/patientSelect.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { friendlyWriteError } from '../utils/errors.js'
@@ -93,7 +94,9 @@ body:
     try {
       const [pg, pats] = await Promise.all([
         listOrgAppointmentsPage(activeOrg, { cursor }),
-        first ? listOrgPatientsPage(activeOrg, { pageSize: 50 }).then((r) => r.rows).catch(() => []) : Promise.resolve(patients),
+        // Full registry: it feeds both the row join and the book-appointment
+        // picker's search — a bounded page hides patients past it.
+        first ? listOrgPatientsAll(activeOrg).catch(() => []) : Promise.resolve(patients),
       ])
       const seen = new Set(appointments.map((a) => a.id))
       appointments = first ? pg.rows : [...appointments, ...pg.rows.filter((a) => !seen.has(a.id))]
@@ -129,11 +132,21 @@ body:
       if (selectedDate && String(a.time || '').slice(0, 10) !== selectedDate) return false
       if (chip !== 'All' && a.clinic !== chip) return false
       if (search) {
-        const q = search.toLowerCase()
-        return (
-          String(a.patientName || '').toLowerCase().includes(q) ||
-          String(a.patientId || '').toLowerCase().includes(q)
-        )
+        // Same matcher as the Patients registry: name (either order), MRN,
+        // patient ID and mobile — not a two-field substring. The patient row
+        // carries the MRN/phone the appointment snapshot does not.
+        const p = patients.find((x) => x.pid === a.patientId)
+        return matchesPatient({
+          name: a.patientName || p?.name || '',
+          pid: a.patientId || '',
+          mrn: p?.mrn || '',
+          surname: p?.surname || '',
+          given_names: p?.given_names || '',
+          phone: p?.phone || '',
+          phone_key: p?.phone_key || '',
+          sex: p?.sex || '',
+          dob: p?.dob || '',
+        }, search)
       }
       return true
     })
@@ -218,8 +231,8 @@ body:
   function openBookForm() {
     if (!patients.length) {
       toast('Loading patients…')
-      listOrgPatientsPage(activeOrg, { pageSize: 50 }).then((r) => {
-        patients = r.rows
+      listOrgPatientsAll(activeOrg).then((rows) => {
+        patients = rows
         openBookForm()
       }).catch(() => {
         toast('Could not load patients.')
@@ -234,7 +247,7 @@ body:
       title: 'Book appointment',
       submitLabel: 'Book slot',
       fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, searchable: true, required: true, searchPlaceholder: 'Type patient name, MRN or mobile…' },
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, searchable: true, required: true, searchPlaceholder: 'Type patient name, MRN or mobile…', match: patientSelectMatcher(patients) },
         { name: 'clinic', label: 'Clinic', type: 'select', options: CLINICS, required: true },
         { name: 'doctor', label: 'Doctor', type: 'select', options: DOCTORS },
         { name: 'time', label: 'Date/Time', type: 'datetime-local', required: true, min: nowMin() },

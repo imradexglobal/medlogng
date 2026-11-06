@@ -12,7 +12,8 @@ import {
 import {
   createEncounter, findOpenEncounterForPatient,
 } from '../services/consultationService.js'
-import { listOrgPatientsPage, formatPhone } from '../services/patientService.js'
+import { listOrgPatientsAll, formatPhone } from '../services/patientService.js'
+import { wirePatientSelect } from '../components/patientSelect.js'
 import { getClinicalStaff } from '../services/authService.js'
 import { can } from '../features/admin/roles.js'
 import { myActiveMembership } from '../services/authService.js'
@@ -70,7 +71,9 @@ export async function AdmitView(app, params = {}) {
     try {
       const [w, pats, staff, a] = await Promise.all([
         listOrgWards(activeOrg).catch(() => []),
-        listOrgPatientsPage(activeOrg, { pageSize: 200 }).then((r) => r.rows).catch(() => []),
+        // Full registry — the admit picker must reach every patient, not just
+        // the first bounded page (see StartEncounterView).
+        listOrgPatientsAll(activeOrg).catch(() => []),
         getClinicalStaff(activeOrg).catch(() => []),
         listOrgAdmissions(activeOrg).catch(() => []),
       ])
@@ -203,7 +206,7 @@ export async function AdmitView(app, params = {}) {
       '</div>'
 
     const patientSelect = document.getElementById('fld-patient_id')
-    if (patientSelect && !fixedPatient) wireSearchableSelect(null, patientSelect)
+    if (patientSelect && !fixedPatient) wirePatientSelect(null, patientSelect, patients)
     if (wards.length) wireSearchableSelect(null, document.getElementById('fld-ward_name'))
     if (clinicalStaff.length) wireSearchableSelect(null, document.getElementById('fld-attending_provider'))
 

@@ -24,8 +24,9 @@ import {
   createEncounter, ENCOUNTER_TYPES, findOpenEncounterForPatient, myEncounterCaps,
 } from '../services/consultationService.js'
 import {
-  listOrgPatientsPage, formatPhone, listPatientDocs, getPatient,
+  listOrgPatientsAll, formatPhone, listPatientDocs, getPatient,
 } from '../services/patientService.js'
+import { wirePatientSelect } from '../components/patientSelect.js'
 import { getClinicalStaff } from '../services/authService.js'
 import { createAllergyTagInput } from '../components/AllergyTagInput.js'
 import { friendlyWriteError } from '../utils/errors.js'
@@ -111,7 +112,10 @@ export async function StartEncounterView(app, params = {}) {
 
   async function load() {
     const [pats, clinicalStaff, fixedPatient] = await Promise.all([
-      pid ? Promise.resolve([]) : listOrgPatientsPage(activeOrg, { pageSize: 200 }).then((r) => r.rows).catch(() => []),
+      // Complete registry, not one bounded page: the picker must find ANY
+      // registered patient — a capped read silently hides everyone past that
+      // chunk, which is how "the name is in Patients but not here" happened.
+      pid ? Promise.resolve([]) : listOrgPatientsAll(activeOrg).catch(() => []),
       getClinicalStaff(activeOrg).catch(() => []),
       loadPatientSummary(),
     ])
@@ -200,7 +204,9 @@ export async function StartEncounterView(app, params = {}) {
       '</div>' +
       '<div id="encErr" class="err" style="margin-top:10px"></div>'
 
-    if (!fixedPatient) wireSearchableSelect(null, document.getElementById('encPatient'))
+    // Same matcher as the Patients registry: name (either order), MRN, ID,
+    // mobile — not a label substring.
+    if (!fixedPatient) wirePatientSelect(null, document.getElementById('encPatient'), patients)
     if (staff.length) wireSearchableSelect(null, document.getElementById('encClinician'))
 
     // Searchable pill input for the reason — the same component the modal

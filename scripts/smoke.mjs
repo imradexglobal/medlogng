@@ -597,17 +597,59 @@ for (const view of ['AppointmentsView', 'BillingView', 'AdmissionsView']) {
   const opts = src.match(/const patientOpts =[\s\S]*?\n    \}/)
   assert.ok(opts, view + ' builds a patient option list')
   assert.ok(/formatPhone/.test(opts[0]), view + ' patient options carry the mobile number')
-  // Filterable by typing: either the shell's `searchable` select, a bespoke
-  // type-ahead (BillingView) that joins through matchesPatient, or the shell's
-  // wireSearchableSelect filter-box + select pair.
-  const filterable = /searchable:/.test(src) ||
-    (/matchesPatient\(/.test(src) && /invPatientSearch|patient-dropdown/.test(src)) ||
-    /wireSearchableSelect\(/.test(src)
-  assert.ok(filterable, view + ' patient picker is filterable')
+  // Filterable by typing, through the SAME matcher the registry uses.
+  const filterable = /wirePatientSelect\(|patientSelectMatcher\(/.test(src)
+  assert.ok(filterable, view + ' patient picker filters through patientSelectMatcher (the registry matcher)')
 }
 {
   const labSrc = fs.readFileSync(new URL('../src/views/LaboratoryView.js', import.meta.url), 'utf8')
   assert.ok(/matchesPatient/.test(labSrc), 'LaboratoryView search joins through matchesPatient (mobile reachable)')
+}
+
+// ---- one patient search everywhere ------------------------------------------
+// Regression guard for "the name is in Patients but the picker finds nothing":
+// a patient picker used to filter <option> labels with a plain substring, and
+// it was fed a single bounded page of the registry — so the same query that
+// found the record on #/patients found nothing there. Every picker must now
+// (a) filter through patientSelectMatcher → matchesPatient and (b) be built
+// from the COMPLETE registry, never one capped page.
+for (const view of ['StartEncounterView', 'AdmitView', 'LabNewOrderView', 'BillingView', 'AppointmentsView', 'AdmissionsView']) {
+  const url = ['.js', '.jsx']
+    .map((ext) => new URL('../src/views/' + view + ext, import.meta.url))
+    .find((u) => fs.existsSync(u))
+  assert.ok(url, view + ' view source exists (.js or .jsx)')
+  const src = fs.readFileSync(url, 'utf8')
+  assert.ok(
+    /wirePatientSelect\(|patientSelectMatcher\(/.test(src),
+    view + ' patient picker goes through the shared patient matcher',
+  )
+  assert.ok(/listOrgPatientsAll\(/.test(src), view + ' loads the complete patient list')
+  assert.ok(!/listOrgPatientsPage\(/.test(src), view + ' must not cap its patient list at one page')
+}
+
+// The free-text patient SEARCH boxes (queue filters) join through the same
+// matcher, over the same complete list — so '#/patients', the consultations
+// queue, admissions, laboratory and appointments agree on what a typed query
+// finds. (PatientsView itself paginates the registry table and searches the
+// full list through searchPatientsGlobally → listOrgPatients.)
+for (const view of ['ConsultationsView', 'LaboratoryView', 'AdmissionsView', 'AppointmentsView', 'PatientsView']) {
+  const src = fs.readFileSync(new URL('../src/views/' + view + '.js', import.meta.url), 'utf8')
+  assert.ok(/matchesPatient\(/.test(src), view + ' joins its patient search through matchesPatient')
+}
+for (const view of ['ConsultationsView', 'LaboratoryView', 'AdmissionsView', 'AppointmentsView']) {
+  const src = fs.readFileSync(new URL('../src/views/' + view + '.js', import.meta.url), 'utf8')
+  assert.ok(/listOrgPatientsAll\(/.test(src), view + ' searches the complete patient list')
+  assert.ok(!/listOrgPatientsPage\(/.test(src), view + ' must not search a capped patient page')
+}
+
+// The shared matcher itself: one module, imported by the pickers, that never
+// re-implements the rule locally.
+{
+  const picker = fs.readFileSync(new URL('../src/components/patientSelect.js', import.meta.url), 'utf8')
+  assert.ok(/from '\.\.\/features\/patients\/search\.js'/.test(picker), 'the picker matcher imports the canonical search module')
+  assert.ok(/matchesPatient/.test(picker), 'the picker matcher delegates to matchesPatient')
+  const shell = fs.readFileSync(new URL('../src/components/shell.js', import.meta.url), 'utf8')
+  assert.ok(/opts\.match/.test(shell), 'wireSearchableSelect accepts a caller-supplied matcher')
 }
 
 // Encounters are started through ONE full-page form (#/encounters/new,

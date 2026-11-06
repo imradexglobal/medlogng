@@ -413,7 +413,15 @@ export function demoFormModal(title, fieldsHtml, saveLabel = 'Save (UI preview)'
 // Used by formModal's `searchable` selects and exported so full-page pickers
 // (lab new order, billing new invoice) can offer the exact same patient-search
 // UX without a floating dropdown that can cover the input field.
-export function wireSearchableSelect(box, sel) {
+//
+// `opts.match(option, rawQuery)` — optional override for the filter itself.
+// Every PATIENT picker passes one (see components/patientSelect.js) so the
+// matcher that decides what '#/patients' finds also decides what the picker
+// finds: matchesPatient understands surnames in either order, MRNs, patient
+// IDs and bare mobile digits, none of which a plain label substring does.
+// Selects that are not patients (clinician, ward, drug) keep the default
+// label/digit filter below.
+export function wireSearchableSelect(box, sel, opts = {}) {
   if (!sel) return
   // Older callers pass a separate filter box. Remove it and promote the select
   // itself into one visible text input while preserving its named ID value.
@@ -445,12 +453,15 @@ export function wireSearchableSelect(box, sel) {
   let active = -1
   let selectedLabel = ''
   const labelOf = (o) => String(o.getAttribute('data-label') || o.textContent || '').trim()
-  const matchesQuery = (option, query) => {
-    if (!query) return true
-    const label = labelOf(option)
-    const digits = query.replace(/\D/g, '')
-    return label.toLowerCase().includes(query) || (digits.length > 0 && label.replace(/\D/g, '').includes(digits))
-  }
+  const matchesQuery = typeof opts.match === 'function'
+    ? (option, query) => opts.match(option, query)
+    : (option, query) => {
+      if (!query) return true
+      const label = labelOf(option)
+      const q = query.toLowerCase()
+      const digits = query.replace(/\D/g, '')
+      return label.toLowerCase().includes(q) || (digits.length > 0 && label.replace(/\D/g, '').includes(digits))
+    }
   const sync = () => {
     const option = sel.selectedOptions[0]
     selectedLabel = option && option.value ? labelOf(option) : ''
@@ -467,8 +478,9 @@ export function wireSearchableSelect(box, sel) {
     sel.dispatchEvent(new Event('change', { bubbles: true }))
   }
   const render = () => {
-    const query = input.value.trim().toLowerCase()
-    const matches = options.filter((o) => matchesQuery(o, query))
+    const raw = input.value.trim()
+    const query = raw.toLowerCase()
+    const matches = options.filter((o) => matchesQuery(o, raw))
     list.replaceChildren()
     if (!matches.length) {
       const empty = document.createElement('div')
@@ -505,7 +517,7 @@ export function wireSearchableSelect(box, sel) {
       event.preventDefault(); if (!rows.length) return
       active = (active + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
       rows.forEach((row, i) => row.setAttribute('aria-selected', String(i === active))); rows[active]?.scrollIntoView({ block: 'nearest' })
-    } else if (event.key === 'Enter' && !list.hidden) { event.preventDefault(); if (active >= 0) choose(options.filter((o) => matchesQuery(o, input.value.trim().toLowerCase()))[active]) }
+    } else if (event.key === 'Enter' && !list.hidden) { event.preventDefault(); if (active >= 0) choose(options.filter((o) => matchesQuery(o, input.value.trim()))[active]) }
     else if (event.key === 'Escape') close()
   }
   document.addEventListener('mousedown', (event) => { if (!wrapper.contains(event.target)) close() })
@@ -519,6 +531,10 @@ export function wireSearchableSelect(box, sel) {
 //   preview: function(values) => string   — read-only field, auto-computed
 //            from other field values on every input event.
 //   options / searchable / list / listOptions — as before.
+//   match: function(option, query) => boolean — the filter a `searchable`
+//            select applies as the user types. Patient fields pass
+//            patientSelectMatcher(rows) (components/patientSelect.js) so the
+//            registry's matchesPatient decides, exactly as #/patients does.
 //   tags: searchable multi-select pill input (the patient-allergy UX).
 //            `options` seeds the suggestion list, `value` the initial pills,
 //            and the collected value is the tags joined with ', '. Free text
@@ -659,7 +675,10 @@ export function formModal({ title, fields = [], body = '', submitLabel = 'Save',
     el.onchange = refreshPreviews
   })
 
-  document.querySelectorAll('#fmFields [data-autocomplete="true"]').forEach((sel) => wireSearchableSelect(null, sel))
+  document.querySelectorAll('#fmFields [data-autocomplete="true"]').forEach((sel) => {
+    const f = fields.find((x) => x.name === sel.getAttribute('name')) || {}
+    wireSearchableSelect(null, sel, typeof f.match === 'function' ? { match: f.match } : {})
+  })
 
   const errEl = document.getElementById('fmError')
   const btn = document.getElementById('fmSave')

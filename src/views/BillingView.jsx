@@ -1,6 +1,7 @@
 // Billing with Firestore persistence (offline-first, cached).
 // CRITICAL: charge/discount math lives in billingService and is preserved.
-import { shell, statusBadge, toast, closeModal, openModal, wireToast, wireSearchableSelect } from '../components/shell.js'
+import { shell, statusBadge, toast, closeModal, openModal, wireToast } from '../components/shell.js'
+import { wirePatientSelect } from '../components/patientSelect.js'
 import { openPaymentModal } from '../components/PaymentModal.js'
 import { authStore } from '../store/authStore.js'
 import {
@@ -686,7 +687,9 @@ export default async function BillingView(app, params = {}) {
       }
     }
 
-    wireSearchableSelect(document.getElementById('invPatientFilter'), document.getElementById('invPatientSel'))
+    // Same matcher as the Patients registry (name, MRN, ID, mobile) over the
+    // full list the options were built from.
+    wirePatientSelect(document.getElementById('invPatientFilter'), document.getElementById('invPatientSel'), baseList)
 
     document.getElementById('invSave').onclick = async () => {
       const payer = document.getElementById('invPayer').value || DEFAULT_PAYER

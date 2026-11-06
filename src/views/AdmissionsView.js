@@ -17,7 +17,8 @@ import {
 } from '../services/admissionService.js'
 import { getEncounter } from '../services/consultationService.js'
 import { getClinicalStaff } from '../services/authService.js'
-import { listOrgPatientsPage, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
+import { listOrgPatientsAll, formatPhone, matchesPatient, createPatientIndexFiller } from '../services/patientService.js'
+import { patientSelectMatcher } from '../components/patientSelect.js'
 import { onCleanup } from '../lib/lifecycle.js'
 import { createLoadMore } from '../components/loadMore.js'
 import { friendlyWriteError } from '../utils/errors.js'
@@ -152,7 +153,9 @@ export async function AdmissionsView(app, params = {}) {
     const run = (async () => {
       const [pg, pats, w, staff] = await Promise.all([
         listOrgAdmissionsPage(activeOrg, { cursor }),
-        first ? listOrgPatientsPage(activeOrg, { pageSize: 100 }).then((r) => r.rows).catch(() => []) : Promise.resolve(patients),
+        // Full registry: it feeds the admit picker's search AND this queue's
+        // name/MRN/mobile filter — a bounded page hides patients past it.
+        first ? listOrgPatientsAll(activeOrg).catch(() => []) : Promise.resolve(patients),
         first ? listOrgWards(activeOrg).catch(() => []) : Promise.resolve([]),
         first ? getClinicalStaff(activeOrg).catch(() => []) : Promise.resolve([]),
       ])
@@ -504,7 +507,7 @@ export async function AdmissionsView(app, params = {}) {
       title: enc ? 'Admit patient (from encounter)' : 'Admit patient',
       submitLabel: 'Confirm admission',
       fields: [
-        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, value: fixedPatient ? fixedPatient.pid : '', searchable: !fixedPatient && patientOpts.length > 1, searchPlaceholder: 'Name, ID or mobile…' },
+        { name: 'patient_id', label: 'Patient', type: 'select', options: patientOpts, required: true, full: true, value: fixedPatient ? fixedPatient.pid : '', searchable: !fixedPatient && patientOpts.length > 1, searchPlaceholder: 'Name, ID or mobile…', match: patientSelectMatcher(patients) },
         wardField,
         { name: 'bed_number', label: 'Bed', required: true, placeholder: preselectWard && preselectWard.totalBeds ? 'e.g. Bed 1–' + preselectWard.totalBeds : 'e.g. Bed 1', hint: true },
         { name: 'admission_type', label: 'Admission type', type: 'select', options: ADMISSION_TYPES },

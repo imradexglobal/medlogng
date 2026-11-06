@@ -3,7 +3,8 @@
 // configuration snapshots taken at order time; free-text tests remain allowed
 // for anything not in the catalogue. Arrives with context via query params:
 //   #/laboratory/new?patient=<pid>&encounter=<eid>&session=<sid>
-import { shell, toast, wireToast, wireSearchableSelect } from '../components/shell.js'
+import { shell, toast, wireToast } from '../components/shell.js'
+import { wirePatientSelect } from '../components/patientSelect.js'
 import { authStore } from '../store/authStore.js'
 import { createLabOrder, myLabCaps } from '../services/laboratoryService.js'
 import { subscribeOrgTests, seedStarterCatalogue, myLabAdminCaps } from '../services/labCatalogueService.js'
@@ -256,7 +257,8 @@ export async function LabNewOrderView(app, params = {}) {
   function wire(root) {
     const sel = root.querySelector('#patientSel')
     if (sel) {
-      wireSearchableSelect(root.querySelector('#patientFilter'), sel)
+      // Same matcher as the Patients registry (name, MRN, ID, mobile).
+      wirePatientSelect(root.querySelector('#patientFilter'), sel, state.patients)
       function applyPatient() {
         const found = state.patients.find((p) => p.pid === sel.value) || null
         if (found) { state.patient = found; render() }
