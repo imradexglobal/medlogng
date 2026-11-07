@@ -32,9 +32,7 @@ import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteEncounter } from '../services/deleteService.js'
 import { planHtmlForEditor, serializePlanHtml } from '../features/encounters/planRichText.js'
-import { attachSpeechInput } from '../components/speechInput.js'
-import { generateClinicalDraft, auditClinicalDraftDecision } from '../features/clinicalDocumentation/generate.js'
-import { approvedClinicalText, createClinicalDraftReview, decideClinicalDraft } from '../features/clinicalDocumentation/drafts.js'
+import { openLabReport } from '../components/labReportPreview.js'
 
 // Encounter statuses are stored lowercase, so the shared statusBadge() (whose
 // keys are capitalised) rendered them as bare uncoloured pills. The label +
@@ -163,10 +161,6 @@ export async function ConsultationsView(app, params = {}) {
   const { activeOrg } = authStore.getState()
   const caps = myEncounterCaps()
   const billingCaps = myBillingCaps()
-  const firebaseHosted = ['medlogng.web.app', 'medlogng.firebaseapp.com'].includes(window.location.hostname.toLowerCase())
-  const clinicalAiProviderLabel = firebaseHosted
-    ? 'Firebase clinical AI provider not configured'
-    : 'Host clinical AI model · clinician review required'
   // Returned to from Billing ("← Back to encounter") or deep-linked.
   const wantEnc = String(params.enc || '')
 
@@ -193,9 +187,6 @@ export async function ConsultationsView(app, params = {}) {
   let hasMore = false
   let loading = false
   let selectedEncounter = null
-  let clinicalDraftReview = null
-  const clinicalDraftDecisions = new Map()
-  const speechCleanups = []
   // Encounter vitals are also mirrored to the patient's vitals collection.
   // Cache those encounter-linked rows so selecting a patient (or a live queue
   // repaint) doesn't issue repeated reads or leave the header blank for staff
@@ -278,11 +269,6 @@ export async function ConsultationsView(app, params = {}) {
       '<section class="enc-overview-section"><div class="enc-overview-heading"><h4>Encounter diagnoses</h4></div><div id="encDx"></div></section>' +
       '</div>' +
       '<div data-wp="note" hidden>' +
-      (caps.canEdit ? '<section class="card" id="clinicalAiPanel" style="margin:0 0 12px;padding:12px"><div class="card-head"><h3>AI documentation draft</h3><span class="mut">' + esc(clinicalAiProviderLabel) + '</span></div>' +
-        '<p class="mut">Paste or use a reviewed transcript. The AI only proposes a draft; it does not save or make clinical decisions. A matching quote verifies the citation, not the claim: verify every item, especially diagnosis, medication, doses, numbers and negation.</p>' +
-        '<textarea class="input" id="clinicalAiTranscript" rows="4" aria-label="Consultation transcript" placeholder="Paste a synthetic or reviewed consultation transcript…"></textarea>' +
-        '<div class="toolbar" style="margin:8px 0"><button type="button" class="btn sm" id="generateClinicalDraftB">Generate draft</button><span class="mut" id="clinicalAiStatus" role="status"></span></div>' +
-        '<div id="clinicalAiReview" aria-live="polite"></div></section>' : '') +
       '<div class="soap-note-grid" aria-label="SOAP clinical note">' + SOAP_FIELDS.map(({ key, title, help }) =>
         '<label class="soap-note-field"><span class="soap-note-heading"><span class="soap-note-letter" tabindex="0" title="' + esc(help) + '" aria-label="' + esc(title + ': ' + help) + '">' + key + ':</span></span>' +
         '<textarea class="input" id="enc-soap-' + key + '" rows="1" aria-label="' + esc(title) + '" placeholder="' + esc(title + '…') + '"></textarea></label>'
@@ -297,7 +283,6 @@ export async function ConsultationsView(app, params = {}) {
           '<button type="button" class="enc-plan-tool" data-plan-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>' +
           '<button type="button" class="enc-plan-tool" data-plan-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>' +
           '<button type="button" class="enc-plan-tool enc-plan-color-toggle" id="planColorToggle" title="Text color" aria-label="Text color"><strong>A</strong><span class="enc-plan-color-swatch" id="planColorSwatch"></span></button>' +
-          '<span id="planSpeechSlot" class="enc-plan-speech-slot" aria-label="Dictate treatment plan"></span>' +
           '<span class="enc-plan-toolbar-spacer"></span>' +
           '<span class="mut enc-plan-state" id="planState"></span>' +
           '<button type="button" class="enc-plan-tool enc-plan-expand" id="planExpandB" title="Expand editor" aria-label="Expand editor">⛶</button>' +
@@ -892,14 +877,18 @@ wireKebabs(tbl, async (rowId, action) => {
       return
     }
     el.innerHTML =
-      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th></tr></thead><tbody>' +
+      '<div class="tblwrap"><table class="tbl"><thead><tr><th>Order</th><th>Tests</th><th>Priority</th><th>Ordered</th><th>Actions</th></tr></thead><tbody>' +
       orders.map((o) =>
         '<tr><td><a href="#/laboratory/orders/' + esc(txt(o.lab_order_id || o.id)) + '"><strong>' + esc(txt(o.lab_order_id || o.id)) + '</strong></a></td>' +
         '<td>' + esc(txt(o.test_panel || (Array.isArray(o.tests) ? o.tests.join(', ') : ''))) + '</td>' +
         '<td>' + esc(txt(o.priority, 'Routine')) + '</td>' +
-        '<td class="mut">' + esc(fmtDateTime(o.ordered_at)) + '</td></tr>').join('') +
+        '<td class="mut">' + esc(fmtDateTime(o.ordered_at)) + '</td>' +
+        '<td><button class="btn ghost sm" type="button" data-enc-lab-report="' + esc(txt(o.lab_order_id || o.id)) + '">View report</button></td></tr>').join('') +
       '</tbody></table></div>' +
       '<p class="sub" style="margin-top:8px">Snapshot copied onto this encounter when the order was placed — the live result trail stays in Laboratory.</p>'
+    el.querySelectorAll('[data-enc-lab-report]').forEach((button) => {
+      button.onclick = () => openLabReport(button.getAttribute('data-enc-lab-report'))
+    })
   }
 
   // ---- prescriptions for this encounter ------------------------------------
@@ -1532,92 +1521,6 @@ wireKebabs(tbl, async (rowId, action) => {
       reload()
     } catch (e) { toast(friendlyWriteError(e, 'Save failed')) }
   }
-  const aiTranscript = document.getElementById('clinicalAiTranscript')
-  const aiStatus = document.getElementById('clinicalAiStatus')
-  const aiReview = document.getElementById('clinicalAiReview')
-  const aiGenerate = document.getElementById('generateClinicalDraftB')
-  function paintClinicalDraft() {
-    if (!aiReview || !clinicalDraftReview) return
-    const fields = clinicalDraftReview.draft.fields
-    aiReview.innerHTML = SOAP_FIELDS.map(({ key, title }) => {
-      const items = fields[key].map((item, index) => {
-        const decision = clinicalDraftDecisions.get(key + ':' + index) || 'pending'
-        return '<article class="card" style="margin:8px 0;padding:10px"><label class="mut">' + esc(title) + ' suggestion · ' + esc(item.provenance) + ' · ' + esc(item.certainty) +
-          '</label><textarea class="input" rows="2" data-ai-edit="' + key + ':' + index + '" aria-label="Edit ' + esc(title) + ' suggestion">' + esc(item.text) + '</textarea>' +
-          '<div class="mut">Verify this claim against: ' + item.evidence.map((span) => '“' + esc(span.quote) + '”').join(' · ') + '</div>' +
-          (item.certainty === 'uncertain' ? '<div class="pill warn">Uncertain — clinician clarification needed</div>' : '') +
-          '<div class="toolbar"><button type="button" class="btn ghost sm" data-ai-decision="accept" data-ai-item="' + key + ':' + index + '" ' + (decision === 'accepted' ? 'disabled' : '') + '>Accept</button>' +
-          '<button type="button" class="btn ghost sm" data-ai-decision="reject" data-ai-item="' + key + ':' + index + '" ' + (decision === 'rejected' ? 'disabled' : '') + '>Reject</button><span class="mut">' + esc(decision) + '</span></div></article>'
-      }).join('')
-      return '<section><h4>' + esc(title) + '</h4>' + (items || '<p class="mut">No supported suggestion.</p>') + '</section>'
-    }).join('') +
-      (clinicalDraftReview.draft.unresolved.length ? '<section><h4>Missing or unclear information</h4><ul>' + clinicalDraftReview.draft.unresolved.map((item) => '<li>' + esc(item) + '</li>').join('') + '</ul></section>' : '') +
-      (clinicalDraftReview.draft.conflicts.length ? '<section><h4>Conflicting statements</h4><ul>' + clinicalDraftReview.draft.conflicts.map((item) => '<li>' + esc(item.description) + ' — ' + item.evidence.map((span) => '“' + esc(span.quote) + '”').join(' / ') + '</li>').join('') + '</ul></section>' : '') +
-      '<button type="button" class="btn sm" data-ai-insert>Insert accepted content into note and Plan</button>'
-  }
-  if (aiGenerate) aiGenerate.onclick = async () => {
-    const transcript = String(aiTranscript?.value || '').trim()
-    if (!selectedEncounter?.id || !selectedEncounter.patientId) { if (aiStatus) aiStatus.textContent = 'Open a patient-linked consultation first.'; return }
-    if (!caps.canEdit) { if (aiStatus) aiStatus.textContent = 'Current encounter.edit permission is required.'; return }
-    if (!transcript) { if (aiStatus) aiStatus.textContent = 'Enter or use a reviewed transcript first.'; return }
-    aiGenerate.disabled = true
-    if (aiStatus) aiStatus.textContent = 'Generating a clinical draft…'
-    try {
-      const generated = await generateClinicalDraft({ transcript, organizationId: authStore.getState().activeOrg, patientId: selectedEncounter.patientId, encounterId: selectedEncounter.id })
-      const draft = generated.draft
-      const user = authStore.getState().user
-      if (!user?.uid) throw new Error('Clinician identity is unavailable.')
-      clinicalDraftReview = createClinicalDraftReview({ draft, transcript, uid: user.uid, organizationId: authStore.getState().activeOrg, patientId: selectedEncounter.patientId, encounterId: selectedEncounter.id })
-      clinicalDraftDecisions.clear()
-      paintClinicalDraft()
-      const meta = generated.metadata
-      if (aiStatus) aiStatus.textContent = 'Draft ready' + (meta?.model ? ' · ' + meta.model + (meta.totalDurationMs ? ' · ' + (meta.totalDurationMs / 1000).toFixed(1) + 's' : '') : '') + '. Verify every suggestion and its transcript evidence.'
-    } catch (error) { if (aiStatus) aiStatus.textContent = error?.message || 'Draft generation failed.' }
-    finally { aiGenerate.disabled = false }
-  }
-  if (aiReview) {
-    aiReview.addEventListener('input', (event) => {
-      const key = event.target?.dataset?.aiEdit
-      if (!key || !clinicalDraftReview) return
-      const [field, index] = key.split(':')
-      const item = clinicalDraftReview.draft.fields[field]?.[Number(index)]
-      if (item) item.text = event.target.value
-    })
-    aiReview.addEventListener('click', async (event) => {
-      const button = event.target.closest('button[data-ai-decision],button[data-ai-insert]')
-      if (!button || !clinicalDraftReview) return
-      const decision = button.dataset.aiDecision
-      if (decision) {
-        clinicalDraftDecisions.set(button.dataset.aiItem, decision === 'accept' ? 'accepted' : 'rejected')
-        paintClinicalDraft()
-        return
-      }
-      try {
-        const user = authStore.getState().user
-        const action = [...clinicalDraftDecisions.values()].some((value) => value === 'accepted') ? 'approved' : 'rejected'
-        button.disabled = true
-        const acceptedSuggestions = [...clinicalDraftDecisions].filter(([, value]) => value === 'accepted').map(([key]) => key)
-        const rejectedSuggestions = [...clinicalDraftDecisions].filter(([, value]) => value === 'rejected').map(([key]) => key)
-        await auditClinicalDraftDecision({ organizationId: authStore.getState().activeOrg, patientId: selectedEncounter?.patientId, encounterId: selectedEncounter?.id, action, acceptedSuggestions, rejectedSuggestions })
-        clinicalDraftReview = decideClinicalDraft(clinicalDraftReview, {
-          decision: action,
-          reviewerUid: user?.uid, activeEncounterId: selectedEncounter?.id, canEditEncounter: myEncounterCaps().canEdit,
-        })
-        if (clinicalDraftReview.status !== 'approved') { if (aiStatus) aiStatus.textContent = 'No suggestion was accepted; nothing was inserted.'; return }
-        const approved = approvedClinicalText(clinicalDraftReview, clinicalDraftDecisions)
-        for (const key of ['S', 'O', 'A', 'P']) if (approved[key].length) {
-          const field = document.getElementById('enc-soap-' + key)
-          field.value = [field.value.trim(), ...approved[key]].filter(Boolean).join('\n')
-          field.dispatchEvent(new Event('input', { bubbles: true }))
-        }
-        if (approved.P.length) {
-          const editor = document.getElementById('planEditor')
-          if (editor) { const p = document.createElement('p'); p.textContent = approved.P.join('\n'); editor.append(p); editor.dispatchEvent(new Event('input', { bubbles: true })) }
-        }
-        if (aiStatus) aiStatus.textContent = 'Accepted suggestions inserted as unsaved edits. Review the note and Plan, then use their existing Save buttons.'
-      } catch (error) { if (aiStatus) aiStatus.textContent = error?.message || 'Could not approve this draft.' }
-    })
-  }
   SOAP_FIELDS.forEach(({ key }) => {
     const field = document.getElementById('enc-soap-' + key)
     if (field) field.addEventListener('input', () => {
@@ -1627,29 +1530,6 @@ wireKebabs(tbl, async (rowId, action) => {
       if (st) st.textContent = 'Unsaved changes'
     })
   })
-  const passTranscriptToClinicalAi = (text) => {
-    if (!aiTranscript) return
-    aiTranscript.value = text
-    aiTranscript.dispatchEvent(new Event('input', { bubbles: true }))
-    document.getElementById('clinicalAiPanel')?.scrollIntoView({ block: 'nearest' })
-  }
-  if (caps.canEdit) {
-    SOAP_FIELDS.forEach(({ key }) => {
-      const field = document.getElementById('enc-soap-' + key)
-      if (field) speechCleanups.push(attachSpeechInput(field, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: passTranscriptToClinicalAi }))
-    })
-    const planSpeechField = document.getElementById('planEditor')
-    if (planSpeechField) {
-      const cleanup = attachSpeechInput(planSpeechField, { getOrgId: () => authStore.getState().activeOrg, getPatientId: () => selectedEncounter?.patientId || '', getEncounterId: () => selectedEncounter?.id || '', onTranscriptReady: passTranscriptToClinicalAi })
-      const speechControl = planSpeechField.nextElementSibling
-      const speechSlot = document.getElementById('planSpeechSlot')
-      if (speechControl && speechSlot) {
-        speechControl.classList.add('speech-plan-control')
-        speechSlot.append(speechControl)
-      }
-      speechCleanups.push(cleanup)
-    }
-  }
   const qSearch = document.getElementById('qSearch')
   if (qSearch) {
     let qDebounce
@@ -1704,7 +1584,6 @@ wireKebabs(tbl, async (rowId, action) => {
   }
 
   onCleanup(() => {
-    speechCleanups.forEach((cleanup) => cleanup())
     teardownListeners()
     if (tick) clearInterval(tick)
     unsubAuth()

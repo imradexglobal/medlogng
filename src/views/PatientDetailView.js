@@ -42,6 +42,7 @@ import {
 } from '../services/deleteService.js'
 import { normalizeLabItems, formatItemResultText, ITEM_STATUS } from '../features/labs/domain.js'
 import { planHtmlForDisplay } from '../features/encounters/planRichText.js'
+import { openLabReport } from '../components/labReportPreview.js'
 
 /** @typedef {{ id: string, label: string, coll?: string|null }} TabDef */
 
@@ -1209,6 +1210,7 @@ export async function PatientDetailView(app, params = {}) {
         const snippet = labResultSnippet(l)
         const items = [
           { label: 'Open', dataAction: 'open' },
+          { label: 'View report', dataAction: 'report' },
           ...(canDelete ? [{ label: 'Delete', dataAction: 'delete', tone: 'danger' }] : []),
         ]
         return '<tr class="clickable" tabindex="0" role="button" data-lab-row="' + esc(l.id) + '" aria-label="Open lab order">' +
@@ -2088,6 +2090,7 @@ export async function PatientDetailView(app, params = {}) {
       }
       if (activeTab === TAB.LABS) {
         if (action === 'open') window.location.hash = '#/laboratory/orders/' + encodeURIComponent(rowId)
+        if (action === 'report') openLabReport(rowId)
         if (action === 'delete') confirmDelete('lab order', () => deleteLabOrder(rowId), () => afterClinical(TAB.LABS))
       }
       if (activeTab === TAB.ADMISSIONS) {

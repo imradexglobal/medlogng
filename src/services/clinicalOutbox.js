@@ -285,8 +285,8 @@ async function pushToHub(rows) {
       const { currentHostSession } = await import('./hostSession.js')
       const device = await currentHostSession(uid, orgId)
       if (!device) return false
-      const { signedSpeechRequest } = await import('./speechSession.js')
-      res = await signedSpeechRequest('/outbox', { method: 'POST', body, contentType: 'application/json', baseUrl: url, signal: ctrl.signal }, device)
+      const { signedDeviceRequest } = await import('./deviceSession.js')
+      res = await signedDeviceRequest('/outbox', { method: 'POST', body, contentType: 'application/json', baseUrl: url, signal: ctrl.signal }, device)
     }
     if (!res.ok) {
       console.warn('[handoff] hospital hub rejected batch:', res.status)

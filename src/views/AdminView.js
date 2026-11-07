@@ -1,5 +1,5 @@
 // Administration — fully wired (live Firestore, Spark plan: no backend).
-// Tabs: Staff & roles · Organization · Devices · Audit trail.
+// Tabs: Staff & roles · Organization · Printing Configuration · Devices · Audit trail.
 // UX gates hide controls; Firestore Security Rules remain the authority.
 import { shell, statusBadge, openModal, closeModal, toast, field, inp, sel } from '../components/shell.js'
 import { onCleanup } from '../lib/lifecycle.js'
@@ -25,6 +25,9 @@ import { createLoadMore } from '../components/loadMore.js'
 import { esc } from '../utils/sanitize.js'
 import { IMPORT_ORDER_TABLES } from '../features/data/schema.js'
 import { getHostNetworkInfo } from '../services/hostService.js'
+import { savePrintingSettings } from '../services/printingSettingsService.js'
+import { printLetterheadTest } from '../lib/print.js'
+import { normalizePrintingSettings, validatePrintingSettings, BASE_PRINT_TOP_MARGIN_MM, MAX_TOP_PRINTING_OFFSET_MM } from '../features/printing/domain.js'
 import {
   generateTemplate, readDatabase, closeDatabase, describeDatabase,
   stageImport, pushQueue, flushPending, exportToDatabase,
@@ -37,7 +40,8 @@ import {
 // dropdown on Register patient / Edit demographics / New invoice.
 const DATA_TAB = 'Data import / export'
 const LAB_TAB = 'Laboratory'
-const TABS = ['Staff & roles', 'Organization', 'Devices', 'Audit trail', LAB_TAB, DATA_TAB]
+const PRINT_TAB = 'Printing Configuration'
+const TABS = ['Staff & roles', 'Organization', PRINT_TAB, 'Devices', 'Audit trail', LAB_TAB, DATA_TAB]
 const DEV_TAB = 'Payment types'
 const visibleTabs = () => (isDevHost() ? [...TABS, DEV_TAB] : TABS)
 
@@ -118,6 +122,7 @@ export async function AdminView(app) {
     auditAction: '', auditUser: '', auditRows: [], auditLoading: false, auditFallback: false,
   }
   let statusTimer = null
+  let printingPreviewObserver = null
   let pushing = false
   let pushStop = false
   let importDb = null
@@ -474,6 +479,130 @@ export async function AdminView(app) {
       } catch (e) {
         document.getElementById('ogErr').textContent = friendlyAdminError(e)
         sv.disabled = false
+      }
+    }
+  }
+
+  function renderPrintingConfiguration() {
+    const printing = normalizePrintingSettings(state.org?.printing_configuration)
+    pane.innerHTML =
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px;align-items:start">' +
+      '<section class="card"><div class="card-head"><h3>Letterhead adjustment</h3><span class="pill">' + esc(activeOrgName || activeOrg) + '</span></div>' +
+      '<p class="sub">For pre-printed hospital letterhead, add this distance to the existing top margin on every printed page.</p>' +
+      (canManageRoles
+        ? '<label class="ck" style="margin:10px 0"><input id="printLetterheadEnabled" type="checkbox"' + (printing.letterhead_adjustment_enabled ? ' checked' : '') + '><span>Use pre-printed letterhead (omit printed hospital name)</span></label>' +
+          '<label style="display:block;max-width:280px;margin:10px 0">Top printing offset ' +
+          '<div style="display:flex;align-items:center;gap:8px"><input id="printTopOffsetMm" class="input" type="number" min="0" max="' + MAX_TOP_PRINTING_OFFSET_MM + '" step="1" value="' + esc(printing.top_offset_mm) + '"><span>mm</span></div></label>' +
+          '<p class="sub">Enter 0–' + MAX_TOP_PRINTING_OFFSET_MM + ' mm. When enabled, the hospital name is omitted from app content because it is already on the letterhead. When disabled, it is printed on the document.</p>' +
+          '<p id="printSettingsErr" class="err"></p><div class="mrow">' +
+          '<button class="btn" id="savePrintSettings">Save printing settings</button> ' +
+          '<button class="btn ghost" id="testPrintSettings">Test print</button></div>'
+        : '<p class="sub">Pre-printed letterhead is ' + (printing.letterhead_adjustment_enabled ? 'on (' + esc(printing.top_offset_mm) + ' mm); the app-printed hospital name is omitted' : 'off; the hospital name is printed on documents') + '. A hospital administrator can change this setting.</p>') +
+      '</section>' +
+      '<section class="card"><div class="card-head"><h3>Live preview</h3><span class="pill">A4 page</span></div>' +
+      '<p class="sub">The page updates as you change the toggle or offset. It shows how the app content start moves relative to pre-printed letterhead.</p>' +
+      '<div style="background:#e2e8f0;border-radius:10px;padding:12px;display:flex;justify-content:center">' +
+      '<div id="printPreviewPage" style="position:relative;width:min(100%,260px);aspect-ratio:210 / 297;overflow:hidden;background:#fff;border:1px solid #cbd5e1;box-shadow:0 4px 14px rgba(15,30,46,.16);color:#334155">' +
+      '<div id="printPreviewPreprintedHeader" style="position:absolute;top:5%;left:8%;right:8%;height:13%;border-bottom:2px solid #0e6b5e;display:flex;align-items:center;gap:7px">' +
+      '<div style="width:24px;height:24px;border-radius:6px;background:#0e6b5e;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:11px">H</div>' +
+      '<div style="min-width:0"><strong style="display:block;font-size:9px;color:#0b1b2b">' + esc(activeOrgName || activeOrg) + '</strong><span style="display:block;font-size:6px;color:#64748b">Pre-printed on hospital letterhead</span></div></div>' +
+      '<div id="printPreviewBaseLine" style="position:absolute;left:8%;right:8%;top:0;border-top:1px dashed #64748b;z-index:2"></div>' +
+      '<div id="printPreviewMeasure" aria-hidden="true" style="display:none;position:absolute;left:5%;top:0;height:0;border-left:2px solid #0e6b5e;z-index:3"></div>' +
+      '<div id="printPreviewMarker" style="position:absolute;left:8%;right:8%;top:0;border-top:2px dashed #b91c1c;z-index:4"><span style="position:absolute;top:3px;left:0;background:#fff;color:#b91c1c;font-size:7px;font-weight:800;letter-spacing:.04em;padding:1px 3px">APP CONTENT START</span></div>' +
+      '<div id="printPreviewContent" style="position:absolute;top:0;left:8%;right:8%;color:#64748b;font-size:7px;line-height:1.6"><strong id="printPreviewHospitalName" style="display:block;color:#0b1b2b;font-size:9px">' + esc(activeOrgName || activeOrg) + '</strong><strong style="display:block;color:#0b1b2b;font-size:9px">Document title</strong><div style="height:3px;background:#e2e8f0;margin-top:5px"></div><div style="height:3px;width:78%;background:#e2e8f0;margin-top:4px"></div><div style="height:3px;width:91%;background:#e2e8f0;margin-top:4px"></div><div style="height:3px;width:65%;background:#e2e8f0;margin-top:4px"></div></div>' +
+      '</div></div>' +
+      '<p id="printPreviewSummary" class="sub" aria-live="polite" style="margin:10px 0 4px;font-weight:700;color:#0b1b2b"></p>' +
+      '<p class="sub" style="margin:0">Gray line: existing 15 mm margin. Red line: content start. Green marker: added offset. Hospital name appears in app content only on plain paper.</p></section>' +
+      '</div>'
+
+    const previewPage = document.getElementById('printPreviewPage')
+    const previewLetterhead = document.getElementById('printPreviewPreprintedHeader')
+    const previewBase = document.getElementById('printPreviewBaseLine')
+    const previewMarker = document.getElementById('printPreviewMarker')
+    const previewMeasure = document.getElementById('printPreviewMeasure')
+    const previewContent = document.getElementById('printPreviewContent')
+    const previewHospitalName = document.getElementById('printPreviewHospitalName')
+    const previewSummary = document.getElementById('printPreviewSummary')
+    const updatePreview = () => {
+      const offsetInput = document.getElementById('printTopOffsetMm')
+      const enabledInput = document.getElementById('printLetterheadEnabled')
+      const raw = offsetInput ? offsetInput.value : String(printing.top_offset_mm)
+      const parsed = raw.trim() === '' ? NaN : Number(raw)
+      const valid = Number.isFinite(parsed) && parsed >= 0 && parsed <= MAX_TOP_PRINTING_OFFSET_MM
+      const configured = valid ? parsed : 0
+      const enabled = enabledInput ? enabledInput.checked : printing.letterhead_adjustment_enabled
+      const added = enabled && valid ? configured : 0
+      const pageScale = previewPage.clientWidth / 210
+      const effectiveMargin = BASE_PRINT_TOP_MARGIN_MM + added
+      previewLetterhead.style.display = enabled ? 'flex' : 'none'
+      previewHospitalName.style.display = enabled ? 'none' : 'block'
+      previewBase.style.top = (BASE_PRINT_TOP_MARGIN_MM * pageScale) + 'px'
+      previewMarker.style.top = (effectiveMargin * pageScale) + 'px'
+      previewMeasure.style.top = (BASE_PRINT_TOP_MARGIN_MM * pageScale) + 'px'
+      previewMeasure.style.height = (added * pageScale) + 'px'
+      previewMeasure.style.display = added > 0 ? 'block' : 'none'
+      previewContent.style.top = (effectiveMargin * pageScale + 8) + 'px'
+      if (!valid) {
+        previewSummary.textContent = 'Enter a valid offset from 0 to ' + MAX_TOP_PRINTING_OFFSET_MM + ' mm to preview it.'
+      } else if (!enabled) {
+        previewSummary.textContent = 'Plain paper · hospital name printed · content starts at the existing ' + BASE_PRINT_TOP_MARGIN_MM + ' mm margin.'
+      } else {
+        previewSummary.textContent = 'Pre-printed letterhead · hospital name omitted · top margin: ' + BASE_PRINT_TOP_MARGIN_MM + ' mm base + ' + configured + ' mm offset = ' + effectiveMargin + ' mm.'
+      }
+    }
+    const previewOffsetInput = document.getElementById('printTopOffsetMm')
+    const previewEnabledInput = document.getElementById('printLetterheadEnabled')
+    if (previewOffsetInput) {
+      previewOffsetInput.addEventListener('input', updatePreview)
+      previewOffsetInput.addEventListener('change', updatePreview)
+    }
+    if (previewEnabledInput) previewEnabledInput.addEventListener('change', updatePreview)
+    if (typeof ResizeObserver !== 'undefined') {
+      printingPreviewObserver = new ResizeObserver(updatePreview)
+      printingPreviewObserver.observe(previewPage)
+    }
+    updatePreview()
+
+    const savePrint = document.getElementById('savePrintSettings')
+    if (savePrint) savePrint.onclick = async () => {
+      const err = document.getElementById('printSettingsErr')
+      const input = document.getElementById('printTopOffsetMm')
+      const enabled = document.getElementById('printLetterheadEnabled').checked
+      let settings
+      try {
+        settings = validatePrintingSettings({
+          letterhead_adjustment_enabled: enabled,
+          top_offset_mm: input.value,
+        })
+      } catch (error) {
+        err.textContent = error.message
+        input.focus()
+        return
+      }
+      savePrint.disabled = true
+      err.textContent = ''
+      try {
+        await savePrintingSettings(activeOrg, settings)
+        toast('Printing settings saved for this hospital.')
+        await reloadAndRender(PRINT_TAB)
+      } catch (error) {
+        err.textContent = friendlyAdminError(error)
+        savePrint.disabled = false
+      }
+    }
+    const testPrint = document.getElementById('testPrintSettings')
+    if (testPrint) testPrint.onclick = () => {
+      const err = document.getElementById('printSettingsErr')
+      try {
+        const settings = validatePrintingSettings({
+          letterhead_adjustment_enabled: document.getElementById('printLetterheadEnabled').checked,
+          top_offset_mm: document.getElementById('printTopOffsetMm').value,
+        })
+        err.textContent = ''
+        printLetterheadTest(settings)
+      } catch (error) {
+        err.textContent = error.message
+        document.getElementById('printTopOffsetMm').focus()
       }
     }
   }
@@ -1202,9 +1331,14 @@ export async function AdminView(app) {
 
   function render(tab) {
     stopStatusPoll()
+    if (printingPreviewObserver) {
+      printingPreviewObserver.disconnect()
+      printingPreviewObserver = null
+    }
     syncTabs(tab)
     if (tab === 'Staff & roles') renderStaff()
     else if (tab === 'Organization') renderOrg()
+    else if (tab === PRINT_TAB) renderPrintingConfiguration()
     else if (tab === 'Devices') renderDevices()
     else if (tab === LAB_TAB) renderLaboratory()
     else if (tab === DATA_TAB) renderData()
@@ -1221,7 +1355,13 @@ export async function AdminView(app) {
   // render(). Navigating off Administration without touching a tab left it
   // running against a detached pane, hitting IndexedDB every second for the
   // rest of the session. Tie it to the view's lifetime.
-  onCleanup(() => stopStatusPoll())
+  onCleanup(() => {
+    stopStatusPoll()
+    if (printingPreviewObserver) {
+      printingPreviewObserver.disconnect()
+      printingPreviewObserver = null
+    }
+  })
 
   pane.innerHTML = '<p class="muted">Loading…</p>'
   const ok = await refreshAll()

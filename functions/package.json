@@ -2,8 +2,10 @@
   "name": "medilogng-functions",
   "private": true,
   "type": "module",
-  "engines": { "node": "22" },
-  "scripts": { "test": "node ../scripts/test/clinical-ai.functions.test.mjs && node ../scripts/test/speech.functions.test.mjs" },
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {},
   "dependencies": {
     "firebase-admin": "^13.10.0",
     "firebase-functions": "^6.6.0"

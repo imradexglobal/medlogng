@@ -854,7 +854,7 @@ function printableReport(title, orgName, subtitle, bodyHtml) {
     '<table class="p-meta"><tr><td class="k">Report</td><td>' + esc(title) + '</td>' +
     '<td class="k">Period</td><td>' + esc(subtitle) + '</td></tr>' +
     '<tr><td class="k">Generated</td><td>' + new Date().toLocaleString('en-NG', { timeZone: 'Africa/Lagos' }) + '</td>' +
-    '<td class="k">Hospital</td><td>' + esc(orgName) + '</td></tr></table>' +
+    '<td class="k p-org-name">Hospital</td><td class="p-org-name">' + esc(orgName) + '</td></tr></table>' +
     bodyHtml +
     '</div>'
   )

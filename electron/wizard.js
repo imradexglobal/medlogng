@@ -49,7 +49,6 @@ async function refresh() {
   }
 }
 
-$('btnTls').onclick = async () => {
 $('btnKey').onclick = async () => {
   $('keyMsg').innerHTML = ''
   const r = await api.hostImportKey()

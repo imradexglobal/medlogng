@@ -91,12 +91,12 @@ async function signedHostRequest(baseUrl, path, body, user, orgId, signal) {
   }
   let device = null
   try {
-    const { readDeviceSession } = await import('./speechSession.js')
+    const { readDeviceSession } = await import('./deviceSession.js')
     device = await readDeviceSession(user.uid, orgId)
   } catch { /* not enrolled */ }
   if (device) {
-    const { signedSpeechRequest } = await import('./speechSession.js')
-    return signedSpeechRequest(path, { method: 'POST', body: payload, contentType: 'application/json', baseUrl,
+    const { signedDeviceRequest } = await import('./deviceSession.js')
+    return signedDeviceRequest(path, { method: 'POST', body: payload, contentType: 'application/json', baseUrl,
       headers: token ? { authorization: 'Bearer ' + token } : {}, signal }, device)
   }
   if (!token) return null

@@ -20,7 +20,7 @@ function printedAt() {
 
 function pageFooter(hospitalName) {
   return '<div class="p-foot">' +
-    esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; Prescription &nbsp;|&nbsp; MediLog NG EMR &nbsp;|&nbsp; Printed ' + printedAt() +
+    '<span class="p-org-name">' + esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; </span>Prescription &nbsp;|&nbsp; MediLog NG EMR &nbsp;|&nbsp; Printed ' + printedAt() +
     '</div>'
 }
 

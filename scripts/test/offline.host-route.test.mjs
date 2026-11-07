@@ -3,7 +3,7 @@ import { Readable } from 'node:stream'
 import { generateKeyPairSync, createHash, sign } from 'node:crypto'
 import { createOfflineQueryCache } from '../../hub/offlineQueryCache.js'
 import { makeHandler } from '../../hub/server.js'
-import { createSpeechSessions, speechProofPayload } from '../../hub/speech/sessions.js'
+import { createDeviceSessions, deviceProofPayload } from '../../hub/deviceSessions.js'
 
 const authCalls = []
 let pendingRows = []
@@ -41,7 +41,7 @@ const db = {
 }
 const cache = createOfflineQueryCache({ log: { warn() {}, error() {} } })
 await cache.initialize()
-const sessions = createSpeechSessions({ log: { error() {} } })
+const sessions = createDeviceSessions({ log: { error() {} } })
 await sessions.initialize()
 const keyPair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
 const session = await sessions.register({ identity: { uid: 'staff-1', email: 'staff@example.test' }, orgId: 'hospital-1',
@@ -51,7 +51,7 @@ const session = await sessions.register({ identity: { uid: 'staff-1', email: 'st
 const handler = makeHandler({
   cfg: { allowedOrigins: [] }, queue: { pendingForOrg: () => pendingRows }, relay: {}, db, authReady: true, authenticator,
   staticDir: '', serveStatic: null, log: { info() {}, warn() {}, error() {} },
-  speechSessions: sessions, offlineQueryCache: cache,
+  deviceSessions: sessions, offlineQueryCache: cache,
 })
 
 async function call(body, signedOffline = false) {
@@ -68,12 +68,12 @@ async function call(body, signedOffline = false) {
     const timestamp = String(Date.now())
     const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
     const bodyHash = createHash('sha256').update(raw).digest('hex')
-    const payload = speechProofPayload({ method: 'POST', url: request.url, contentType: 'application/json', bodyHash, timestamp, nonce })
-    request.headers['x-speech-device'] = session.deviceId
-    request.headers['x-speech-timestamp'] = timestamp
-    request.headers['x-speech-nonce'] = nonce
-    request.headers['x-speech-body-sha256'] = bodyHash
-    request.headers['x-speech-signature'] = sign('sha256', Buffer.from(payload), {
+    const payload = deviceProofPayload({ method: 'POST', url: request.url, contentType: 'application/json', bodyHash, timestamp, nonce })
+    request.headers['x-device-device'] = session.deviceId
+    request.headers['x-device-timestamp'] = timestamp
+    request.headers['x-device-nonce'] = nonce
+    request.headers['x-device-body-sha256'] = bodyHash
+    request.headers['x-device-signature'] = sign('sha256', Buffer.from(payload), {
       key: keyPair.privateKey, dsaEncoding: 'ieee-p1363',
     }).toString('base64url')
   }

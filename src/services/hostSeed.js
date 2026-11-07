@@ -15,7 +15,7 @@
 //   - failures are logged and skipped, never fatal: a partial seed still
 //     leaves the Host able to serve whatever it got
 
-import { getOrCreateDeviceKey, readDeviceSession, signedSpeechRequest } from './speechSession.js'
+import { getOrCreateDeviceKey, readDeviceSession, signedDeviceRequest } from './deviceSession.js'
 
 function hostBaseUrl() {
   try {
@@ -39,7 +39,7 @@ export async function seedHostOfflineCache(user, orgId, opts = {}) {
 
   let response
   if (device) {
-    response = await signedSpeechRequest('/device/data/seed?orgId=' + encodeURIComponent(orgId), {
+    response = await signedDeviceRequest('/device/data/seed?orgId=' + encodeURIComponent(orgId), {
       method: 'POST', headers, body: JSON.stringify({ orgId }), cache: 'no-store',
       signal: opts.signal || AbortSignal.timeout(60000),
     }, device)

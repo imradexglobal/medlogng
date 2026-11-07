@@ -19,6 +19,7 @@ import { confirmDelete } from './deleteUi.js'
 import { kebabCell, wireKebabs } from '../components/kebabMenu.js'
 import { canDeleteRecords } from '../services/deleteService.js'
 import { deleteLabOrder } from '../services/deleteService.js'
+import { openLabReport } from '../components/labReportPreview.js'
 
 const naira = (kobo) => '₦' + ((Number(kobo) || 0) / 100).toLocaleString('en-NG')
 
@@ -297,6 +298,7 @@ export async function LaboratoryView(app) {
         '<td style="white-space:nowrap">' + kebabCell({ rowId: l.id, items: [
           ...(l.billingStatus !== 'invoiced' && caps.canBill ? [{ label: 'Bill', dataAction: 'bill' }] : []),
           { label: 'Open', dataAction: 'open' },
+          { label: 'View report', dataAction: 'report' },
           ...(canDeleteRecords() ? [{ label: 'Delete', tone: 'danger', dataAction: 'delete' }] : [])
         ] }) + '</td></tr>'
     }).join('')
@@ -343,6 +345,10 @@ export async function LaboratoryView(app) {
       }
       if (action === 'open') {
         window.location.hash = '#/laboratory/orders/' + rowId
+        return
+      }
+      if (action === 'report') {
+        openLabReport(rowId)
         return
       }
       if (action === 'delete') {

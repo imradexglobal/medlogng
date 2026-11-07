@@ -5,9 +5,8 @@
 //   POST /outbox   { ops: [...] } -> authorised, durably queued, acked in ms
 //
 // One shared Hub serves the existing HTTP port and, when configured, a second
-// HTTPS port for secure-context features such as browser microphone access.
+// HTTPS is used for authenticated Host operations.
 // Both listeners use this same handler, durable queue, authentication, relay,
-// and speech job service; HTTP compatibility is retained.
 //
 // The hub never waits for the internet to acknowledge a handoff: POST /outbox
 // only touches the local queue file, and the relay delivers later.
@@ -46,11 +45,8 @@ import { createRelay } from './relay.js'
 import { initFoundation, foundationSummary } from './foundation.js'
 import { createAuthenticator } from './auth.js'
 import { createAuditor } from './audit.js'
-import { createLocalClinicalAi } from './clinical-ai/ollama.js'
-import { createInferenceScheduler } from './clinical-ai/inferenceScheduler.js'
 import { seedOfflineCache } from './seed.js'
 import { listLanAddresses, startupLines, describeListenError } from './netinfo.js'
-import { checkDeepgram, transcribeWithDeepgram } from '../functions/speechProvider.js'
 
 const VERSION = 'hub-2.0.0'
 const MAX_BODY = 2 * 1024 * 1024 // 2 MB: enough for a bounded, compressed offline result PDF
@@ -138,7 +134,7 @@ function applyCors(req, res, cfg) {
     res.setHeader('Access-Control-Allow-Origin', origin.origin)
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, ' + CLIENT_HEADER +
-      ', x-speech-request-id, x-speech-device, x-speech-timestamp, x-speech-nonce, x-speech-signature, x-speech-body-sha256')
+      '')
     res.setHeader('Access-Control-Max-Age', '600')
     if (String(req.headers['access-control-request-private-network'] || '').toLowerCase() === 'true') {
       res.setHeader('Access-Control-Allow-Private-Network', 'true')
@@ -295,148 +291,7 @@ function makeStaticHandler(staticDir) {
 // ---- request handler -------------------------------------------------------
 
 export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, staticDir, serveStatic, log,
-  speechSessions = null, offlineQueryCache = null, auditSpeech = async () => {}, clinicalAi = null, verifiedHttpsAddresses = new Set(), speechProvider = transcribeWithDeepgram }) {
-  let activeSpeechRequests = 0
-  async function recordClinicalAiAudit(action, uid, orgId, patientId, encounterId, decisions = {}, metadata = null) {
-    if (!db) throw new Error('Clinical audit storage is unavailable.')
-    await db.collection('audit_events').add({
-      action: 'clinical_draft.' + action, actor_user_id: uid, organization_id: orgId,
-      actor_organization_id: orgId, source: 'clinical-ai', operation: action,
-      patient_id: patientId, record_id: encounterId, occurredAt: new Date(),
-      ...(action === 'approved' || action === 'rejected' ? {
-        accepted_suggestions: decisions.accepted || [], rejected_suggestions: decisions.rejected || [],
-      } : {}),
-      ...(action === 'generated' && metadata ? {
-        model_name: String(metadata.model || '').slice(0, 160), model_digest: String(metadata.modelDigest || '').slice(0, 160),
-        generation_ms: Number.isFinite(metadata.totalDurationMs) ? metadata.totalDurationMs : null,
-      } : {}),
-    })
-  }
-  async function authorizeClinicalDraftRequest(req, orgId, patientId, encounterId) {
-    const identity = typeof authenticator.verifyOnline === 'function'
-      ? await authenticator.verifyOnline(req) : await authenticator.verify(req)
-    await authenticator.authorize(identity, orgId, 'encounter.edit')
-    if (!db) throw Object.assign(new Error('Authoritative encounter access is unavailable.'), { status: 503, expose: true })
-    const snapshot = await db.collection('encounters').doc(encounterId).get()
-    const encounter = snapshot.exists ? snapshot.data() || {} : null
-    if (!encounter || encounter.organization_id !== orgId || encounter.patient_id !== patientId) {
-      throw Object.assign(new Error('Encounter does not belong to this patient and hospital.'), { status: 403, expose: true })
-    }
-    return identity
-  }
-  async function handleClinicalDraft(req, res) {
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    const quota = rateLimit('clinical-ai:' + ip, 10)
-    if (!quota.ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many clinical AI requests. Wait and retry.' }, { 'retry-after': String(quota.retryAfter) }); return }
-    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Clinical AI requests require HTTPS.' }); return }
-    const origin = checkOrigin(req, cfg)
-    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
-      req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return
-    }
-    if (!clinicalAi) { req.resume(); json(res, 503, { ok: false, error: 'Local clinical AI is not configured on this Host.' }); return }
-    try {
-      const body = await readJson(req, 150_000)
-      const { orgId, encounterId, patientId, transcript } = body || {}
-      if (![orgId, encounterId, patientId].every((v) => typeof v === 'string' && v.length > 0) ||
-          typeof transcript !== 'string' || !transcript.trim() || transcript.length > 100_000) {
-        json(res, 400, { ok: false, error: 'Organization, patient, encounter and a bounded transcript are required.' }); return
-      }
-      const identity = await authorizeClinicalDraftRequest(req, orgId, patientId, encounterId)
-      const generated = clinicalAi.generateDetailed ? await clinicalAi.generateDetailed(transcript) : { draft: await clinicalAi.generate(transcript), metadata: null }
-      const draft = generated?.draft || generated
-      const metadata = generated?.draft ? generated.metadata || null : null
-      await recordClinicalAiAudit('generated', identity.uid, orgId, patientId, encounterId, {}, metadata)
-      json(res, 200, { ok: true, draft, metadata, binding: { uid: identity.uid, organizationId: orgId, patientId, encounterId } })
-      log.info('[hub] clinical draft generated', { uid: identity.uid, orgId, encounterId })
-    } catch (error) {
-      const status = Number(error?.status) || (error?.expose ? Number(error.status) || 400 : 503)
-      json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Clinical draft generation failed. Check local AI service status.' })
-    }
-  }
-  async function handleSpeechTranscribe(req, res, url) {
-    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Speech transcription requires HTTPS.' }); return }
-    const origin = checkOrigin(req, cfg)
-    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) { req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return }
-    if (process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO !== 'true' || !process.env.DEEPGRAM_API_KEY || !process.env.DEEPGRAM_ENDPOINT) {
-      req.resume(); json(res, 503, { ok: false, error: 'Online clinical transcription is not configured for this Host.' }); return
-    }
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    if (!rateLimit('speech-online:' + ip, 12).ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many transcription requests. Wait and retry.' }); return }
-    const orgId = String(url.searchParams.get('orgId') || '')
-    const patientId = String(url.searchParams.get('patientId') || '')
-    const encounterId = String(url.searchParams.get('encounterId') || '')
-    const requestId = String(req.headers['x-speech-request-id'] || '')
-    if (![orgId, patientId, encounterId].every(Boolean) || !/^[A-Za-z0-9_-]{8,100}$/.test(requestId)) { req.resume(); json(res, 400, { ok: false, error: 'Hospital, patient, consultation and request id are required.' }); return }
-    let speechSlot = false
-    try {
-      const identity = await authenticator.verifyOnline(req)
-      await authenticator.authorize(identity, orgId, 'encounter.edit')
-      if (!db) throw Object.assign(new Error('Authoritative consultation access is unavailable.'), { status: 503, expose: true })
-      const encounterSnapshot = await db.collection('encounters').doc(encounterId).get()
-      const encounter = encounterSnapshot.exists ? encounterSnapshot.data() || {} : null
-      if (!encounter || encounter.organization_id !== orgId || encounter.patient_id !== patientId) throw Object.assign(new Error('Consultation does not belong to this patient and hospital.'), { status: 403, expose: true })
-      const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
-      if (!contentType.startsWith('audio/')) { req.resume(); json(res, 415, { ok: false, error: 'Send a supported audio recording.' }); return }
-      if (activeSpeechRequests >= 10) { req.resume(); json(res, 429, { ok: false, error: 'The Host transcription service is busy. Try again shortly.' }); return }
-      activeSpeechRequests++
-      speechSlot = true
-      const chunks = []; let size = 0
-      for await (const chunk of req) {
-        size += chunk.length
-        if (size > 25 * 1024 * 1024) throw Object.assign(new Error('Audio exceeds the 25 MB limit.'), { status: 413, expose: true })
-        chunks.push(chunk)
-      }
-      const audio = Buffer.concat(chunks)
-      const submittedAt = new Date()
-      const requestHash = createHash('sha256').update([identity.uid, orgId, encounterId, requestId].join('\n')).digest('hex')
-      const auditRef = db.collection('audit_events').doc('speech_transcription_' + requestHash)
-      try { await auditRef.create({ action: 'speech.transcription-submit', actor_user_id: identity.uid, actor_organization_id: orgId,
-        organization_id: orgId, patient_id: patientId, record_id: encounterId, request_id: requestId,
-        model: 'nova-3-medical', status: 'started', source: 'host-deepgram-stt', occurredAt: submittedAt }) }
-      catch (error) {
-        if (error?.code === 6 || error?.code === 'already-exists') { json(res, 409, { ok: false, error: 'This transcription request was already submitted. Start a new request if a retry is needed.' }); return }
-        throw error
-      }
-      await auditSpeech({ action: 'speech.transcription-submit', uid: identity.uid, orgId, patientId, encounterId, requestId,
-        model: 'nova-3-medical', at: submittedAt.toISOString() })
-      let result
-      try { result = await speechProvider({ audio, contentType, apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT }) }
-      catch (error) { await auditRef.update({ status: 'failed', failure_code: String(error?.code || 'provider-error').slice(0, 80), provider_status: Number(error?.providerStatus) || null, completedAt: new Date() }).catch(() => {}); throw error }
-      const record = { action: 'speech.transcription-complete', uid: identity.uid, orgId, patientId, encounterId, requestId, model: result.model, at: new Date().toISOString() }
-      await auditRef.update({ status: 'completed', model: result.model, processing_ms: result.processingMs ?? null, completedAt: new Date() })
-      await auditSpeech(record)
-      json(res, 200, { ok: true, status: 'completed', text: result.text, model: result.model, processingMs: result.processingMs ?? null, requestId })
-    } catch (error) {
-      const status = Number(error?.status) || (error?.code === 'invalid-argument' ? 400 : error?.code === 'failed-precondition' ? 503 : 503)
-      log.warn('[speech] transcription failed', String(error?.code || error?.name || 'error').slice(0, 80))
-      json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Online transcription could not be completed.' })
-    } finally { if (speechSlot) activeSpeechRequests-- }
-  }
-  async function handleClinicalDraftReview(req, res) {
-    const ip = String(req.socket.remoteAddress || 'unknown')
-    const quota = rateLimit('clinical-ai-review:' + ip, 30)
-    if (!quota.ok) { req.resume(); json(res, 429, { ok: false, error: 'Too many clinical review requests. Wait and retry.' }, { 'retry-after': String(quota.retryAfter) }); return }
-    if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Clinical AI review requires HTTPS.' }); return }
-    const origin = checkOrigin(req, cfg)
-    if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) { req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return }
-    try {
-      const body = await readJson(req, 16 * 1024)
-      const { orgId, patientId, encounterId, action, acceptedSuggestions = [], rejectedSuggestions = [] } = body || {}
-      if (![orgId, patientId, encounterId].every((v) => typeof v === 'string' && v) || !['approved', 'rejected'].includes(action)) {
-        json(res, 400, { ok: false, error: 'A consultation binding and approve/reject decision are required.' }); return
-      }
-      const validSuggestionIds = (value) => Array.isArray(value) && value.length <= 200 && value.every((item) => /^(S|O|A|P):\d{1,3}$/.test(item))
-      if (!validSuggestionIds(acceptedSuggestions) || !validSuggestionIds(rejectedSuggestions)) {
-        json(res, 400, { ok: false, error: 'Reviewed suggestion references are invalid.' }); return
-      }
-      const identity = await authorizeClinicalDraftRequest(req, orgId, patientId, encounterId)
-      await recordClinicalAiAudit(action, identity.uid, orgId, patientId, encounterId, { accepted: acceptedSuggestions, rejected: rejectedSuggestions })
-      json(res, 200, { ok: true })
-    } catch (error) {
-      const status = Number(error?.status) || 503
-      json(res, status, { ok: false, error: error?.expose || status < 500 ? error.message : 'Clinical review audit could not be saved.' })
-    }
-  }
+  deviceSessions = null, offlineQueryCache = null, auditDevice = async () => {}, verifiedHttpsAddresses = new Set() }) {
   async function handleOutbox(req, res) {
     const ip = String(req.socket.remoteAddress || 'unknown')
     const ipLimit = rateLimit('ip:' + ip, 120)
@@ -485,10 +340,10 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     let offlineSession = null
     if (!identity) {
       try {
-        offlineSession = speechSessions?.authenticate(req, '', '') || null
+        offlineSession = deviceSessions?.authenticate(req, '', '') || null
         if (!offlineSession) throw bearerError || new Error('Sign-in required.')
         const expectedHash = createHash('sha256').update(rawBody).digest('hex')
-        if (String(req.headers['x-speech-body-sha256'] || '').toLowerCase() !== expectedHash) {
+        if (String(req.headers['x-device-body-sha256'] || '').toLowerCase() !== expectedHash) {
           throw Object.assign(new Error('Signed request body does not match.'), { status: 401, expose: true })
         }
         identity = { uid: offlineSession.uid, email: offlineSession.email, displayName: offlineSession.displayName }
@@ -666,7 +521,6 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       lastContact: status.lastContact,
       lastProbeError: status.lastError || undefined,
       queue: queue.counts(),
-      speech: { enabled: process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true' && !!process.env.DEEPGRAM_API_KEY && !!process.env.DEEPGRAM_ENDPOINT },
       servesApp: !!staticDir,
     })
   }
@@ -676,7 +530,7 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
   // signed LAN handoffs after Firebase ID tokens expire during an outage.
   async function offlineDeviceSessionRoute(req, res, url, action) {
     if (!req.socket.encrypted) { req.resume(); json(res, 403, { ok: false, error: 'Host device sessions require HTTPS.' }); return }
-    if (!speechSessions) { req.resume(); json(res, 503, { ok: false, error: 'Host offline-session service is unavailable.' }); return }
+    if (!deviceSessions) { req.resume(); json(res, 503, { ok: false, error: 'Host offline-session service is unavailable.' }); return }
     const origin = checkOrigin(req, cfg)
     if (!origin.ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
       req.resume(); json(res, 403, { ok: false, error: 'This browser is not allowed to use this Host.' }); return
@@ -696,13 +550,13 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
         const identity = typeof authenticator.verifyOnline === 'function'
           ? await authenticator.verifyOnline(req) : await authenticator.verify(req)
         const authorization = await authenticator.authorize(identity, orgId, '')
-        const session = await speechSessions.register({ identity, authorization, orgId, publicKey: body.publicKey })
+        const session = await deviceSessions.register({ identity, authorization, orgId, publicKey: body.publicKey })
         newlyRegisteredDevice = session.deviceId
-        await auditSpeech({ action: 'offline-device-session-registered', uid: identity.uid, orgId,
+        await auditDevice({ action: 'offline-device-session-registered', uid: identity.uid, orgId,
           deviceId: session.deviceId, permissions: session.permissions, at: new Date().toISOString() })
         json(res, 200, { ok: true, session }); return
       }
-      const current = currentSession = speechSessions.authenticate(req, orgId, '')
+      const current = currentSession = deviceSessions.authenticate(req, orgId, '')
       if (action === 'offline') {
         json(res, 200, { ok: true, session: { uid: current.uid, orgId: current.orgId, email: current.email,
           displayName: current.displayName, membership: current.membership, permissions: current.permissions } }); return
@@ -711,28 +565,28 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
         const identity = await authenticator.verifyOnline(req)
         if (identity.uid !== current.uid) throw Object.assign(new Error('Signed-in user does not match this Host session.'), { status: 401, expose: true })
         const authorization = await authenticator.authorize(identity, orgId, '')
-        const session = await speechSessions.updateAuthorization(current.deviceId, { identity, authorization })
+        const session = await deviceSessions.updateAuthorization(current.deviceId, { identity, authorization })
         if (!session) throw Object.assign(new Error('Hospital access was revoked.'), { status: 403, expose: true })
-        await auditSpeech({ action: 'offline-device-session-revalidated', uid: identity.uid, orgId,
+        await auditDevice({ action: 'offline-device-session-revalidated', uid: identity.uid, orgId,
           deviceId: current.deviceId, permissions: session.permissions, at: new Date().toISOString() })
         json(res, 200, { ok: true, session }); return
       }
       if (action === 'revoke') {
-        const current = speechSessions.authenticate(req, orgId, '')
-        await speechSessions.revoke(current.deviceId)
-        await auditSpeech({ action: 'offline-device-session-revoked', uid: current.uid, orgId,
+        const current = deviceSessions.authenticate(req, orgId, '')
+        await deviceSessions.revoke(current.deviceId)
+        await auditDevice({ action: 'offline-device-session-revoked', uid: current.uid, orgId,
           deviceId: current.deviceId, at: new Date().toISOString() })
         json(res, 200, { ok: true }); return
       }
     } catch (error) {
-      if (newlyRegisteredDevice) await speechSessions.revoke(newlyRegisteredDevice)
+      if (newlyRegisteredDevice) await deviceSessions.revoke(newlyRegisteredDevice)
       if (action === 'register' && [401, 403].includes(Number(error?.status))) {
-        const deviceId = String(req.headers['x-speech-device'] || '')
-        const existing = speechSessions.matchesDeviceKey(deviceId, registeringPublicKey) ? speechSessions.get(deviceId) : null
-        if (existing) await speechSessions.invalidateUserOrg(existing.uid, existing.orgId)
+        const deviceId = String(req.headers['x-device-device'] || '')
+        const existing = deviceSessions.matchesDeviceKey(deviceId, registeringPublicKey) ? deviceSessions.get(deviceId) : null
+        if (existing) await deviceSessions.invalidateUserOrg(existing.uid, existing.orgId)
       }
       if (action === 'revalidate' && [401, 403].includes(Number(error?.status)) && currentSession) {
-        await speechSessions.invalidateUserOrg(currentSession.uid, currentSession.orgId)
+        await deviceSessions.invalidateUserOrg(currentSession.uid, currentSession.orgId)
       }
       json(res, error?.expose ? error.status || 401 : 503, {
         ok: false, error: error?.expose ? error.message : 'Host offline session could not be verified.',
@@ -811,12 +665,12 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     let bearerError = null
     try { bearerIdentity = await authenticator.verify(req) } catch (error) { bearerError = error }
     let deviceSession = null
-    const hasDeviceProof = !!String(req.headers['x-speech-device'] || '')
+    const hasDeviceProof = !!String(req.headers['x-device-device'] || '')
     if (hasDeviceProof) {
       try {
-        deviceSession = speechSessions?.authenticate(req, orgId, '') || null
+        deviceSession = deviceSessions?.authenticate(req, orgId, '') || null
         const expectedHash = createHash('sha256').update(JSON.stringify(body)).digest('hex')
-        if (String(req.headers['x-speech-body-sha256'] || '').toLowerCase() !== expectedHash) {
+        if (String(req.headers['x-device-body-sha256'] || '').toLowerCase() !== expectedHash) {
           throw Object.assign(new Error('Signed query body does not match.'), { status: 401, expose: true })
         }
         if (bearerIdentity && bearerIdentity.uid !== deviceSession.uid) {
@@ -1242,10 +1096,10 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
     let bearerError = null
     try { bearerIdentity = await authenticator.verify(req) } catch (error) { bearerError = error }
     let deviceSession = null
-    if (String(req.headers['x-speech-device'] || '')) {
+    if (String(req.headers['x-device-device'] || '')) {
       try {
-        deviceSession = speechSessions?.authenticate(req, orgId, '') || null
-        if (String(req.headers['x-speech-body-sha256'] || '').toLowerCase() !== createHash('sha256').update(JSON.stringify(body)).digest('hex')) {
+        deviceSession = deviceSessions?.authenticate(req, orgId, '') || null
+        if (String(req.headers['x-device-body-sha256'] || '').toLowerCase() !== createHash('sha256').update(JSON.stringify(body)).digest('hex')) {
           throw Object.assign(new Error('Signed record request does not match.'), { status: 401, expose: true })
         }
         if (bearerIdentity && bearerIdentity.uid !== deviceSession.uid) {
@@ -1347,21 +1201,6 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       return
     }
 
-    if (req.method === 'GET' && path === '/speech/health') {
-      const orgId = String(url.searchParams.get('orgId') || '')
-      if (!req.socket.encrypted || !checkOrigin(req, cfg).ok || String(req.headers[CLIENT_HEADER] || '') !== CLIENT_VALUE) {
-        json(res, 403, { ok: false, available: false }); return
-      }
-      try {
-        const identity = await authenticator.verifyOnline(req)
-        await authenticator.authorize(identity, orgId, 'encounter.edit')
-        const enabled = process.env.DEEPGRAM_ALLOW_CLINICAL_AUDIO === 'true' && !!process.env.DEEPGRAM_API_KEY && !!process.env.DEEPGRAM_ENDPOINT
-        const available = enabled && await checkDeepgram({ apiKey: process.env.DEEPGRAM_API_KEY, endpoint: process.env.DEEPGRAM_ENDPOINT })
-        json(res, 200, { ok: true, available, provider: available ? 'deepgram' : '' })
-      } catch (error) { json(res, Number(error?.status) || 503, { ok: false, available: false, error: error?.expose ? error.message : 'Online access could not be verified.' }) }
-      return
-    }
-
     const deviceSessionAction = path === '/device/session/register' ? 'register' : path === '/device/session/offline' ? 'offline'
       : path === '/device/session/revalidate' ? 'revalidate' : path === '/device/session/revoke' ? 'revoke' : ''
     if (deviceSessionAction && req.method === 'POST') { await offlineDeviceSessionRoute(req, res, url, deviceSessionAction); return }
@@ -1384,24 +1223,7 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
       return
     }
 
-    if (req.method === 'POST' && path === '/clinical-drafts') {
-      await handleClinicalDraft(req, res)
-      return
-    }
-    if (req.method === 'POST' && path === '/clinical-drafts/review') {
-      await handleClinicalDraftReview(req, res)
-      return
-    }
 
-    if (req.method === 'POST' && path === '/speech/transcribe') {
-      await handleSpeechTranscribe(req, res, url)
-      return
-    }
-    if (path === '/speech/jobs' || path.startsWith('/speech/jobs/') || path === '/speech/session' || path.startsWith('/speech/session/')) {
-      req.resume()
-      json(res, 404, { ok: false, error: 'This local transcription endpoint has been retired.' })
-      return
-    }
 
 
     if (req.method === 'GET' && serveStatic) {
@@ -1436,8 +1258,6 @@ export function makeHandler({ cfg, queue, relay, db, authReady, authenticator, s
 export async function startHub(overrides = {}) {
   const cfg = { ...loadConfig(), ...overrides }
   const log = overrides.log || console
-  const inferenceScheduler = overrides.inferenceScheduler || createInferenceScheduler()
-  const clinicalAi = overrides.clinicalAi || createLocalClinicalAi({ schedule: inferenceScheduler.run })
   if (typeof cfg.allowedOrigins === 'string') cfg.allowedOrigins = parseOrigins(cfg.allowedOrigins)
   if (!Array.isArray(cfg.allowedOrigins)) cfg.allowedOrigins = []
 
@@ -1495,24 +1315,21 @@ export async function startHub(overrides = {}) {
     audit: auditor,
   })
 
-  let speechSessions = null
-  if (typeof overrides.loadSpeechSessions === 'function' && typeof overrides.saveSpeechSessions === 'function') {
+
+  let deviceSessions = null
+  if (typeof overrides.loadDeviceSessions === 'function' && typeof overrides.saveDeviceSessions === 'function') {
     try {
-      const { createSpeechSessions } = await import('./speech/sessions.js')
-      speechSessions = createSpeechSessions({ load: overrides.loadSpeechSessions, save: overrides.saveSpeechSessions, log })
-      await speechSessions.initialize()
+      const { createDeviceSessions } = await import('./deviceSessions.js')
+      deviceSessions = createDeviceSessions({ load: overrides.loadDeviceSessions, save: overrides.saveDeviceSessions, log })
+      await deviceSessions.initialize()
     } catch (error) {
       log.error('[hub] offline device-session service could not initialize:', error?.message || error)
-      speechSessions = null
+      deviceSessions = null
     }
   }
-
   const verifiedHttpsAddresses = new Set()
   const handler = makeHandler({
-    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, speechSessions, offlineQueryCache,
-    clinicalAi,
-    auditSpeech: overrides.auditSpeech,
-    speechProvider: overrides.speechProvider || transcribeWithDeepgram,
+    cfg, queue, relay, db, authReady: !!foundation.auth, authenticator, staticDir, serveStatic, log, deviceSessions, offlineQueryCache,
     verifiedHttpsAddresses,
   })
   const onRequest = (req, res) => {
@@ -1594,7 +1411,7 @@ export async function startHub(overrides = {}) {
     lanAddresses,
     verifiedHttpsAddresses: [...verifiedHttpsAddresses],
     queue,
-    speechSessions,
+    deviceSessions,
     offlineQueryCache,
     relay,
     server,

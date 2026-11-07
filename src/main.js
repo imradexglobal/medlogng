@@ -3,6 +3,7 @@ import './app.css'
 import { auth } from './firebase.js'
 import { authStore } from './store/authStore.js'
 import { initAuthListener, attemptOfflineLogin, saveLastLogin, refreshSession } from './services/authService.js'
+import { initializePrintingSettings } from './services/printingSettingsService.js'
 import { primePayers } from './services/payerService.js'
 import { registerRoute, initRouter, handleRoute, navigate, setGuard } from './router.js'
 import { checkAccess, startAccessWatch } from './services/authService.js'
@@ -161,6 +162,7 @@ authStore.subscribe(async (s) => {
 initRouter()
 installChunkRecovery()
 initAuthListener()
+initializePrintingSettings()
 startAccessWatch()
 startIdleWatch()
 initUpdater()

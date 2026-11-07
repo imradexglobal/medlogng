@@ -31,7 +31,6 @@ asarUnpack:
   - src/features/pharmacy/requests.js
   - src/features/pharmacy/administration.js
   - src/features/clinicalDocumentation/**/*
-  - functions/speechProvider.js
   - node_modules/**/*
   - package.json
 
@@ -40,7 +39,6 @@ files:
   - public/**/*
   - electron/**/*
   - hub/**/*
-  - functions/speechProvider.js
   # Never package developer or imported Firebase credentials/environment.
   - '!hub/keys/**'
   - '!**/service-account.json'

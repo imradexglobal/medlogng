@@ -12,24 +12,31 @@ import { staffLabel } from './staffName.js'
 const CONFIDENTIAL = '<div class="p-confidential">CONFIDENTIAL — This document contains patient health information. Authorised personnel only. Unauthorised disclosure is a breach of patient confidentiality.</div>'
 
 function metaTable(rows) {
-  return '<table class="p-meta">' + rows
-    .filter(Boolean)
-    .map((r) => '<tr><td class="k">' + esc(r[0]) + '</td><td>' + esc(String(r[1] ?? '—')) + '</td></tr>')
-    .join('') + '</table>'
+  const cleanRows = rows.filter(Boolean)
+  const tableRows = []
+  for (let i = 0; i < cleanRows.length; i += 2) {
+    const left = cleanRows[i]
+    const right = cleanRows[i + 1]
+    tableRows.push('<tr>' +
+      '<td class="k">' + esc(left[0]) + '</td><td>' + esc(String(left[1] ?? '—')) + '</td>' +
+      (right ? '<td class="k">' + esc(right[0]) + '</td><td>' + esc(String(right[1] ?? '—')) + '</td>' : '<td class="k empty"></td><td class="empty"></td>') +
+      '</tr>')
+  }
+  return '<table class="p-meta">' + tableRows.join('') + '</table>'
 }
 
 function printedAt() {
   return esc(new Date().toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'medium' }))
 }
 
-function pageFooter(hospitalName, docType) {
+function pageFooter(hospitalName, docType, footerLabel = 'Printed') {
   return '<div class="p-foot">' +
-    esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; ' + esc(docType) +
-    ' &nbsp;|&nbsp; MediLog NG EMR &nbsp;|&nbsp; Printed ' + printedAt() +
+    '<span class="p-org-name">' + esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; </span>' + esc(docType) +
+    ' &nbsp;|&nbsp; MediLog NG EMR &nbsp;|&nbsp; ' + esc(footerLabel) + ' ' + printedAt() +
     '</div>'
 }
 
-function shell({ hospitalName, docTitle, subtitle, metaRows, bodyHtml, signatures, watermark, footer }) {
+function shell({ hospitalName, docTitle, subtitle, metaRows, bodyHtml, signatures, watermark, footer, footerLabel }) {
   return CONFIDENTIAL +
     (watermark ? '<div class="p-watermark">' + esc(watermark) + '</div>' : '') +
     '<div class="p-head">' +
@@ -43,7 +50,7 @@ function shell({ hospitalName, docTitle, subtitle, metaRows, bodyHtml, signature
     bodyHtml +
     (signatures || '') +
     (footer || '') +
-    pageFooter(hospitalName, docTitle)
+    pageFooter(hospitalName, docTitle, footerLabel)
 }
 
 function testList(tests) {
@@ -273,7 +280,9 @@ export function labReportHtml(order, opts = {}) {
 
   const bodyHtml =
     (hasUnreleased ? '<p class="p-note" style="font-weight:700">⚠ PRELIMINARY REPORT — One or more tests are pending validation and marked below.</p>' : '') +
-    items.map((it) => itemBlock(it)).join('') +
+    (items.length
+      ? items.map((it) => itemBlock(it)).join('')
+      : '<h4 class="p-h4">Results</h4>' + resultRows(order.tests || (order.testPanel ? [order.testPanel] : []), order.result)) +
     '<div class="p-end-of-report">— END OF REPORT —</div>'
 
   const signName = report.signatory_name || staffLabel(order.verifiedByName) || staffLabel(order.verifiedBy) || ''
@@ -292,6 +301,7 @@ export function labReportHtml(order, opts = {}) {
     signatures: signaturesHtml,
     watermark,
     footer: report.footer ? '<div class="p-note">' + esc(report.footer) + '</div>' : '',
+    footerLabel: opts.preview ? 'Prepared' : 'Printed',
   })
 }
 

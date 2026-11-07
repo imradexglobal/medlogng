@@ -80,8 +80,6 @@ echo   3. On first launch, follow the 3-step wizard:
 echo        - Choose the Firebase service-account.json key
 echo        - Click 'Open firewall...' (allows port 8787 on Private LAN)
 echo        - Click 'Finish setup'
-echo   4. Configure the approved Deepgram regional endpoint and key on the Host PC.
-echo   5. The Host will display the secure HTTPS address used for transcription.
 echo   6. Other PCs open the hospital Host address in Chrome or Edge.
 echo ============================================================
 echo.

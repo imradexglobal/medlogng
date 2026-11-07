@@ -21,7 +21,7 @@ function printedAt() {
 
 function pageFooter(hospitalName, docType) {
   return '<div class="p-foot">' +
-    esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; ' + esc(docType) +
+    '<span class="p-org-name">' + esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; </span>' + esc(docType) +
     ' &nbsp;|&nbsp; MediLog NG EMR &nbsp;|&nbsp; Printed ' + printedAt() +
     '</div>'
 }
@@ -185,7 +185,7 @@ export function receiptPrintHtml({ hospitalName, payment, invoice = {}, received
     '<div style="max-width:420px;margin:0 auto;font-family:\'Courier New\',Courier,monospace;font-size:10pt;line-height:1.5">' +
     // Header
     '<div style="text-align:center;border-bottom:2px solid #1a3a5c;padding-bottom:10px;margin-bottom:12px">' +
-      '<div style="font-family:\'Segoe UI\',Arial,sans-serif;font-size:15pt;font-weight:900;color:#1a3a5c">' + esc(hospitalName || 'Hospital') + '</div>' +
+      '<div class="p-hospital" style="font-family:\'Segoe UI\',Arial,sans-serif;font-size:15pt;font-weight:900;color:#1a3a5c">' + esc(hospitalName || 'Hospital') + '</div>' +
       '<div style="font-size:8.5pt;letter-spacing:2px;text-transform:uppercase;margin-top:2px">OFFICIAL PAYMENT RECEIPT</div>' +
     '</div>' +
     // Receipt number + date prominently
@@ -216,10 +216,10 @@ export function receiptPrintHtml({ hospitalName, payment, invoice = {}, received
       '<div>Received by: <strong>' + esc(payment.paid_by || receivedBy || 'Cashier') + '</strong></div>' +
       '<div style="margin-top:6px">Please retain this receipt as proof of payment.</div>' +
       '<div style="margin-top:4px">Queries: contact Billing Department with receipt number.</div>' +
-      '<div style="margin-top:10px;font-size:9pt;font-style:italic;color:#555">Thank you for choosing ' + esc(hospitalName || 'our hospital') + '.</div>' +
+      '<div class="p-org-name" style="margin-top:10px;font-size:9pt;font-style:italic;color:#555">Thank you for choosing ' + esc(hospitalName || 'our hospital') + '.</div>' +
     '</div>' +
     '<div style="margin-top:16px;border-top:1px solid #bbb;padding-top:5px;font-size:8pt;text-align:center;color:#555">' +
-    esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; MediLog NG EMR &nbsp;|&nbsp; Printed ' + printedAt() +
+    '<span class="p-org-name">' + esc(hospitalName || 'Hospital') + ' &nbsp;|&nbsp; </span>MediLog NG EMR &nbsp;|&nbsp; Printed ' + printedAt() +
     '</div>' +
     '</div>'
 }

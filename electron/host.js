@@ -404,32 +404,32 @@ async function startHubRuntime() {
       const file = path.join(dataDir(), 'offline-query-cache', id + '.bin')
       await fs.promises.unlink(file).catch((error) => { if (error?.code !== 'ENOENT') throw error })
     },
-    projectId: cfg.projectId || 'medlogng',
-    staticDir: path.join(root, 'dist'),
-    tls,
-    httpsPort: activeHttpsPort,
-    loadSpeechSessions: async () => {
-      const file = path.join(dataDir(), 'speech', 'sessions.bin')
+    loadDeviceSessions: async () => {
+      const file = path.join(dataDir(), 'device', 'sessions.bin')
       try { return safeStorage.decryptString(await fs.promises.readFile(file)) }
       catch (error) { if (error?.code === 'ENOENT') return '[]'; throw error }
     },
-    saveSpeechSessions: async (json) => {
+    saveDeviceSessions: async (json) => {
       if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
-      const dir = path.join(dataDir(), 'speech')
+      const dir = path.join(dataDir(), 'device')
       const file = path.join(dir, 'sessions.bin')
       const tmp = file + '.tmp'
       await fs.promises.mkdir(dir, { recursive: true })
       await fs.promises.writeFile(tmp, safeStorage.encryptString(json), { mode: 0o600 })
       await fs.promises.rename(tmp, file)
     },
-    auditSpeech: async (record) => {
+    auditDevice: async (record) => {
       if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.')
-      const file = path.join(dataDir(), 'speech', 'audit.bin')
+      const file = path.join(dataDir(), 'device', 'audit.bin')
       await fs.promises.mkdir(path.dirname(file), { recursive: true })
       const encrypted = safeStorage.encryptString(JSON.stringify(record)).toString('base64')
       const handle = await fs.promises.open(file, 'a', 0o600)
       try { await handle.write(encrypted + '\n'); await handle.sync() } finally { await handle.close() }
     },
+    projectId: cfg.projectId || 'medlogng',
+    staticDir: path.join(root, 'dist'),
+    tls,
+    httpsPort: activeHttpsPort,
   })
   activeHttpsPort = hubHandle.httpsPort || 0
   activeHttpsLanUrl = hubHandle.httpsLanUrl || ''

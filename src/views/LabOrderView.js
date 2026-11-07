@@ -23,6 +23,7 @@ import { printDocument } from '../lib/print.js'
 import { labReportHtml, labRequestStructuredHtml } from '../lib/labPrintTemplates.js'
 import { mountResultImages } from '../components/resultImages.js'
 import { staffLabel } from '../lib/staffName.js'
+import { openLabReport } from '../components/labReportPreview.js'
 
 const naira = (kobo) => '₦' + ((Number(kobo) || 0) / 100).toLocaleString('en-NG')
 
@@ -175,6 +176,7 @@ export async function LabOrderView(app, params = {}) {
       (order.note ? '<p style="margin:10px 0 0"><span class="mut">Clinical note:</span> ' + esc(order.note) + '</p>' : '') +
       '<div class="mrow" style="margin-top:12px">' +
       '<button class="btn ghost" id="printReqBtn">🖨 Request slip</button>' +
+      '<button class="btn ghost" id="viewReportBtn">View report</button>' +
       (items.some((it) => it.status === 'released')
         ? '<button class="btn" id="printReportBtn">🖨 Report</button>'
         : '<button class="btn ghost" id="printReportBtn" disabled>🖨 Report</button>') +
@@ -224,6 +226,7 @@ export async function LabOrderView(app, params = {}) {
     })
 
     root.querySelector('#printReqBtn').onclick = () => printDocument('Lab request', labRequestStructuredHtml(order, { hospitalName: authStore.getState().activeOrgName }))
+    root.querySelector('#viewReportBtn').onclick = () => openLabReport(order.id)
     const pr = root.querySelector('#printReportBtn')
     if (pr) pr.onclick = () => printDocument('Lab report', labReportHtml(order, { hospitalName: authStore.getState().activeOrgName, labSettings }))
     // Shared "invoice + pay" flow for the header button and the per-test

@@ -398,6 +398,45 @@ await test('bed_claims delete: orphan claim (holder removed) may be released', a
   await e.cleanup()
 })
 
+// ---- hospital-scoped printing settings ------------------------------------
+await test('organization printing settings: hospital admin may update its own configuration', async () => {
+  const e = await env({ uid: 'admin_a' })
+  const db = e.firestore()
+  await e.seed('organizations', 'org_a', { name: 'Hospital A', status: 'active' })
+  await e.seed('organization_memberships', 'org_a_admin_a', {
+    user_id: 'admin_a', organization_id: 'org_a', status: 'active',
+    capabilities: ['admin.roles.manage'],
+  })
+  await db.collection('organizations').doc('org_a').update({
+    printing_configuration: { letterhead_adjustment_enabled: true, top_offset_mm: 25 },
+  })
+  const saved = await db.collection('organizations').doc('org_a').get()
+  assert.equal(saved.data().printing_configuration.top_offset_mm, 25)
+  await e.cleanup()
+})
+
+await test('organization printing settings: hospital admin cannot modify another hospital configuration', async () => {
+  const e = await env({ uid: 'admin_a' })
+  const db = e.firestore()
+  await e.seed('organizations', 'org_a', { name: 'Hospital A', status: 'active' })
+  await e.seed('organizations', 'org_b', { name: 'Hospital B', status: 'active' })
+  await e.seed('organization_memberships', 'org_a_admin_a', {
+    user_id: 'admin_a', organization_id: 'org_a', status: 'active',
+    capabilities: ['admin.roles.manage'],
+  })
+  await e.seed('organization_memberships', 'org_b_admin_b', {
+    user_id: 'admin_b', organization_id: 'org_b', status: 'active',
+    capabilities: ['admin.roles.manage'],
+  })
+  await assert.rejects(
+    db.collection('organizations').doc('org_b').update({
+      printing_configuration: { letterhead_adjustment_enabled: true, top_offset_mm: 40 },
+    }),
+    /permission-denied/,
+  )
+  await e.cleanup()
+})
+
 // ---- summary ----------------------------------------------------------------
 
 console.log('')

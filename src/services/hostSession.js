@@ -1,6 +1,6 @@
 // Host-verified device identity for shared LAN handoffs when Firebase cannot
 // refresh a short-lived ID token during an internet outage.
-import { getOrCreateDeviceKey, readDeviceSession, signedSpeechRequest } from './speechSession.js'
+import { getOrCreateDeviceKey, readDeviceSession, signedDeviceRequest } from './deviceSession.js'
 
 function hostBaseUrl() {
   try {
@@ -20,7 +20,7 @@ export async function registerHostSession(user, orgId) {
       authorization: 'Bearer ' + token,
       'content-type': 'application/json',
       'x-medilog-client': 'medilogng-web',
-      'x-speech-device': device.deviceId,
+      'x-device-device': device.deviceId,
     }, body: JSON.stringify({ publicKey: device.publicKey }), cache: 'no-store',
     signal: AbortSignal.timeout(4000),
   })
@@ -41,7 +41,7 @@ export async function revalidateHostSession(user, orgId) {
   if (!device) return false
   try {
     const token = await user.getIdToken(true)
-    const response = await signedSpeechRequest('/device/session/revalidate?orgId=' + encodeURIComponent(orgId), {
+    const response = await signedDeviceRequest('/device/session/revalidate?orgId=' + encodeURIComponent(orgId), {
       method: 'POST', headers: { authorization: 'Bearer ' + token },
     }, device)
     return response.ok
@@ -51,7 +51,7 @@ export async function revalidateHostSession(user, orgId) {
 export async function revokeHostSession(device) {
   if (!device?.deviceId || !device.orgId) return false
   try {
-    const response = await signedSpeechRequest('/device/session/revoke?orgId=' + encodeURIComponent(device.orgId), {
+    const response = await signedDeviceRequest('/device/session/revoke?orgId=' + encodeURIComponent(device.orgId), {
       method: 'POST', signal: AbortSignal.timeout(1500),
     }, device)
     return response.ok

@@ -247,36 +247,6 @@
 .soap-note-letter { display: inline-flex; align-items: center; justify-content: center; color: var(--emr-info); font-weight: 800; cursor: help; }
 .soap-note-letter:focus-visible { outline: 2px solid var(--emr-info); outline-offset: 2px; }
 .soap-note-field textarea.input { box-sizing: border-box; width: 100%; height: 34px; min-height: 34px; margin: 0 !important; overflow-y: hidden; overflow-wrap: anywhere; padding: 6px 8px; line-height: 1.25; resize: none; }
-.soap-note-field .speech-control { grid-column: 3; grid-row: 1; align-self: stretch; position: relative; margin: 0; }
-.soap-note-field .speech-control-row { min-height: 34px; height: 34px; justify-content: center; gap: 0; }
-.soap-note-field .speech-record { width: 32px; height: 32px; min-height: 32px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
-.soap-note-field .speech-record:hover { background: #eff6ff; border-color: #bfdbfe; }
-.soap-note-field .speech-record-label { display: none; }
-.soap-note-field .speech-status { position: absolute; top: calc(100% + 2px); right: 0; z-index: 3; width: max-content; max-width: min(50vw, 240px); padding: 2px 5px; border-radius: 4px; background: #fff; }
-.soap-note-field .speech-review { grid-column: 2 / 4; }
-.soap-note-field:has(.speech-review:not([hidden])) .speech-control { grid-column: 2 / 4; grid-row: 2; }
-.soap-note-field:has(.speech-transcribe:not([hidden])) .speech-control { grid-column: 2 / 4; grid-row: 2; }
-.soap-note-field:has(.speech-transcribe:not([hidden])) .speech-control-row { height: auto; min-height: 34px; justify-content: flex-start; flex-wrap: wrap; gap: 6px; }
-.speech-control { min-width: 0; margin-top: 4px; color: var(--emr-muted); }
-.speech-control-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-.speech-record, .speech-cancel, .speech-transcribe { min-height: 30px; padding: 4px 9px; border: 1px solid #cbd5e1; border-radius: 7px; background: #f8fafc; color: #1e3a5f; font: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
-.speech-transcribe { color: #1d4ed8; }
-.speech-pending-select { max-width: 220px; min-height: 30px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #1e3a5f; font: inherit; font-size: .76rem; }
-.speech-record { display: inline-flex; align-items: center; gap: 5px; }
-.speech-record:hover, .speech-cancel:hover, .speech-transcribe:hover { background: #eff6ff; border-color: #93c5fd; }
-.speech-record:focus-visible, .speech-cancel:focus-visible, .speech-transcribe:focus-visible, .speech-review-actions button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
-.speech-record.is-recording { background: #fff1f2; color: #b91c1c; border-color: #fda4af; }
-.speech-record.is-recording > span:first-child { animation: speech-pulse 1.2s ease-in-out infinite; }
-.speech-status { min-width: 0; overflow-wrap: anywhere; font-size: .76rem; }
-.speech-status[data-kind="error"] { color: #b91c1c; }
-.speech-status[data-kind="success"] { color: #166534; }
-.speech-status[data-kind="warning"] { color: #92400e; }
-.speech-review { display: grid; gap: 6px; margin-top: 6px; padding: 8px; border-radius: 8px; background: #f1f6fb; }
-.speech-review-label { color: #334155; font-size: .76rem; font-weight: 650; }
-.speech-transcript.input { width: 100%; min-height: 64px; box-sizing: border-box; resize: vertical; font-size: .84rem; }
-.speech-review-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
-@keyframes speech-pulse { 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .speech-record.is-recording > span:first-child { animation: none; } }
 .soap-note-actions { justify-content: flex-end; }
 .enc-admission-card, .enc-admission-none { padding: 9px 11px; border: 1px solid #bbebd2; border-radius: 9px; background: #f0faf4; color: #315c45; font-size: .78rem; }
 .enc-admission-card { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
@@ -293,16 +263,6 @@
 .enc-plan-color-toggle { color: #b91c1c; font-size: .98rem; }
 .enc-plan-color-swatch { width: 13px; height: 3px; margin: 0 0 -8px -10px; border-radius: 2px; background: #111827; }
 .enc-plan-toolbar-spacer { flex: 1; min-width: 2px; }
-.enc-plan-speech-slot { display: inline-flex; flex: none; align-items: center; }
-.enc-plan-speech-slot .speech-control { position: relative; width: 30px; margin: 0; }
-.enc-plan-speech-slot .speech-control-row { width: 30px; height: 30px; min-height: 30px; justify-content: center; gap: 0; }
-.enc-plan-speech-slot .speech-record { width: 30px; height: 30px; min-height: 30px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
-.enc-plan-speech-slot .speech-record:hover { background: #eaf1f7; border-color: transparent; }
-.enc-plan-speech-slot .speech-record-label { display: none; }
-.enc-plan-speech-slot .speech-status { position: absolute; top: 31px; left: 0; z-index: 6; width: max-content; max-width: 220px; padding: 2px 5px; border-radius: 4px; background: #fff; box-shadow: 0 1px 4px rgba(15,30,46,.12); }
-.enc-plan-speech-slot .speech-cancel { position: absolute; top: 31px; left: 0; z-index: 7; }
-.enc-plan-speech-slot .speech-review { position: absolute; top: 35px; left: 0; z-index: 6; width: min(420px, calc(100vw - 48px)); box-sizing: border-box; border: 1px solid var(--emr-line); box-shadow: 0 8px 24px rgba(15,30,46,.16); }
-.enc-plan-speech-slot .speech-transcribe, .enc-plan-speech-slot .speech-pending-select { position: absolute; top: 31px; left: 0; z-index: 7; width: max-content; max-width: min(75vw, 240px); }
 .enc-plan-state { max-width: 80px; overflow: hidden; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .enc-plan-expand { font-size: 1.1rem; }
 .enc-plan-save { flex: none; padding: 5px 10px; }
@@ -1013,8 +973,8 @@ a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
     color: #000;
     /* Georgia / Times: standard for clinical/legal documents worldwide */
     font-family: Georgia, 'Times New Roman', Times, serif;
-    font-size: 10.5pt;
-    line-height: 1.5;
+    font-size: 10pt;
+    line-height: 1.4;
     counter-reset: page 1;
   }
 
@@ -1071,24 +1031,26 @@ a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
   .p-meta {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 14px;
-    font-size: 9.5pt;
+    margin-bottom: 10px;
+    font-size: 8.8pt;
   }
   .p-meta tr:nth-child(even) td { background: #f5f7fa; }
   .p-meta td {
-    padding: 4px 10px;
+    padding: 3px 7px;
     vertical-align: top;
     border-bottom: 1px solid #ddd;
   }
   .p-meta td.k {
     color: #1a3a5c;
-    width: 30%;
+    width: 15%;
     font-weight: 700;
     font-family: 'Segoe UI', Arial, sans-serif;
-    font-size: 9pt;
+    font-size: 8.2pt;
     text-transform: uppercase;
     letter-spacing: .03em;
   }
+  .p-meta td:nth-child(3) { border-left: 1px solid #ddd; }
+  .p-meta td.empty { background: transparent !important; border-bottom-color: transparent; }
 
   /* ── Section headings ───────────────────────────────────────────────────── */
   .p-h4 {
@@ -1111,8 +1073,8 @@ a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
   .p-tbl {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 10px;
-    font-size: 10pt;
+    margin-bottom: 8px;
+    font-size: 8.5pt;
     page-break-inside: auto;
   }
   .p-tbl thead { display: table-header-group; }
@@ -1122,17 +1084,17 @@ a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
     font-family: 'Segoe UI', Arial, sans-serif;
-    font-size: 9pt;
+    font-size: 7.7pt;
     font-weight: 700;
-    padding: 6px 8px;
+    padding: 3px 5px;
     border: 1px solid #0f2540;
     text-align: left;
     letter-spacing: .02em;
   }
   .p-tbl td {
     border: 1px solid #bbb;
-    padding: 5px 8px;
-    font-size: 10pt;
+    padding: 2px 5px;
+    font-size: 8.5pt;
     text-align: left;
     vertical-align: top;
   }
@@ -1196,20 +1158,20 @@ a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
 
   /* ── Lab report: per-test item block ──────────────────────────────────── */
   .p-item-head {
-    margin: 16px 0 0;
-    padding: 7px 10px;
+    margin: 10px 0 0;
+    padding: 4px 7px;
     background: #e8edf4 !important;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
     border: 1px solid #1a3a5c;
     border-left: 4px solid #1a3a5c;
-    font-size: 10.5pt;
+    font-size: 9pt;
     page-break-after: avoid;
   }
-  .p-item-head strong { color: #1a3a5c; font-size: 11pt; }
-  .p-item-head .p-code { color: #444; font-weight: 400; font-size: 9.5pt; margin-left: 8px; }
-  .p-item-head .p-acc  { display: inline-block; margin-left: 14px; font-size: 9pt; color: #333; font-style: italic; }
-  .p-item-head .p-spec { display: inline-block; margin-left: 14px; font-size: 9pt; color: #333; }
+  .p-item-head strong { color: #1a3a5c; font-size: 9.5pt; }
+  .p-item-head .p-code { color: #444; font-weight: 400; font-size: 8.5pt; margin-left: 6px; }
+  .p-item-head .p-acc  { display: inline-block; margin-left: 10px; font-size: 8.2pt; color: #333; font-style: italic; }
+  .p-item-head .p-spec { display: inline-block; margin-left: 10px; font-size: 8.2pt; color: #333; }
 
   /* Flag cells in result tables */
   .p-flag      { font-weight: 800; font-size: 9pt; }
@@ -1308,6 +1270,273 @@ a, button, .chip, .side-nav a, .bed, .tabs button, .card, label, .ck {
   .rep-tbl tbody tr:nth-child(even) td { background: #f8fafc; }
   .rep-tbl .num { text-align: right; }
   .rep-pagebreak { page-break-before: always; }
+}
+
+/* ---- In-app laboratory report preview ----------------------------------- */
+/* The document styles above intentionally live inside @media print. These
+   screen styles give the same report a comfortable, readable reading layout
+   when the clinician chooses View report instead of Print. */
+.modal-body > .lab-report-preview {
+  margin: calc(var(--modal-pad, 18px) * -1);
+  padding: 24px;
+  background: #eef3f7;
+}
+.lab-report-sheet {
+  position: relative;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 34px 40px 30px;
+  overflow: hidden;
+  color: #172033;
+  background: #fff;
+  border: 1px solid #d8e1ea;
+  border-radius: 14px;
+  box-shadow: 0 12px 30px rgba(15, 30, 46, .12);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.lab-report-sheet .p-confidential {
+  margin: -8px 0 22px;
+  padding: 7px 12px;
+  color: #526276;
+  background: #f7fafc;
+  border: 1px solid #dce6ee;
+  border-radius: 7px;
+  font-size: .72rem;
+  line-height: 1.35;
+  text-align: center;
+}
+.lab-report-sheet .p-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+  border-bottom: 3px solid #0e6b5e;
+}
+.lab-report-sheet .p-left { min-width: 0; }
+.lab-report-sheet .p-hospital {
+  color: #123b59;
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  line-height: 1.2;
+}
+.lab-report-sheet .p-sub {
+  margin-top: 5px;
+  color: #617286;
+  font-size: .82rem;
+}
+.lab-report-sheet .p-doctitle {
+  flex: none;
+  padding: 9px 13px;
+  color: #fff;
+  background: #123b59;
+  border-radius: 8px;
+  font-size: .78rem;
+  font-weight: 800;
+  letter-spacing: .1em;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+.lab-report-sheet .p-meta {
+  width: 100%;
+  margin: 0 0 26px;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid #dbe5ec;
+  border-radius: 10px;
+  font-size: .84rem;
+}
+.lab-report-sheet .p-meta tr:nth-child(even) td { background: #fbfdff; }
+.lab-report-sheet .p-meta td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5ebf0;
+  vertical-align: top;
+}
+.lab-report-sheet .p-meta tr:last-child td { border-bottom: 0; }
+.lab-report-sheet .p-meta td.k {
+  width: 14%;
+  color: #526276;
+  font-size: .68rem;
+  font-weight: 800;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.lab-report-sheet .p-meta td:nth-child(3) { border-left: 1px solid #e5ebf0; }
+.lab-report-sheet .p-meta td.empty { background: #fff !important; }
+.lab-report-sheet .p-h4 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 28px 0 12px;
+  color: #123b59;
+  font-size: .78rem;
+  font-weight: 800;
+  letter-spacing: .1em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.lab-report-sheet .p-h4::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: #dbe5ec;
+}
+.lab-report-sheet .p-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 12px;
+  margin: 18px 0 0;
+  padding: 12px 14px;
+  color: #123b59;
+  background: #eff7f6 !important;
+  border: 1px solid #c7e3de;
+  border-left: 4px solid #0e6b5e;
+  border-radius: 8px 8px 0 0;
+  font-size: .84rem;
+}
+.lab-report-sheet .p-item-head strong { color: #123b59; font-size: 1rem; }
+.lab-report-sheet .p-item-head .p-code,
+.lab-report-sheet .p-item-head .p-acc,
+.lab-report-sheet .p-item-head .p-spec { margin-left: 0; color: #607387; font-size: .76rem; }
+.lab-report-sheet .p-tbl {
+  width: 100%;
+  margin: 0 0 18px;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid #d8e1e8;
+  border-radius: 0 0 8px 8px;
+  font-size: .84rem;
+}
+.lab-report-sheet .p-tbl th {
+  padding: 10px 12px;
+  color: #fff !important;
+  background: #123b59 !important;
+  border: 0;
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.lab-report-sheet .p-tbl td {
+  padding: 11px 12px;
+  border: 0;
+  border-top: 1px solid #e5ebf0;
+  color: #334155;
+  vertical-align: top;
+}
+.lab-report-sheet .p-tbl tbody tr:nth-child(even) td { background: #f8fbfd; }
+.lab-report-sheet .p-tbl tbody tr:hover td { background: #eef7f6; }
+.lab-report-sheet .p-tbl td strong { color: #172033; }
+.lab-report-sheet .p-res-tbl th:nth-child(2),
+.lab-report-sheet .p-res-tbl td:nth-child(2) { min-width: 120px; }
+.lab-report-sheet .p-flag { font-weight: 800; text-align: center; }
+.lab-report-sheet .p-flag.high,
+.lab-report-sheet .p-flag.crit { color: #b42318; }
+.lab-report-sheet .p-flag.low { color: #1d4ed8; }
+.lab-report-sheet .p-flag.crit { background: #fff1f0 !important; }
+.lab-report-sheet .p-remark {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: .76rem;
+  font-style: italic;
+}
+.lab-report-sheet .p-res {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  color: #172033;
+  background: #f8fbfd;
+  border: 1px solid #d8e1e8;
+  border-left: 4px solid #0e6b5e;
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+.lab-report-sheet .p-pending {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  color: #8a4b08;
+  background: #fff8e8;
+  border: 1px solid #f2d39a;
+  border-radius: 8px;
+  font-size: .84rem;
+  font-style: normal;
+}
+.lab-report-sheet .p-note {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  color: #8a4b08;
+  background: #fff8e8 !important;
+  border-left: 4px solid #d58b17;
+  border-radius: 7px;
+  font-size: .82rem;
+  font-style: normal;
+}
+.lab-report-sheet .p-sign {
+  display: flex;
+  gap: 28px;
+  margin-top: 34px;
+  padding-top: 20px;
+  border-top: 1px solid #dbe5ec;
+}
+.lab-report-sheet .p-sign > div { flex: 1; }
+.lab-report-sheet .p-line { margin-top: 18px; border-top-color: #8493a3; }
+.lab-report-sheet .p-cap { color: #617286; font-size: .76rem; }
+.lab-report-sheet .p-end-of-report {
+  margin: 26px 0 0;
+  padding: 10px 0;
+  color: #617286;
+  border-top: 1px solid #cbd7e1;
+  border-bottom: 1px solid #cbd7e1;
+  font-size: .72rem;
+  letter-spacing: .14em;
+  text-align: center;
+}
+.lab-report-sheet .p-foot {
+  margin-top: 26px;
+  padding-top: 12px;
+  color: #7b8a9a;
+  border-top: 1px solid #e5ebf0;
+  font-size: .7rem;
+  text-align: center;
+}
+.lab-report-sheet .p-watermark {
+  position: absolute;
+  top: 48%;
+  left: 50%;
+  z-index: 0;
+  color: rgba(14, 107, 94, .06);
+  font-size: 5rem;
+  font-weight: 900;
+  letter-spacing: .12em;
+  pointer-events: none;
+  transform: translate(-50%, -50%) rotate(-28deg);
+  white-space: nowrap;
+}
+.lab-report-sheet > :not(.p-watermark) { position: relative; z-index: 1; }
+
+@media (max-width: 700px) {
+  .modal-body > .lab-report-preview { padding: 10px; }
+  .lab-report-sheet { padding: 24px 18px 22px; border-radius: 10px; font-size: 13px; }
+  .lab-report-sheet .p-head { display: block; margin-bottom: 16px; padding-bottom: 14px; }
+  .lab-report-sheet .p-doctitle { display: inline-block; margin-top: 14px; }
+  .lab-report-sheet .p-meta { display: block; }
+  .lab-report-sheet .p-meta tr,
+  .lab-report-sheet .p-meta td { display: block; width: 100%; }
+  .lab-report-sheet .p-meta td.k { padding-bottom: 2px; }
+  .lab-report-sheet .p-meta td:nth-child(3) { border-left: 0; }
+  .lab-report-sheet .p-meta td.empty { display: none; }
+  .lab-report-sheet .p-tbl { display: block; overflow-x: auto; white-space: nowrap; }
+  .lab-report-sheet .p-tbl th,
+  .lab-report-sheet .p-tbl td { padding: 9px 10px; }
+  .lab-report-sheet .p-sign { gap: 14px; }
+  .lab-report-sheet .p-watermark { font-size: 2.6rem; }
 }
 
 /* Photo avatar in patient header */

@@ -35,8 +35,8 @@ export async function saveLastLogin(email) {
 export async function logout() {
   const { user } = authStore.getState()
   if (user?.uid) {
-    const { clearAllSpeechSessions } = await import('./speechSession.js')
-    await clearAllSpeechSessions(user.uid)
+    const { clearAllDeviceSessions } = await import('./deviceSession.js')
+    await clearAllDeviceSessions(user.uid)
   }
   await signOut(auth)
 }
@@ -58,8 +58,8 @@ export function myActiveMembership() {
 export async function forceLogout(reason) {
   const { user } = authStore.getState()
   if (user?.uid) {
-    const { clearAllSpeechSessions } = await import('./speechSession.js')
-    await clearAllSpeechSessions(user.uid)
+    const { clearAllDeviceSessions } = await import('./deviceSession.js')
+    await clearAllDeviceSessions(user.uid)
   }
   await signOut(auth)
 }
@@ -82,8 +82,8 @@ export function initAuthListener() {
     const user = auth.currentUser
     if (!user || !navigator.onLine) return
     try {
-      const { revalidateAllSpeechSessions } = await import('./speechSession.js')
-      await revalidateAllSpeechSessions(user)
+      const { revalidateAllDeviceSessions } = await import('./deviceSession.js')
+      await revalidateAllDeviceSessions(user)
     } catch (e) { console.warn('[auth] offline Host device-session revalidation deferred:', e?.message || e) }
   }
   window.addEventListener('online', () => { void revalidateCachedSpeech() })
